@@ -1,0 +1,46 @@
+{
+  "end_date": "2026-04-23",
+  "feature_rows": 6012,
+  "files": {
+    "features": "D:\\QuantWithNNkNN\\data\\massive_sp500_current_constituents_history\\processed\\market_context_features.csv",
+    "raw_bars": "D:\\QuantWithNNkNN\\data\\massive_sp500_current_constituents_history\\raw\\market_context_bars.csv"
+  },
+  "flatfile_dataset": null,
+  "flatfile_status": [],
+  "generated_utc": "2026-04-24T18:32:39Z",
+  "rate_limit": {
+    "calls": 5,
+    "period_seconds": 60.0
+  },
+  "raw_rows": 6012,
+  "sector_etf_by_gics": {
+    "Communication Services": "XLC",
+    "Consumer Discretionary": "XLY",
+    "Consumer Staples": "XLP",
+    "Energy": "XLE",
+    "Financials": "XLF",
+    "Health Care": "XLV",
+    "Industrials": "XLI",
+    "Information Technology": "XLK",
+    "Materials": "XLB",
+    "Real Estate": "XLRE",
+    "Utilities": "XLU"
+  },
+  "source": "Massive ticker range daily aggregates",
+  "start_date": "2024-04-24",
+  "tickers": [
+    "SPY",
+    "XLB",
+    "XLC",
+    "XLE",
+    "XLF",
+    "XLI",
+    "XLK",
+    "XLP",
+    "XLRE",
+    "XLU",
+    "XLV",
+    "XLY"
+  ],
+  "timing": "End-of-day context. Downstream joins must use context dates <= anchor_date."
+}

@@ -1,0 +1,558 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Sequence
+
+import numpy as np
+import pandas as pd
+
+
+DEFAULT_HORIZONS = (1, 5, 10, 20)
+DEFAULT_WINDOW_LENGTH = 60
+DEFAULT_BENCHMARK_TICKER = "SPY"
+
+SECTOR_ETF_BY_GICS = {
+    "Communication Services": "XLC",
+    "Consumer Discretionary": "XLY",
+    "Consumer Staples": "XLP",
+    "Energy": "XLE",
+    "Financials": "XLF",
+    "Health Care": "XLV",
+    "Industrials": "XLI",
+    "Information Technology": "XLK",
+    "Materials": "XLB",
+    "Real Estate": "XLRE",
+    "Utilities": "XLU",
+}
+
+MARKET_CONTEXT_TICKERS = tuple(sorted({DEFAULT_BENCHMARK_TICKER, *SECTOR_ETF_BY_GICS.values()}))
+
+IDENTIFIER_COLUMNS = {
+    "date",
+    "ticker",
+    "gics_sector",
+    "gics_sub_industry",
+    "adjusted",
+    "timestamp_ms",
+}
+
+RAW_LEVEL_COLUMNS = {
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "vwap",
+    "transactions",
+    "dollar_volume",
+    "prev_close",
+    "sma_close_20d",
+    "sma_close_60d",
+    "rolling_avg_volume_20d",
+    "rolling_avg_volume_60d",
+    "rolling_avg_dollar_volume_20d",
+    "rolling_avg_dollar_volume_60d",
+}
+
+BASE_STOCK_FEATURES = [
+    "return_1d",
+    "log_return_1d",
+    "gap_pct",
+    "intraday_return",
+    "hl_range_pct",
+    "close_to_vwap_pct",
+    "rolling_return_5d",
+    "rolling_return_20d",
+    "rolling_return_60d",
+    "rolling_vol_20d",
+    "rolling_vol_60d",
+    "price_vs_sma_20d",
+    "price_vs_sma_60d",
+    "momentum_20d",
+    "momentum_60d",
+    "volume_ratio_20d",
+    "log1p_volume",
+    "log1p_dollar_volume",
+    "log1p_rolling_avg_volume_20d",
+    "log1p_rolling_avg_volume_60d",
+    "log1p_rolling_avg_dollar_volume_20d",
+    "log1p_rolling_avg_dollar_volume_60d",
+]
+
+CONTEXT_FEATURES = [
+    "return_1d",
+    "log_return_1d",
+    "gap_pct",
+    "intraday_return",
+    "hl_range_pct",
+    "close_to_vwap_pct",
+    "rolling_return_5d",
+    "rolling_return_20d",
+    "rolling_return_60d",
+    "rolling_vol_20d",
+    "rolling_vol_60d",
+    "price_vs_sma_20d",
+    "price_vs_sma_60d",
+    "momentum_20d",
+    "momentum_60d",
+    "volume_ratio_20d",
+]
+
+FEATURE_SET_NAMES = (
+    "stock_only",
+    "stock_relative",
+    "stock_relative_market",
+    "stock_relative_market_sector",
+)
+
+
+@dataclass(frozen=True)
+class V1Dataset:
+    metadata: pd.DataFrame
+    targets: pd.DataFrame
+    feature_sets: dict[str, pd.DataFrame]
+    target_columns: list[str]
+    feature_columns: dict[str, list[str]]
+    split_by_date: dict[str, tuple[str, str]]
+
+
+def parse_horizons(value: str | Sequence[int] | None) -> tuple[int, ...]:
+    if value is None:
+        return DEFAULT_HORIZONS
+    if isinstance(value, str):
+        return tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    return tuple(int(item) for item in value)
+
+
+def target_column(horizon: int) -> str:
+    return f"market_adjusted_return_{horizon}d"
+
+
+def _read_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(str(path))
+    return pd.read_csv(path)
+
+
+def load_daily_features(dataset_root: str | Path) -> pd.DataFrame:
+    root = Path(dataset_root)
+    normalized = root / "processed" / "daily_features_normalized.csv"
+    processed = root / "processed" / "daily_features.csv"
+    path = normalized if normalized.exists() else processed
+    df = _read_csv(path)
+    df["ticker"] = df["ticker"].astype(str).str.upper()
+    df["date"] = df["date"].astype(str)
+    return df
+
+
+def load_market_context_features(dataset_root: str | Path, stock_features: pd.DataFrame | None = None) -> pd.DataFrame:
+    root = Path(dataset_root)
+    context_path = root / "processed" / "market_context_features.csv"
+    if context_path.exists():
+        df = pd.read_csv(context_path)
+    elif stock_features is not None:
+        df = stock_features[stock_features["ticker"].isin(MARKET_CONTEXT_TICKERS)].copy()
+    else:
+        df = pd.DataFrame()
+    if not df.empty:
+        df["ticker"] = df["ticker"].astype(str).str.upper()
+        df["date"] = df["date"].astype(str)
+    return df
+
+
+def _available_numeric_columns(df: pd.DataFrame, requested: Sequence[str]) -> list[str]:
+    return [col for col in requested if col in df.columns and pd.api.types.is_numeric_dtype(df[col])]
+
+
+def select_stock_feature_columns(df: pd.DataFrame, include_relative: bool) -> list[str]:
+    cols = _available_numeric_columns(df, BASE_STOCK_FEATURES)
+    if include_relative:
+        relative = [
+            col
+            for col in df.columns
+            if (
+                col.endswith("__cs_z")
+                or col.endswith("__cs_pct")
+                or col.endswith("__sector_cs_z")
+                or col.endswith("__sector_cs_pct")
+            )
+            and pd.api.types.is_numeric_dtype(df[col])
+        ]
+        cols.extend(relative)
+    return list(dict.fromkeys(cols))
+
+
+def select_context_feature_columns(df: pd.DataFrame) -> list[str]:
+    return _available_numeric_columns(df, CONTEXT_FEATURES)
+
+
+def add_window_summaries(
+    df: pd.DataFrame,
+    *,
+    feature_cols: Sequence[str],
+    prefix: str,
+    window_length: int,
+) -> pd.DataFrame:
+    if not feature_cols:
+        return df[["ticker", "date"]].copy()
+
+    source = df[["ticker", "date", *feature_cols]].copy()
+    source = source.sort_values(["ticker", "date"]).reset_index(drop=True)
+    grouped = source.groupby("ticker", sort=False)
+    columns: dict[str, pd.Series] = {
+        "ticker": source["ticker"],
+        "date": source["date"],
+    }
+
+    for col in feature_cols:
+        series = grouped[col]
+        safe_col = col.replace(".", "_")
+        columns[f"{prefix}{safe_col}__last"] = source[col]
+        columns[f"{prefix}{safe_col}__mean60"] = series.transform(
+            lambda values: values.rolling(window_length, min_periods=window_length).mean()
+        )
+        columns[f"{prefix}{safe_col}__std60"] = series.transform(
+            lambda values: values.rolling(window_length, min_periods=window_length).std(ddof=0)
+        )
+    return pd.DataFrame(columns)
+
+
+def build_multi_horizon_targets(
+    stock_features: pd.DataFrame,
+    context_features: pd.DataFrame,
+    *,
+    horizons: Sequence[int],
+    window_length: int,
+    benchmark_ticker: str = DEFAULT_BENCHMARK_TICKER,
+) -> pd.DataFrame:
+    benchmark = context_features[context_features["ticker"] == benchmark_ticker.upper()].copy()
+    if benchmark.empty:
+        raise ValueError(
+            f"Benchmark ticker {benchmark_ticker} is missing. Build "
+            "processed/market_context_features.csv before training V1 baselines."
+        )
+    benchmark_close_by_date = benchmark.set_index("date")["close"].astype(float)
+
+    excluded = set(MARKET_CONTEXT_TICKERS)
+    if benchmark_ticker.upper():
+        excluded.add(benchmark_ticker.upper())
+    stocks = stock_features[~stock_features["ticker"].isin(excluded)].copy()
+    stocks = stocks.sort_values(["ticker", "date"]).reset_index(drop=True)
+    stocks["window_row_count"] = stocks.groupby("ticker").cumcount() + 1
+
+    target_frames: list[pd.DataFrame] = []
+    max_horizon = max(horizons)
+    for _, group in stocks.groupby("ticker", sort=False):
+        group = group.copy()
+        for horizon in horizons:
+            future_close = group["close"].shift(-horizon).astype(float)
+            future_date = group["date"].shift(-horizon)
+            stock_return = future_close / group["close"].astype(float) - 1.0
+            benchmark_anchor = group["date"].map(benchmark_close_by_date)
+            benchmark_future = future_date.map(benchmark_close_by_date)
+            benchmark_return = benchmark_future / benchmark_anchor - 1.0
+            group[target_column(horizon)] = stock_return - benchmark_return
+            group[f"future_date_{horizon}d"] = future_date
+        group["has_all_future_horizons"] = group.groupby("ticker").cumcount() <= len(group) - max_horizon - 1
+        target_frames.append(group)
+
+    targets = pd.concat(target_frames, ignore_index=True) if target_frames else pd.DataFrame()
+    target_cols = [target_column(h) for h in horizons]
+    keep_cols = [
+        "ticker",
+        "date",
+        "gics_sector",
+        "gics_sub_industry",
+        "window_row_count",
+        *target_cols,
+    ]
+    targets = targets[keep_cols]
+    targets = targets[targets["window_row_count"] >= window_length]
+    targets = targets.dropna(subset=target_cols)
+    targets = targets.rename(columns={"date": "anchor_date"})
+    targets["sector_etf"] = targets["gics_sector"].map(SECTOR_ETF_BY_GICS)
+    return targets.reset_index(drop=True)
+
+
+def _merge_context(
+    base: pd.DataFrame,
+    context_summary: pd.DataFrame,
+    *,
+    ticker: str | None,
+    ticker_column: str | None,
+    prefix: str,
+) -> pd.DataFrame:
+    if context_summary.empty:
+        base[f"{prefix}context_missing"] = 1.0
+        return base
+    context = context_summary.copy()
+    if ticker is not None:
+        context = context[context["ticker"] == ticker]
+    left = base.copy()
+    if ticker_column is None:
+        left = left.merge(context.drop(columns=["ticker"]), left_on="anchor_date", right_on="date", how="left")
+        left = left.drop(columns=["date"], errors="ignore")
+    else:
+        context = context.rename(columns={"ticker": "_context_ticker"})
+        left = left.merge(
+            context,
+            left_on=["anchor_date", ticker_column],
+            right_on=["date", "_context_ticker"],
+            how="left",
+            suffixes=("", f"_{prefix}context"),
+        )
+        left = left.drop(columns=["date", "_context_ticker"], errors="ignore")
+    feature_cols = [col for col in left.columns if col.startswith(prefix)]
+    left[f"{prefix}context_missing"] = left[feature_cols].isna().all(axis=1).astype(float) if feature_cols else 1.0
+    return left
+
+
+def build_v1_dataset(
+    stock_features: pd.DataFrame,
+    context_features: pd.DataFrame,
+    *,
+    horizons: Sequence[int] = DEFAULT_HORIZONS,
+    window_length: int = DEFAULT_WINDOW_LENGTH,
+    benchmark_ticker: str = DEFAULT_BENCHMARK_TICKER,
+    max_episodes: int | None = None,
+) -> V1Dataset:
+    horizons = tuple(horizons)
+    target_cols = [target_column(horizon) for horizon in horizons]
+    targets = build_multi_horizon_targets(
+        stock_features,
+        context_features,
+        horizons=horizons,
+        window_length=window_length,
+        benchmark_ticker=benchmark_ticker,
+    )
+    if max_episodes is not None and len(targets) > max_episodes:
+        targets = targets.sort_values(["anchor_date", "ticker"]).tail(max_episodes).reset_index(drop=True)
+
+    stock_only_cols = select_stock_feature_columns(stock_features, include_relative=False)
+    stock_relative_cols = select_stock_feature_columns(stock_features, include_relative=True)
+    context_cols = select_context_feature_columns(context_features)
+
+    stock_only_summary = add_window_summaries(
+        stock_features,
+        feature_cols=stock_only_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_relative_summary = add_window_summaries(
+        stock_features,
+        feature_cols=stock_relative_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    context_summary = add_window_summaries(
+        context_features,
+        feature_cols=context_cols,
+        prefix="context_",
+        window_length=window_length,
+    )
+
+    metadata = targets[["ticker", "anchor_date", "gics_sector", "gics_sub_industry", "sector_etf"]].copy()
+    stock_only = targets.merge(
+        stock_only_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+    stock_relative = targets.merge(
+        stock_relative_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+
+    def feature_frame(base: pd.DataFrame, *, include_market: bool, include_sector: bool) -> pd.DataFrame:
+        frame = base.copy()
+        if include_market:
+            market_context = context_summary.add_prefix("market_")
+            market_context = market_context.rename(columns={"market_ticker": "ticker", "market_date": "date"})
+            frame = _merge_context(frame, market_context, ticker=benchmark_ticker.upper(), ticker_column=None, prefix="market_context_")
+        if include_sector:
+            sector_context = context_summary.add_prefix("sector_")
+            sector_context = sector_context.rename(columns={"sector_ticker": "ticker", "sector_date": "date"})
+            frame = _merge_context(frame, sector_context, ticker=None, ticker_column="sector_etf", prefix="sector_context_")
+        return frame
+
+    frames = {
+        "stock_only": stock_only,
+        "stock_relative": stock_relative,
+        "stock_relative_market": feature_frame(stock_relative, include_market=True, include_sector=False),
+        "stock_relative_market_sector": feature_frame(stock_relative, include_market=True, include_sector=True),
+    }
+
+    feature_sets: dict[str, pd.DataFrame] = {}
+    feature_columns: dict[str, list[str]] = {}
+    non_features = {
+        "ticker",
+        "anchor_date",
+        "gics_sector",
+        "gics_sub_industry",
+        "sector_etf",
+        "window_row_count",
+        *target_cols,
+    }
+    for name, frame in frames.items():
+        numeric = [
+            col
+            for col in frame.columns
+            if col not in non_features and pd.api.types.is_numeric_dtype(frame[col])
+        ]
+        feature_sets[name] = frame[["ticker", "anchor_date", *numeric]].copy()
+        feature_columns[name] = numeric
+
+    return V1Dataset(
+        metadata=metadata,
+        targets=targets[["ticker", "anchor_date", *target_cols]].copy(),
+        feature_sets=feature_sets,
+        target_columns=target_cols,
+        feature_columns=feature_columns,
+        split_by_date={},
+    )
+
+
+def build_latest_v1_feature_sets(
+    stock_features: pd.DataFrame,
+    context_features: pd.DataFrame,
+    *,
+    window_length: int = DEFAULT_WINDOW_LENGTH,
+    benchmark_ticker: str = DEFAULT_BENCHMARK_TICKER,
+    anchor_date: str | None = None,
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], dict[str, list[str]]]:
+    cutoff = anchor_date
+    stocks = stock_features.copy()
+    context = context_features.copy()
+    if cutoff:
+        stocks = stocks[stocks["date"] <= cutoff]
+        context = context[context["date"] <= cutoff]
+
+    excluded = set(MARKET_CONTEXT_TICKERS)
+    excluded.add(benchmark_ticker.upper())
+    stocks = stocks[~stocks["ticker"].isin(excluded)].copy()
+    stocks = stocks.sort_values(["ticker", "date"]).reset_index(drop=True)
+    stocks["window_row_count"] = stocks.groupby("ticker").cumcount() + 1
+    latest_idx = stocks.groupby("ticker")["date"].idxmax()
+    latest = stocks.loc[latest_idx].copy()
+    latest = latest[latest["window_row_count"] >= window_length]
+    latest = latest.rename(columns={"date": "anchor_date"})
+    latest["sector_etf"] = latest["gics_sector"].map(SECTOR_ETF_BY_GICS)
+    metadata = latest[["ticker", "anchor_date", "gics_sector", "gics_sub_industry", "sector_etf"]].reset_index(drop=True)
+
+    stock_only_cols = select_stock_feature_columns(stock_features, include_relative=False)
+    stock_relative_cols = select_stock_feature_columns(stock_features, include_relative=True)
+    context_cols = select_context_feature_columns(context_features)
+    stock_only_summary = add_window_summaries(
+        stock_features,
+        feature_cols=stock_only_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_relative_summary = add_window_summaries(
+        stock_features,
+        feature_cols=stock_relative_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    context_summary = add_window_summaries(
+        context_features,
+        feature_cols=context_cols,
+        prefix="context_",
+        window_length=window_length,
+    )
+
+    base = metadata.copy()
+    stock_only = base.merge(
+        stock_only_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+    stock_relative = base.merge(
+        stock_relative_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+
+    def feature_frame(base_frame: pd.DataFrame, *, include_market: bool, include_sector: bool) -> pd.DataFrame:
+        frame = base_frame.copy()
+        if include_market:
+            market_context = context_summary.add_prefix("market_")
+            market_context = market_context.rename(columns={"market_ticker": "ticker", "market_date": "date"})
+            frame = _merge_context(frame, market_context, ticker=benchmark_ticker.upper(), ticker_column=None, prefix="market_context_")
+        if include_sector:
+            sector_context = context_summary.add_prefix("sector_")
+            sector_context = sector_context.rename(columns={"sector_ticker": "ticker", "sector_date": "date"})
+            frame = _merge_context(frame, sector_context, ticker=None, ticker_column="sector_etf", prefix="sector_context_")
+        return frame
+
+    frames = {
+        "stock_only": stock_only,
+        "stock_relative": stock_relative,
+        "stock_relative_market": feature_frame(stock_relative, include_market=True, include_sector=False),
+        "stock_relative_market_sector": feature_frame(stock_relative, include_market=True, include_sector=True),
+    }
+    non_features = {"ticker", "anchor_date", "gics_sector", "gics_sub_industry", "sector_etf"}
+    feature_sets: dict[str, pd.DataFrame] = {}
+    feature_columns: dict[str, list[str]] = {}
+    for name, frame in frames.items():
+        numeric = [
+            col
+            for col in frame.columns
+            if col not in non_features and pd.api.types.is_numeric_dtype(frame[col])
+        ]
+        feature_sets[name] = frame[["ticker", "anchor_date", *numeric]].copy()
+        feature_columns[name] = numeric
+    return metadata, feature_sets, feature_columns
+
+
+def chronological_split(metadata: pd.DataFrame, train_fraction: float = 0.7, val_fraction: float = 0.15) -> pd.Series:
+    dates = sorted(metadata["anchor_date"].dropna().unique().tolist())
+    if len(dates) < 3:
+        raise ValueError("Need at least three unique anchor dates for chronological train/val/test split.")
+    train_end = max(1, int(len(dates) * train_fraction))
+    val_end = max(train_end + 1, int(len(dates) * (train_fraction + val_fraction)))
+    val_end = min(val_end, len(dates) - 1)
+    train_dates = set(dates[:train_end])
+    val_dates = set(dates[train_end:val_end])
+    split = pd.Series("test", index=metadata.index, dtype="object")
+    split[metadata["anchor_date"].isin(train_dates)] = "train"
+    split[metadata["anchor_date"].isin(val_dates)] = "val"
+    return split
+
+
+def split_ranges(metadata: pd.DataFrame, split: pd.Series) -> dict[str, dict[str, str | int | None]]:
+    ranges: dict[str, dict[str, str | int | None]] = {}
+    for split_name in ("train", "val", "test"):
+        dates = metadata.loc[split == split_name, "anchor_date"]
+        ranges[split_name] = {
+            "row_count": int(len(dates)),
+            "start_date": str(dates.min()) if len(dates) else None,
+            "end_date": str(dates.max()) if len(dates) else None,
+        }
+    return ranges
+
+
+def prepare_xy(
+    dataset: V1Dataset,
+    feature_set: str,
+    split: pd.Series,
+    split_name: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    frame = dataset.feature_sets[feature_set]
+    rows = split == split_name
+    meta = dataset.metadata.loc[rows].reset_index(drop=True)
+    x = frame.loc[rows, dataset.feature_columns[feature_set]].reset_index(drop=True)
+    y = dataset.targets.loc[rows, dataset.target_columns].reset_index(drop=True)
+    return meta, x, y
+
+
+def save_dataset_manifest(path: str | Path, payload: dict[str, object]) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")

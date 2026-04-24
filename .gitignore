@@ -3,3 +3,6 @@ __pycache__/
 
 # Local credentials
 MassiveApiKey
+
+# Generated model runs
+artifacts/

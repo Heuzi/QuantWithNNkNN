@@ -28,6 +28,11 @@ Use this dataset for:
 - [processed/daily_features.csv](c:/Users/yexia/Documents/GitHub/QuantWithNNkNN/data/massive_sp500_current_constituents_history/processed/daily_features.csv): engineered Layer 2 daily features including returns, rolling returns, rolling volatility, rolling average volume, gap features, VWAP-relative features, and momentum-style features. This large generated CSV is versioned in Git LFS.
 - [processed/daily_features_normalized.csv](c:/Users/yexia/Documents/GitHub/QuantWithNNkNN/data/massive_sp500_current_constituents_history/processed/daily_features_normalized.csv): same-date full-panel and same-date sector-relative normalized features for quant-style modeling. This large generated CSV is versioned in Git LFS.
 - [processed/daily_features_normalized_manifest.json](c:/Users/yexia/Documents/GitHub/QuantWithNNkNN/data/massive_sp500_current_constituents_history/processed/daily_features_normalized_manifest.json): formulas, feature lists, universe definition, and PIT-safe timing assumptions for normalization
+- `processed/episode_index.csv`: completed supervised stock-window episodes with realized future targets, produced by `scripts/update_massive_daily_dataset.py`
+- `processed/prediction_windows.csv`: latest target-pending sliding windows for production-style prediction after an update, produced by `scripts/update_massive_daily_dataset.py`
+- `processed/incremental_update_manifest.json`: audit record for the latest incremental refresh and rebuild
+- `raw/market_context_bars.csv`: optional SPY and sector ETF raw context bars for V1 supervised models, produced by `scripts/collect_massive_market_context.py`
+- `processed/market_context_features.csv`: optional SPY and sector ETF engineered context features used for market-adjusted targets and context inputs
 
 ## Current Scale
 
@@ -47,4 +52,8 @@ Use this dataset for:
 
 - Prefer this folder when you need broad large-cap daily market data rather than a tiny smoke-test sample.
 - Before training, build a processed feature table and episode index from `raw/daily_market_bars.csv`.
+- Before V1 supervised training, collect market context with `py -3.11 scripts/collect_massive_market_context.py --dataset-root data\massive_sp500_current_constituents_history --rate-limit-calls 5 --rate-limit-period-seconds 60`.
+- Train V1 supervised baselines with `py -3.11 scripts/train_v1_supervised_baselines.py --dataset-root data\massive_sp500_current_constituents_history`.
+- Score latest windows with all saved models using `py -3.11 scripts/predict_v1_supervised_baselines.py --run-dir artifacts\v1_baselines\<run_name> --dataset-root data\massive_sp500_current_constituents_history`.
+- To refresh the dataset with recent Massive bars and rebuild training/inference artifacts, run `python scripts/update_massive_daily_dataset.py --dataset-root data\massive_sp500_current_constituents_history`.
 - Do not present results from this folder as historically unbiased S&P 500 backtests unless historical membership is added later.

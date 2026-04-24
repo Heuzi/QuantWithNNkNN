@@ -1,0 +1,8 @@
+pandas>=3.0
+numpy>=1.26
+scikit-learn>=1.8
+scipy>=1.10
+lightgbm>=4.6
+xgboost>=3.2
+torch>=2.11
+boto3>=1.42

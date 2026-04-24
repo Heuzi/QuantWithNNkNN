@@ -1,0 +1,167 @@
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import sys
+
+import pandas as pd
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.data.v1_dataset import (  # noqa: E402
+    build_latest_v1_feature_sets,
+    load_daily_features,
+    load_market_context_features,
+)
+from src.models.v1_baselines import load_model_bundle, prediction_frame  # noqa: E402
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run all trained V1 baseline models from a run directory on latest prediction windows."
+    )
+    parser.add_argument("--run-dir", required=True, help="Training run directory containing trained_models.json.")
+    parser.add_argument(
+        "--dataset-root",
+        default="data/massive_sp500_current_constituents_history",
+        help="Dataset folder containing latest stock and context features.",
+    )
+    parser.add_argument("--anchor-date", default="", help="Optional prediction cutoff date.")
+    parser.add_argument("--output-file", default="", help="Optional output CSV path.")
+    parser.add_argument(
+        "--benchmark-return-assumption",
+        default="0",
+        help=(
+            "Assumed benchmark return used to translate predicted market-adjusted "
+            "returns into implied future closes. Use one value for all horizons, "
+            "or comma-separated values matching the model target horizons."
+        ),
+    )
+    return parser.parse_args()
+
+
+def _aligned_features(frame: pd.DataFrame, feature_columns: list[str]) -> pd.DataFrame:
+    columns = {
+        col: frame[col] if col in frame.columns else pd.Series(0.0, index=frame.index)
+        for col in feature_columns
+    }
+    return pd.DataFrame(columns, index=frame.index)
+
+
+def _parse_benchmark_return_assumption(value: str, target_columns: list[str]) -> dict[str, float]:
+    parts = [part.strip() for part in value.split(",") if part.strip()]
+    if not parts:
+        parts = ["0"]
+    returns = [float(part) for part in parts]
+    if len(returns) == 1:
+        returns = returns * len(target_columns)
+    if len(returns) != len(target_columns):
+        raise SystemExit(
+            "--benchmark-return-assumption must be one value or match the number of target horizons."
+        )
+    return dict(zip(target_columns, returns))
+
+
+def _add_anchor_close(metadata: pd.DataFrame, stock_features: pd.DataFrame) -> pd.DataFrame:
+    close_lookup = stock_features[["ticker", "date", "close"]].copy()
+    close_lookup["ticker"] = close_lookup["ticker"].astype(str).str.upper()
+    close_lookup = close_lookup.rename(columns={"date": "anchor_date", "close": "anchor_close"})
+    out = metadata.copy()
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    out = out.merge(close_lookup, on=["ticker", "anchor_date"], how="left")
+    return out
+
+
+def _add_implied_close_columns(
+    predictions: pd.DataFrame,
+    *,
+    target_columns: list[str],
+    benchmark_return_by_target: dict[str, float],
+) -> pd.DataFrame:
+    out = predictions.copy()
+    if "anchor_close" not in out.columns:
+        return out
+    for target in target_columns:
+        pred_col = target.replace("market_adjusted_return", "pred_market_adjusted_return")
+        close_col = target.replace("market_adjusted_return", "pred_close_if_benchmark_assumption")
+        benchmark_return = benchmark_return_by_target[target]
+        out[close_col] = out["anchor_close"] * (1.0 + out[pred_col] + benchmark_return)
+    return out
+
+
+def main() -> None:
+    args = parse_args()
+    run_dir = Path(args.run_dir)
+    model_index_path = run_dir / "trained_models.json"
+    leaderboard_path = run_dir / "leaderboard.csv"
+    if not model_index_path.exists():
+        raise SystemExit(f"Missing trained model index: {model_index_path}")
+
+    stock_features = load_daily_features(args.dataset_root)
+    context_features = load_market_context_features(args.dataset_root, stock_features=stock_features)
+    if context_features.empty:
+        raise SystemExit("Market context features are missing. Run scripts/collect_massive_market_context.py first.")
+
+    model_index = json.loads(model_index_path.read_text(encoding="utf-8"))
+    first_model = model_index["models"][0]
+    target_columns = list(first_model["target_columns"])
+    benchmark_return_by_target = _parse_benchmark_return_assumption(
+        args.benchmark_return_assumption,
+        target_columns,
+    )
+    metadata, feature_sets, _ = build_latest_v1_feature_sets(
+        stock_features,
+        context_features,
+        window_length=int(first_model["window_length"]),
+        benchmark_ticker=str(first_model["benchmark_ticker"]),
+        anchor_date=args.anchor_date or None,
+    )
+    metadata = _add_anchor_close(metadata, stock_features)
+    leaderboard = pd.read_csv(leaderboard_path) if leaderboard_path.exists() else pd.DataFrame()
+    prediction_frames: list[pd.DataFrame] = []
+    for record in model_index["models"]:
+        feature_set = record["feature_set"]
+        model_name = record["model_name"]
+        bundle = load_model_bundle(record["artifact_path"])
+        model = bundle["model"]
+        x = _aligned_features(feature_sets[feature_set], list(record["feature_columns"]))
+        pred = model.predict(x)
+        rank = None
+        recommended = False
+        if not leaderboard.empty:
+            match = leaderboard[
+                (leaderboard["model_name"] == model_name) & (leaderboard["feature_set"] == feature_set)
+            ]
+            if not match.empty:
+                rank = int(match.iloc[0]["leaderboard_rank"])
+                recommended = bool(match.iloc[0]["recommended"])
+        prediction_frames.append(
+            prediction_frame(
+                metadata,
+                pred,
+                target_columns=list(record["target_columns"]),
+                model_name=model_name,
+                feature_set=feature_set,
+                leaderboard_rank=rank,
+                recommended=recommended,
+            )
+        )
+
+    predictions = pd.concat(prediction_frames, ignore_index=True) if prediction_frames else pd.DataFrame()
+    if not predictions.empty:
+        predictions = _add_implied_close_columns(
+            predictions,
+            target_columns=target_columns,
+            benchmark_return_by_target=benchmark_return_by_target,
+        )
+    output_file = Path(args.output_file) if args.output_file else run_dir / "latest_predictions.csv"
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    predictions.to_csv(output_file, index=False)
+    print(f"Wrote {len(predictions)} prediction rows to {output_file.resolve()}")
+
+
+if __name__ == "__main__":
+    main()

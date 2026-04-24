@@ -42,10 +42,11 @@ Components:
    - examples: sector, industry, company type, selected fundamentals snapshot, metadata
 
 3. **Fusion head**
-   - concatenate or gated-fuse the market encoder representation with the static encoder representation
+   - concatenate or gated-fuse the stock encoder, explicit context encoder, and static encoder representations
 
 4. **Prediction head**
-   - output a scalar regression target
+   - output a vector of market-adjusted return targets
+   - default horizons: 1, 5, 10, and 20 trading days
    - optional support for uncertainty/confidence later
 
 5. **Optional NN-kNN retrieval head**
@@ -59,6 +60,12 @@ Why this is the default:
 - compatible with baselines
 - compatible with NN-kNN
 - keeps multimodal design without overcomplicating early experiments
+
+V1 implementation note:
+- train multiple baseline model families, not only one winner
+- save all trained model artifacts and their metrics
+- rank models on a leaderboard, mainly by 5/10/20-day rank IC and portfolio spread
+- run all saved models for latest prediction windows so users can compare agreement and disagreement
 
 ## Input organization
 
@@ -74,9 +81,30 @@ Each day in the rolling window may include:
 - log-scaled liquidity features
 - same-date cross-sectional normalized features
 - same-date same-sector relative features
-- daily market context features
 - daily sentiment/news aggregates
 - fundamentals carried forward only if already public by that date
+
+### Explicit market and sector context
+V1 includes a separate daily context table, not mixed into the stock cross-sectional universe.
+
+Default context instruments:
+- `SPY` for full-market context and market-adjusted targets
+- sector ETFs by GICS sector:
+  - Communication Services: `XLC`
+  - Consumer Discretionary: `XLY`
+  - Consumer Staples: `XLP`
+  - Energy: `XLE`
+  - Financials: `XLF`
+  - Health Care: `XLV`
+  - Industrials: `XLI`
+  - Information Technology: `XLK`
+  - Materials: `XLB`
+  - Real Estate: `XLRE`
+  - Utilities: `XLU`
+
+Context features are computed with the same daily feature logic as stocks.
+Join SPY context by date and sector ETF context by `(date, gics_sector)`.
+Leave missing context missing with flags; do not unsafe-fill unavailable dates.
 
 ### Static or slow features
 These may include:
@@ -164,9 +192,11 @@ Possible implementations:
 - precomputed text embeddings aggregated by day
 
 ### Context branch
+Use in V1 for:
+- SPY market trend context
+- sector ETF trend context
+
 Add later for:
-- SPY
-- sector ETF
 - VIX
 - rates
 - peer-performance summaries
@@ -207,10 +237,18 @@ Always include:
 - MLP on flattened engineered features
 - ablations comparing engineered raw features vs normalized cross-sectional feature sets
 - XGBoost / LightGBM
+- sklearn histogram gradient boosting
+- torch MLP
 - temporal baseline without retrieval
 - same model with retrieval branch removed
 - same model with static branch removed
 - same model with context branch removed
+
+V1 artifact policy:
+- keep every trained model
+- write per-model metrics by horizon
+- write a leaderboard with recommended models marked
+- produce one inference row per `(ticker, anchor_date, model_name)`
 
 ## Evaluation design
 Use:

@@ -163,6 +163,24 @@ Suggested columns:
 - `is_val`
 - `is_test`
 
+### Prediction window index table
+One row per latest target-pending `(ticker, anchor_date)` used for production-style inference.
+
+Suggested columns:
+- `ticker`
+- `anchor_date`
+- `window_start_date`
+- `window_end_date`
+- `window_length`
+- `target_horizon_days`
+- `target_status`
+- `inference_ready`
+
+Rules:
+- rows must not include realized future returns
+- use only feature rows with `date <= anchor_date`
+- keep this table separate from completed supervised episode rows
+
 ### Daily sequence table
 One row per `(ticker, date)` for aligned daily features.
 
@@ -179,6 +197,20 @@ Suggested columns:
 - as-of fundamentals that are safe to carry on that date
 - sector / industry metadata used for same-date relative transforms
 - flags for missingness and source availability
+
+### Market context table
+One row per `(context_ticker, date)` for benchmark and sector ETF context.
+
+Default context tickers:
+- `SPY`
+- `XLC`, `XLY`, `XLP`, `XLE`, `XLF`, `XLV`, `XLI`, `XLK`, `XLB`, `XLRE`, `XLU`
+
+Rules:
+- compute context features with the same daily feature logic as stock bars
+- keep this table separate from the stock cross-sectional normalization universe
+- join SPY features by anchor date
+- join sector ETF features by anchor date and the stock's GICS sector ETF mapping
+- do not forward-fill missing context unless a later implementation explicitly audits that policy
 
 ### As-of fundamentals table
 One row per `(ticker, source_filing_date, source_period_end)` or vendor-equivalent record.
@@ -215,6 +247,12 @@ Suggested columns:
 For anchor date `t`:
 - only use market rows with `date <= t`
 - rolling window features must be computed from dates within the allowed historical window
+
+### Market and sector context join
+For anchor date `t`:
+- join SPY context using rows with `date <= t`
+- join sector ETF context using the ETF mapped from the stock's GICS sector and rows with `date <= t`
+- context rows are inputs only; sector ETFs are not the V1 target adjustment
 
 ### Fundamentals join
 For anchor date `t`:
@@ -270,11 +308,11 @@ Use Massive as the primary vendor for now, but assume the following:
 - same-date cross-sectional z-scores or percentile ranks for selected continuous features
 - same-date same-sector relative versions for selected liquidity / momentum / volatility features
 - simple technical indicators
+- SPY and sector ETF trend context
 - selected as-of valuation/profitability features
 - sector / industry metadata
 
 ### Stage 2 added features
-- SPY / sector ETF context
 - peer-relative performance
 - news count features
 - sentiment aggregates
@@ -283,15 +321,17 @@ Use Massive as the primary vendor for now, but assume the following:
 
 ## Target specification
 Preferred targets:
-- next 5-day raw return
-- next 10-day raw return
+- next 1-day market-adjusted return
 - next 5-day market-adjusted return
 - next 10-day market-adjusted return
+- next 20-day market-adjusted return
+- optional raw return variants
 - optional sector-adjusted variants
 
 Recommended default:
-- start with one target only
-- keep alternative targets as parallel experiment configs
+- V1 uses a multi-output target vector for 1, 5, 10, and 20 trading days
+- rank models mainly on 5/10/20-day rank IC and portfolio spread
+- report 1-day as a noisy diagnostic and prediction output
 
 ## Split policy
 Do not use random splitting for final results.

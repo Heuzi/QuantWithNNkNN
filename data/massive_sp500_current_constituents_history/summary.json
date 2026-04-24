@@ -1,0 +1,15 @@
+{
+  "bars_path": "C:\\Users\\yexia\\Documents\\GitHub\\QuantWithNNkNN\\data\\massive_sp500_current_constituents_history\\raw\\daily_market_bars.csv",
+  "completed_count": 503,
+  "constituent_count": 503,
+  "end_date": "2026-04-21",
+  "failures_logged": 0,
+  "generated_utc": "2026-04-23T05:24:11Z",
+  "metadata_path": "C:\\Users\\yexia\\Documents\\GitHub\\QuantWithNNkNN\\data\\massive_sp500_current_constituents_history\\raw\\sp500_constituents_current.csv",
+  "notes": [
+    "Constituents are the current S&P 500 list fetched at collection time, not a historical membership panel.",
+    "Using the current constituent list for a 1995-present backfill introduces survivorship bias.",
+    "This collector minimizes Massive REST usage by using one range request per ticker."
+  ],
+  "start_date": "1995-01-01"
+}

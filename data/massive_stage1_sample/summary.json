@@ -1,0 +1,18 @@
+{
+  "credentials_source": "C:\\Users\\yexia\\Documents\\GitHub\\QuantWithNNkNN\\MassiveApiKey",
+  "daily_bar_rows": 375,
+  "daily_feature_rows": 375,
+  "episode_rows": 44,
+  "notes": [
+    "This bootstrap dataset is intentionally small and daily-only.",
+    "True filing-dated fundamentals are not included yet."
+  ],
+  "selected_tickers": [
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "SPY"
+  ],
+  "ticker_reference_rows": 5
+}

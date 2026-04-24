@@ -3,6 +3,3 @@ __pycache__/
 
 # Local credentials
 MassiveApiKey
-
-# Generated processed data panels stay local; regenerate from scripts.
-data/**/processed/*.csv

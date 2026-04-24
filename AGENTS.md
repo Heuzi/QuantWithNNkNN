@@ -17,8 +17,8 @@ A **case** is:
 4. Clear, reproducible experiments with strong baselines.
 
 ## Current source of truth
-- Use `docs/ARCHITECTURE.md` for model and experiment structure.
-- Use `docs/DATA_SCHEMA.md` for dataset design and point-in-time join rules.
+- Use `ARCHITECTURE.md` for model and experiment structure.
+- Use `DATA_SCHEMA.md` for dataset design and point-in-time join rules.
 - Treat those docs as deeper guidance; keep this file short and operational.
 
 ## Non-negotiables
@@ -38,6 +38,8 @@ A **case** is:
 - Forward-fill only after a value becomes public.
 - Never backfill future information into earlier dates.
 - Any derived feature must be computable from information known at that time.
+- Same-date cross-sectional or sector-relative normalization is acceptable only for end-of-day models and only when computed from that same date's available values.
+- Never use global scaling statistics computed over future periods for final evaluation.
 
 ## Vendor assumptions
 - **Massive is the primary vendor for now.**
@@ -52,6 +54,8 @@ Use supervised learning first.
 Inputs:
 - price/return/volume history
 - technical indicators
+- normalized market and liquidity features
+- same-date cross-sectional and selected sector-relative features for continuous inputs
 - as-of fundamentals / valuation / profitability
 - company / sector / industry metadata
 
@@ -74,6 +78,7 @@ Add broader context:
 Preferred first model:
 - one token per day
 - each token contains that day's aligned numeric features
+- prefer scale-free, log-scaled, and same-date normalized features over raw level features when possible
 - transformer over the 60-day sequence
 - separate static encoder for non-sequential features
 - fused representation for prediction and retrieval
@@ -183,7 +188,7 @@ When finishing a task, provide:
 ## Immediate priorities
 1. define the exact target
 2. build a backtest-safe dataset schema
-3. implement robust baselines
+3. implement robust baselines on the engineered and normalized daily feature tables
 4. build the first supervised model
 5. add NN-kNN retrieval on top of the fused embedding
 6. run walk-forward evaluation

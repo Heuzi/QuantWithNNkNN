@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+
+# Local credentials
+MassiveApiKey
+
+# Generated processed data panels stay local; regenerate from scripts.
+data/**/processed/*.csv

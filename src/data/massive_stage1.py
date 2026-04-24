@@ -370,6 +370,10 @@ def fetch_ticker_details_snapshots(
     return rows
 
 
+def _mean_or_none(values: Sequence[float]) -> float | None:
+    return statistics.mean(values) if values else None
+
+
 def compute_daily_features(bars: Sequence[dict[str, object]]) -> list[dict[str, object]]:
     bars_by_ticker: dict[str, list[dict[str, object]]] = defaultdict(list)
     for row in bars:
@@ -381,12 +385,15 @@ def compute_daily_features(bars: Sequence[dict[str, object]]) -> list[dict[str, 
         prior_closes: deque[float] = deque()
         prior_returns: deque[float] = deque()
         prior_dollar_volume: deque[float] = deque()
+        prior_volume: deque[float] = deque()
 
         for row in rows:
             close = row.get("close")
             open_ = row.get("open")
             high = row.get("high")
             low = row.get("low")
+            vwap = row.get("vwap")
+            volume = row.get("volume")
             dollar_volume = row.get("dollar_volume")
 
             prev_close = prior_closes[-1] if prior_closes else None
@@ -395,6 +402,7 @@ def compute_daily_features(bars: Sequence[dict[str, object]]) -> list[dict[str, 
             gap_pct = None
             intraday_return = None
             hl_range_pct = None
+            close_to_vwap_pct = None
 
             if prev_close and close is not None and prev_close != 0:
                 return_1d = (float(close) / prev_close) - 1.0
@@ -406,20 +414,62 @@ def compute_daily_features(bars: Sequence[dict[str, object]]) -> list[dict[str, 
                 intraday_return = (float(close) / float(open_)) - 1.0
             if close not in (None, 0) and high is not None and low is not None:
                 hl_range_pct = (float(high) - float(low)) / float(close)
+            if close not in (None, 0) and vwap not in (None, 0):
+                close_to_vwap_pct = (float(close) / float(vwap)) - 1.0
 
             rolling_return_5d = None
             rolling_return_20d = None
+            rolling_return_60d = None
             rolling_vol_20d = None
+            rolling_vol_60d = None
+            rolling_avg_volume_20d = None
+            rolling_avg_volume_60d = None
             rolling_avg_dollar_volume_20d = None
+            rolling_avg_dollar_volume_60d = None
+            sma_close_20d = None
+            sma_close_60d = None
+            price_vs_sma_20d = None
+            price_vs_sma_60d = None
+            momentum_20d = None
+            momentum_60d = None
+            volume_ratio_20d = None
 
             if len(prior_closes) >= 4 and close is not None and prior_closes[-4] != 0:
                 rolling_return_5d = (float(close) / prior_closes[-4]) - 1.0
             if len(prior_closes) >= 19 and close is not None and prior_closes[-19] != 0:
                 rolling_return_20d = (float(close) / prior_closes[-19]) - 1.0
-            if len(prior_returns) >= 19:
-                rolling_vol_20d = statistics.pstdev(prior_returns)
-            if len(prior_dollar_volume) >= 19:
-                rolling_avg_dollar_volume_20d = statistics.mean(prior_dollar_volume)
+            if len(prior_closes) >= 59 and close is not None and prior_closes[-59] != 0:
+                rolling_return_60d = (float(close) / prior_closes[-59]) - 1.0
+            if len(prior_returns) >= 19 and return_1d is not None:
+                rolling_vol_20d = statistics.pstdev(list(prior_returns)[-19:] + [return_1d])
+            if len(prior_returns) >= 59 and return_1d is not None:
+                rolling_vol_60d = statistics.pstdev(list(prior_returns)[-59:] + [return_1d])
+            if len(prior_volume) >= 19 and volume is not None:
+                rolling_avg_volume_20d = statistics.mean(list(prior_volume)[-19:] + [float(volume)])
+            if len(prior_volume) >= 59 and volume is not None:
+                rolling_avg_volume_60d = statistics.mean(list(prior_volume)[-59:] + [float(volume)])
+            if len(prior_dollar_volume) >= 19 and dollar_volume is not None:
+                rolling_avg_dollar_volume_20d = statistics.mean(
+                    list(prior_dollar_volume)[-19:] + [float(dollar_volume)]
+                )
+            if len(prior_dollar_volume) >= 59 and dollar_volume is not None:
+                rolling_avg_dollar_volume_60d = statistics.mean(
+                    list(prior_dollar_volume)[-59:] + [float(dollar_volume)]
+                )
+            if len(prior_closes) >= 19:
+                sma_close_20d = _mean_or_none(list(prior_closes)[-19:] + ([float(close)] if close is not None else []))
+            if len(prior_closes) >= 59:
+                sma_close_60d = _mean_or_none(list(prior_closes)[-59:] + ([float(close)] if close is not None else []))
+            if close not in (None, 0) and sma_close_20d not in (None, 0):
+                price_vs_sma_20d = (float(close) / float(sma_close_20d)) - 1.0
+            if close not in (None, 0) and sma_close_60d not in (None, 0):
+                price_vs_sma_60d = (float(close) / float(sma_close_60d)) - 1.0
+            if rolling_return_20d is not None:
+                momentum_20d = rolling_return_20d
+            if rolling_return_60d is not None:
+                momentum_60d = rolling_return_60d
+            if volume not in (None, 0) and rolling_avg_volume_20d not in (None, 0):
+                volume_ratio_20d = float(volume) / float(rolling_avg_volume_20d)
 
             feature_row = dict(row)
             feature_row.update(
@@ -430,31 +480,80 @@ def compute_daily_features(bars: Sequence[dict[str, object]]) -> list[dict[str, 
                     "gap_pct": gap_pct,
                     "intraday_return": intraday_return,
                     "hl_range_pct": hl_range_pct,
+                    "close_to_vwap_pct": close_to_vwap_pct,
                     "rolling_return_5d": rolling_return_5d,
                     "rolling_return_20d": rolling_return_20d,
+                    "rolling_return_60d": rolling_return_60d,
                     "rolling_vol_20d": rolling_vol_20d,
+                    "rolling_vol_60d": rolling_vol_60d,
+                    "rolling_avg_volume_20d": rolling_avg_volume_20d,
+                    "rolling_avg_volume_60d": rolling_avg_volume_60d,
                     "rolling_avg_dollar_volume_20d": rolling_avg_dollar_volume_20d,
+                    "rolling_avg_dollar_volume_60d": rolling_avg_dollar_volume_60d,
+                    "sma_close_20d": sma_close_20d,
+                    "sma_close_60d": sma_close_60d,
+                    "price_vs_sma_20d": price_vs_sma_20d,
+                    "price_vs_sma_60d": price_vs_sma_60d,
+                    "momentum_20d": momentum_20d,
+                    "momentum_60d": momentum_60d,
+                    "volume_ratio_20d": volume_ratio_20d,
                     "has_prev_close": prev_close is not None,
                     "has_20d_history": len(prior_closes) >= 19,
+                    "has_60d_history": len(prior_closes) >= 59,
                 }
             )
             feature_rows.append(feature_row)
 
             if close is not None:
                 prior_closes.append(float(close))
-                if len(prior_closes) > 20:
+                if len(prior_closes) > 60:
                     prior_closes.popleft()
             if return_1d is not None:
                 prior_returns.append(return_1d)
-                if len(prior_returns) > 20:
+                if len(prior_returns) > 60:
                     prior_returns.popleft()
+            if volume is not None:
+                prior_volume.append(float(volume))
+                if len(prior_volume) > 60:
+                    prior_volume.popleft()
             if dollar_volume is not None:
                 prior_dollar_volume.append(float(dollar_volume))
-                if len(prior_dollar_volume) > 20:
+                if len(prior_dollar_volume) > 60:
                     prior_dollar_volume.popleft()
 
     feature_rows.sort(key=lambda item: (item["ticker"], item["date"]))
     return feature_rows
+
+
+def load_daily_bars_csv(path: str | Path) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    numeric_fields = {
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "vwap",
+        "transactions",
+        "timestamp_ms",
+        "dollar_volume",
+    }
+    path = Path(path)
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            parsed: dict[str, object] = {}
+            for key, value in row.items():
+                if value == "":
+                    parsed[key] = None
+                elif key in numeric_fields:
+                    parsed[key] = float(value)
+                elif key == "adjusted":
+                    parsed[key] = value.lower() == "true"
+                else:
+                    parsed[key] = value
+            rows.append(parsed)
+    return rows
 
 
 def compute_episode_index(

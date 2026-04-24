@@ -60,11 +60,22 @@ Examples:
 - rolling average volume
 - gap features
 - momentum features
+- price-vs-moving-average features
+- close-vs-VWAP features
+- log-scaled liquidity features
+- same-date cross-sectional z-scores
+- same-date cross-sectional percentile ranks
+- same-date same-sector relative z-scores
+- same-date same-sector relative percentile ranks
 
 Rules:
 - all market features must come only from dates <= anchor_date
 - corporate-action handling must be consistent
 - if using adjusted fields, document exactly how adjustments are defined
+- for end-of-day models, same-date cross-sectional normalization is allowed only when it uses values from that same date and no future dates
+- sector-relative normalization must also be computed on the same date only, never using a sector's future history
+- do not use global full-dataset scaling statistics across future periods
+- if raw level features are retained, also provide scale-free or normalized alternatives where possible
 
 ### Layer 3: as-of fundamentals and valuation features
 Examples:
@@ -160,9 +171,13 @@ Suggested columns:
 - `date`
 - market features
 - technical features
+- normalized market features
+- cross-sectional normalized features
+- sector-relative normalized features
 - context features
 - news aggregate features
 - as-of fundamentals that are safe to carry on that date
+- sector / industry metadata used for same-date relative transforms
 - flags for missingness and source availability
 
 ### As-of fundamentals table
@@ -241,6 +256,7 @@ Use Massive as the primary vendor for now, but assume the following:
 - historical news ticker labels may not always be trustworthy for renamed/reused symbols
 - financial endpoints must be verified for entitlement and time semantics before being treated as fully backtest-safe
 - derived ratios should be audited before use in final experiments
+- current-constituent cross-sectional panels are acceptable for development, but are not the same as a historically point-in-time index membership panel
 
 ## Suggested feature families
 
@@ -249,6 +265,10 @@ Use Massive as the primary vendor for now, but assume the following:
 - rolling returns over multiple windows
 - rolling volatility
 - rolling average volume
+- log-scaled volume and dollar-volume features
+- price-vs-SMA and close-vs-VWAP features
+- same-date cross-sectional z-scores or percentile ranks for selected continuous features
+- same-date same-sector relative versions for selected liquidity / momentum / volatility features
 - simple technical indicators
 - selected as-of valuation/profitability features
 - sector / industry metadata
@@ -312,4 +332,5 @@ Every feature source should declare something like:
 4. Implement news cutoff and aggregation logic.
 5. Add missingness flags.
 6. Generate the first walk-forward dataset snapshot.
-7. Freeze that snapshot for baseline experiments.
+7. Add a normalized daily feature table for model-ready scale-safe inputs.
+8. Freeze that snapshot for baseline experiments.

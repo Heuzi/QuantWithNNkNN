@@ -25,6 +25,9 @@ Use this dataset for:
 - [progress.json](c:/Users/yexia/Documents/GitHub/QuantWithNNkNN/data/massive_sp500_current_constituents_history/progress.json): restart/checkpoint metadata from the bulk collection job
 - [raw/daily_market_bars.csv](c:/Users/yexia/Documents/GitHub/QuantWithNNkNN/data/massive_sp500_current_constituents_history/raw/daily_market_bars.csv): adjusted daily OHLCV, VWAP, transaction count, and derived dollar volume for all collected symbols
 - [raw/sp500_constituents_current.csv](c:/Users/yexia/Documents/GitHub/QuantWithNNkNN/data/massive_sp500_current_constituents_history/raw/sp500_constituents_current.csv): current constituent snapshot with symbol, security name, GICS sector, sub-industry, headquarters, date added, CIK, and founded year
+- `processed/daily_features.csv`: engineered Layer 2 daily features including returns, rolling returns, rolling volatility, rolling average volume, gap features, VWAP-relative features, and momentum-style features. This generated CSV is kept local and regenerated as needed rather than committed to git.
+- `processed/daily_features_normalized.csv`: same-date full-panel and same-date sector-relative normalized features for quant-style modeling. This generated CSV is kept local and regenerated as needed rather than committed to git.
+- [processed/daily_features_normalized_manifest.json](c:/Users/yexia/Documents/GitHub/QuantWithNNkNN/data/massive_sp500_current_constituents_history/processed/daily_features_normalized_manifest.json): formulas, feature lists, universe definition, and PIT-safe timing assumptions for normalization
 
 ## Current Scale
 
@@ -37,7 +40,8 @@ Use this dataset for:
 - This is not a historical S&P 500 membership panel.
 - Using today’s constituent list for older periods introduces survivorship bias.
 - Despite requesting data back to `1995-01-01`, the free-plan response only returned about two years of history.
-- This folder currently contains raw bars and constituent metadata only. It does not yet include engineered features, anchor episodes, or filing-dated fundamentals.
+- This folder now includes engineered daily features and same-date normalized features, but the large processed CSV outputs are intentionally kept out of git and should be rebuilt locally from the checked-in scripts.
+- It still does not include anchor episodes or filing-dated fundamentals.
 
 ## Suggested Agent Usage
 

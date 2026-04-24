@@ -69,6 +69,11 @@ Each day in the rolling window may include:
 - realized volatility
 - volume changes
 - technical indicators
+- price-vs-moving-average features
+- close-vs-VWAP features
+- log-scaled liquidity features
+- same-date cross-sectional normalized features
+- same-date same-sector relative features
 - daily market context features
 - daily sentiment/news aggregates
 - fundamentals carried forward only if already public by that date
@@ -88,6 +93,7 @@ Use a transformer on daily tokens when sequence modeling is desired.
 Recommended default:
 - one token = one day
 - one day token = all aligned numeric features for that date
+- prefer scale-free and normalized features rather than relying heavily on raw price and raw volume levels
 - positional encoding over the 60-day window
 - pooled or final-step representation used for downstream fusion
 
@@ -199,6 +205,7 @@ Support two modes:
 Always include:
 - ridge or linear regression where sensible
 - MLP on flattened engineered features
+- ablations comparing engineered raw features vs normalized cross-sectional feature sets
 - XGBoost / LightGBM
 - temporal baseline without retrieval
 - same model with retrieval branch removed
@@ -241,3 +248,4 @@ Do not move to RL unless the task is explicitly redefined as sequential action o
 - Keep retrieval swappable.
 - Avoid premature architecture inflation.
 - Favor interpretable and auditable representations over maximal novelty early on.
+- For end-of-day panels, same-date cross-sectional and same-date sector-relative normalization are preferred over full-dataset scaling.

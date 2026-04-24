@@ -1,0 +1,78 @@
+{
+  "coverage_columns": {
+    "cs_universe_count": "Conservative row-level minimum of the non-null same-date full-panel group sizes across applicable transformed features.",
+    "sector_universe_count": "Conservative row-level minimum of the non-null same-date same-sector group sizes across applicable sector-relative transformed features."
+  },
+  "date_range": {
+    "max_date": "2026-04-21",
+    "min_date": "2024-04-22"
+  },
+  "formulas": {
+    "cross_sectional_percentile_rank": "(average_tie_rank - 1) / (n - 1)",
+    "cross_sectional_zscore": "(x - same_date_mean) / same_date_std",
+    "log1p_feature": "log1p(x)",
+    "sector_cross_sectional_percentile_rank": "(average_tie_rank - 1) / (n - 1)",
+    "sector_cross_sectional_zscore": "(x - same_date_sector_mean) / same_date_sector_std"
+  },
+  "full_panel_features": [
+    "log1p_volume",
+    "log1p_dollar_volume",
+    "log1p_rolling_avg_volume_20d",
+    "log1p_rolling_avg_volume_60d",
+    "log1p_rolling_avg_dollar_volume_20d",
+    "log1p_rolling_avg_dollar_volume_60d",
+    "return_1d",
+    "gap_pct",
+    "intraday_return",
+    "hl_range_pct",
+    "close_to_vwap_pct",
+    "rolling_return_5d",
+    "rolling_return_20d",
+    "rolling_return_60d",
+    "rolling_vol_20d",
+    "rolling_vol_60d",
+    "price_vs_sma_20d",
+    "price_vs_sma_60d",
+    "momentum_20d",
+    "momentum_60d",
+    "volume_ratio_20d"
+  ],
+  "input_file": "C:\\Users\\yexia\\Documents\\GitHub\\QuantWithNNkNN\\data\\massive_sp500_current_constituents_history\\processed\\daily_features.csv",
+  "known_caveats": [
+    "Normalization is point-in-time safe with respect to time because only same-date values are used.",
+    "Sector metadata comes from the current constituent snapshot, not a verified historical sector panel.",
+    "The universe is the current S&P 500 panel collected for development, not the full U.S. market universe."
+  ],
+  "log1p_base_features": [
+    "volume",
+    "dollar_volume",
+    "rolling_avg_volume_20d",
+    "rolling_avg_volume_60d",
+    "rolling_avg_dollar_volume_20d",
+    "rolling_avg_dollar_volume_60d"
+  ],
+  "minimum_group_sizes": {
+    "full_panel": 2,
+    "sector": 5
+  },
+  "row_count": 249497,
+  "same_date_only": true,
+  "same_sector_only": true,
+  "sector_features": [
+    "log1p_volume",
+    "log1p_dollar_volume",
+    "log1p_rolling_avg_volume_20d",
+    "log1p_rolling_avg_volume_60d",
+    "rolling_vol_20d",
+    "rolling_vol_60d",
+    "rolling_return_20d",
+    "rolling_return_60d",
+    "momentum_20d",
+    "momentum_60d",
+    "volume_ratio_20d"
+  ],
+  "sector_source_file": "C:\\Users\\yexia\\Documents\\GitHub\\QuantWithNNkNN\\data\\massive_sp500_current_constituents_history\\raw\\sp500_constituents_current.csv",
+  "timing_assumption": "End-of-day only. Same-date close/volume/VWAP-based normalization is allowed because values are assumed known by the date close.",
+  "universe_count": 503,
+  "universe_definition": "Current S&P 500 panel present in the processed daily feature input on each date."
+}

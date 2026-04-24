@@ -34,7 +34,7 @@ class MassiveStage1Tests(unittest.TestCase):
     def test_compute_daily_features_adds_basic_returns(self) -> None:
         bars = [
             {"ticker": "AAA", "date": "2024-01-02", "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.0, "volume": 100.0, "dollar_volume": 1000.0},
-            {"ticker": "AAA", "date": "2024-01-03", "open": 10.5, "high": 11.0, "low": 10.0, "close": 11.0, "volume": 110.0, "dollar_volume": 1210.0},
+            {"ticker": "AAA", "date": "2024-01-03", "open": 10.5, "high": 11.0, "low": 10.0, "close": 11.0, "volume": 110.0, "vwap": 10.7, "dollar_volume": 1210.0},
         ]
 
         features = compute_daily_features(bars)
@@ -43,6 +43,37 @@ class MassiveStage1Tests(unittest.TestCase):
         self.assertAlmostEqual(second["return_1d"], 0.10)
         self.assertAlmostEqual(second["gap_pct"], 0.05)
         self.assertAlmostEqual(second["intraday_return"], (11.0 / 10.5) - 1.0)
+        self.assertAlmostEqual(second["close_to_vwap_pct"], (11.0 / 10.7) - 1.0)
+
+    def test_compute_daily_features_adds_rolling_volume_and_momentum_features(self) -> None:
+        bars = []
+        for idx in range(61):
+            close = 100.0 + idx
+            bars.append(
+                {
+                    "ticker": "AAA",
+                    "date": f"2024-03-{idx + 1:02d}",
+                    "open": close - 0.5,
+                    "high": close + 1.0,
+                    "low": close - 1.0,
+                    "close": close,
+                    "volume": 1000.0 + idx,
+                    "vwap": close - 0.25,
+                    "dollar_volume": close * (1000.0 + idx),
+                }
+            )
+
+        last = compute_daily_features(bars)[-1]
+        self.assertIsNotNone(last["rolling_avg_volume_20d"])
+        self.assertIsNotNone(last["rolling_avg_volume_60d"])
+        self.assertIsNotNone(last["rolling_return_60d"])
+        self.assertIsNotNone(last["rolling_vol_60d"])
+        self.assertIsNotNone(last["momentum_20d"])
+        self.assertIsNotNone(last["momentum_60d"])
+        self.assertIsNotNone(last["price_vs_sma_20d"])
+        self.assertIsNotNone(last["price_vs_sma_60d"])
+        self.assertIsNotNone(last["volume_ratio_20d"])
+        self.assertTrue(last["has_60d_history"])
 
     def test_compute_episode_index_respects_window_and_benchmark_adjustment(self) -> None:
         rows = []

@@ -1,0 +1,5 @@
+MASSIVE_ACCESS_KEY_ID=your-access-key-id
+MASSIVE_SECRET_ACCESS_KEY=your-secret-access-key
+MASSIVE_API_KEY=your-rest-api-key
+MASSIVE_S3_ENDPOINT=https://files.massive.com
+MASSIVE_S3_BUCKET=flatfiles

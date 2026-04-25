@@ -92,6 +92,41 @@ def _hstack_static_arrays(static_categorical: dict[str, np.ndarray], columns: Se
     return np.column_stack([static_categorical[column] for column in columns]).astype(np.int64)
 
 
+def _default_torch_device() -> str:
+    import torch
+
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _gpu_available() -> bool:
+    try:
+        return _default_torch_device() == "cuda"
+    except Exception:
+        return False
+
+
+def _torch_loader_kwargs(*, device: str, shuffle: bool, batch_size: int) -> dict[str, object]:
+    return {
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "pin_memory": False,
+    }
+
+
+def _move_tensor(value, device, *, dtype=None):
+    kwargs = {"device": device, "non_blocking": getattr(device, "type", str(device)) == "cuda"}
+    if dtype is not None:
+        kwargs["dtype"] = dtype
+    return value.to(**kwargs)
+
+
+def _copy_model_to_cpu(model):
+    model_copy = copy.deepcopy(model)
+    if hasattr(model_copy, "to"):
+        model_copy = model_copy.to("cpu")
+    return model_copy
+
+
 class ZeroPredictor:
     def fit(
         self,
@@ -320,10 +355,18 @@ class SklearnMLPPredictor:
 
 
 class LightGBMRegressor:
-    def __init__(self, *, n_estimators: int = 400, patience: int = 25, random_state: int = 23) -> None:
+    def __init__(
+        self,
+        *,
+        n_estimators: int = 400,
+        patience: int = 25,
+        random_state: int = 23,
+        prefer_gpu: bool = True,
+    ) -> None:
         self.n_estimators = n_estimators
         self.patience = patience
         self.random_state = random_state
+        self.prefer_gpu = prefer_gpu
 
     def _preprocess(self, x: pd.DataFrame, *, fit: bool) -> np.ndarray:
         from sklearn.impute import SimpleImputer
@@ -349,27 +392,46 @@ class LightGBMRegressor:
         y_val_arr = _as_array(val_y) if val_y is not None else None
         self.models_: list[object] = []
         self.best_iterations_: list[int] = []
+        self.device_type_ = "gpu" if self.prefer_gpu and _gpu_available() else "cpu"
         for target_idx in range(y_train.shape[1]):
-            estimator = LGBMRegressor(
-                n_estimators=self.n_estimators,
-                learning_rate=0.03,
-                num_leaves=31,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                objective="regression",
-                random_state=self.random_state + target_idx,
-                verbosity=-1,
-            )
-            if x_val is not None and y_val_arr is not None:
-                estimator.fit(
-                    x_train,
-                    y_train[:, target_idx],
-                    eval_set=[(x_val, y_val_arr[:, target_idx])],
-                    eval_metric="rmse",
-                    callbacks=[early_stopping(self.patience, verbose=False)],
-                )
-            else:
-                estimator.fit(x_train, y_train[:, target_idx])
+            estimator_kwargs = {
+                "n_estimators": self.n_estimators,
+                "learning_rate": 0.03,
+                "num_leaves": 31,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "objective": "regression",
+                "random_state": self.random_state + target_idx,
+                "verbosity": -1,
+                "device_type": self.device_type_,
+            }
+            estimator = LGBMRegressor(**estimator_kwargs)
+            try:
+                if x_val is not None and y_val_arr is not None:
+                    estimator.fit(
+                        x_train,
+                        y_train[:, target_idx],
+                        eval_set=[(x_val, y_val_arr[:, target_idx])],
+                        eval_metric="rmse",
+                        callbacks=[early_stopping(self.patience, verbose=False)],
+                    )
+                else:
+                    estimator.fit(x_train, y_train[:, target_idx])
+            except Exception:
+                if self.device_type_ != "gpu":
+                    raise
+                self.device_type_ = "cpu"
+                estimator = LGBMRegressor(**{**estimator_kwargs, "device_type": self.device_type_})
+                if x_val is not None and y_val_arr is not None:
+                    estimator.fit(
+                        x_train,
+                        y_train[:, target_idx],
+                        eval_set=[(x_val, y_val_arr[:, target_idx])],
+                        eval_metric="rmse",
+                        callbacks=[early_stopping(self.patience, verbose=False)],
+                    )
+                else:
+                    estimator.fit(x_train, y_train[:, target_idx])
             best_iteration = int(getattr(estimator, "best_iteration_", 0) or self.n_estimators)
             self.models_.append(estimator)
             self.best_iterations_.append(best_iteration)
@@ -391,6 +453,7 @@ class LightGBMRegressor:
                 objective="regression",
                 random_state=self.random_state + target_idx,
                 verbosity=-1,
+                device_type=getattr(self, "device_type_", "cpu"),
             )
             estimator.fit(x_full, y_full[:, target_idx])
             self.models_.append(estimator)
@@ -398,15 +461,29 @@ class LightGBMRegressor:
 
     def predict(self, x: pd.DataFrame) -> np.ndarray:
         x_values = self._preprocess(x, fit=False)
-        preds = [np.asarray(model.predict(x_values), dtype=np.float64) for model in self.models_]
+        if getattr(self, "device_", "cpu") == "cuda":
+            from xgboost import DMatrix
+
+            dmatrix = DMatrix(x_values)
+            preds = [np.asarray(model.get_booster().predict(dmatrix), dtype=np.float64) for model in self.models_]
+        else:
+            preds = [np.asarray(model.predict(x_values), dtype=np.float64) for model in self.models_]
         return np.column_stack(preds)
 
 
 class XGBoostRegressor:
-    def __init__(self, *, n_estimators: int = 400, patience: int = 25, random_state: int = 29) -> None:
+    def __init__(
+        self,
+        *,
+        n_estimators: int = 400,
+        patience: int = 25,
+        random_state: int = 29,
+        prefer_gpu: bool = True,
+    ) -> None:
         self.n_estimators = n_estimators
         self.patience = patience
         self.random_state = random_state
+        self.prefer_gpu = prefer_gpu
 
     def _preprocess(self, x: pd.DataFrame, *, fit: bool) -> np.ndarray:
         from sklearn.impute import SimpleImputer
@@ -432,27 +509,46 @@ class XGBoostRegressor:
         y_val_arr = _as_array(val_y) if val_y is not None else None
         self.models_: list[object] = []
         self.best_iterations_: list[int] = []
+        self.device_ = "cuda" if self.prefer_gpu and _gpu_available() else "cpu"
         for target_idx in range(y_train.shape[1]):
-            estimator = XGBRegressor(
-                n_estimators=self.n_estimators,
-                learning_rate=0.03,
-                max_depth=4,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                objective="reg:squarederror",
-                random_state=self.random_state + target_idx,
-                n_jobs=1,
-                early_stopping_rounds=self.patience if x_val is not None and y_val_arr is not None else None,
-            )
-            if x_val is not None and y_val_arr is not None:
-                estimator.fit(
-                    x_train,
-                    y_train[:, target_idx],
-                    eval_set=[(x_val, y_val_arr[:, target_idx])],
-                    verbose=False,
-                )
-            else:
-                estimator.fit(x_train, y_train[:, target_idx], verbose=False)
+            estimator_kwargs = {
+                "n_estimators": self.n_estimators,
+                "learning_rate": 0.03,
+                "max_depth": 4,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "objective": "reg:squarederror",
+                "random_state": self.random_state + target_idx,
+                "n_jobs": 1,
+                "tree_method": "hist",
+                "device": self.device_,
+                "early_stopping_rounds": self.patience if x_val is not None and y_val_arr is not None else None,
+            }
+            estimator = XGBRegressor(**estimator_kwargs)
+            try:
+                if x_val is not None and y_val_arr is not None:
+                    estimator.fit(
+                        x_train,
+                        y_train[:, target_idx],
+                        eval_set=[(x_val, y_val_arr[:, target_idx])],
+                        verbose=False,
+                    )
+                else:
+                    estimator.fit(x_train, y_train[:, target_idx], verbose=False)
+            except Exception:
+                if self.device_ != "cuda":
+                    raise
+                self.device_ = "cpu"
+                estimator = XGBRegressor(**{**estimator_kwargs, "device": self.device_})
+                if x_val is not None and y_val_arr is not None:
+                    estimator.fit(
+                        x_train,
+                        y_train[:, target_idx],
+                        eval_set=[(x_val, y_val_arr[:, target_idx])],
+                        verbose=False,
+                    )
+                else:
+                    estimator.fit(x_train, y_train[:, target_idx], verbose=False)
             best_iteration = getattr(estimator, "best_iteration", None)
             if best_iteration is None:
                 best_iteration = getattr(estimator, "best_ntree_limit", None)
@@ -476,6 +572,8 @@ class XGBoostRegressor:
                 objective="reg:squarederror",
                 random_state=self.random_state + target_idx,
                 n_jobs=1,
+                tree_method="hist",
+                device=getattr(self, "device_", "cpu"),
             )
             estimator.fit(x_full, y_full[:, target_idx], verbose=False)
             self.models_.append(estimator)
@@ -504,8 +602,20 @@ class TorchMLPRegressor:
         self.patience = patience
         self.batch_size = batch_size
         self.random_state = random_state
+        self.device = _default_torch_device()
         self.x_scaler = Standardizer()
         self.y_scaler = Standardizer()
+
+    def _resolve_device(self):
+        import torch
+
+        requested = self.device if self.device != "cuda" or _gpu_available() else "cpu"
+        self.device_ = torch.device(requested)
+        if self.device_.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+            if hasattr(torch, "set_float32_matmul_precision"):
+                torch.set_float32_matmul_precision("high")
+        return self.device_
 
     def _build_model(self, input_dim: int, output_dim: int):
         import torch
@@ -526,12 +636,21 @@ class TorchMLPRegressor:
             torch.from_numpy(x_values.astype(np.float32)),
             torch.from_numpy(y_values.astype(np.float32)),
         )
-        loader = torch.utils.data.DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=True)
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            **_torch_loader_kwargs(
+                device=self.device_.type,
+                shuffle=True,
+                batch_size=min(self.batch_size, len(dataset)),
+            ),
+        )
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
         loss_fn = torch.nn.MSELoss()
         self.model_.train()
         for _ in range(max(epochs, 1)):
             for batch_x, batch_y in loader:
+                batch_x = _move_tensor(batch_x, self.device_)
+                batch_y = _move_tensor(batch_y, self.device_)
                 pred = self.model_(batch_x)
                 loss = loss_fn(pred, batch_y)
                 optimizer.zero_grad()
@@ -549,13 +668,23 @@ class TorchMLPRegressor:
         import torch
 
         torch.manual_seed(self.random_state)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.random_state)
+        self._resolve_device()
         x_train = self.x_scaler.fit(_as_array(x)).transform(_as_array(x)).astype(np.float32)
         y_train = self.y_scaler.fit(_as_array(y)).transform(_as_array(y)).astype(np.float32)
         x_val = self.x_scaler.transform(_as_array(val_x)).astype(np.float32) if val_x is not None else None
         y_val_arr = self.y_scaler.transform(_as_array(val_y)).astype(np.float32) if val_y is not None else None
-        self.model_ = self._build_model(x_train.shape[1], y_train.shape[1])
+        self.model_ = self._build_model(x_train.shape[1], y_train.shape[1]).to(self.device_)
         dataset = torch.utils.data.TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train))
-        loader = torch.utils.data.DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=True)
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            **_torch_loader_kwargs(
+                device=self.device_.type,
+                shuffle=True,
+                batch_size=min(self.batch_size, len(dataset)),
+            ),
+        )
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
         loss_fn = torch.nn.MSELoss()
         best_state = copy.deepcopy(self.model_.state_dict())
@@ -565,6 +694,8 @@ class TorchMLPRegressor:
         for epoch in range(self.max_epochs):
             self.model_.train()
             for batch_x, batch_y in loader:
+                batch_x = _move_tensor(batch_x, self.device_)
+                batch_y = _move_tensor(batch_y, self.device_)
                 pred = self.model_(batch_x)
                 loss = loss_fn(pred, batch_y)
                 optimizer.zero_grad()
@@ -574,7 +705,7 @@ class TorchMLPRegressor:
             metric_y = y_val_arr if y_val_arr is not None else y_train
             self.model_.eval()
             with torch.no_grad():
-                pred = self.model_(torch.from_numpy(metric_x)).numpy()
+                pred = self.model_(_move_tensor(torch.from_numpy(metric_x), self.device_)).detach().cpu().numpy()
             metric = float(np.nanmean((pred - metric_y) ** 2))
             if metric + 1e-6 < best_metric:
                 best_metric = metric
@@ -592,17 +723,33 @@ class TorchMLPRegressor:
     def refit_full(self, x: pd.DataFrame, y: pd.DataFrame) -> "TorchMLPRegressor":
         x_full = self.x_scaler.fit(_as_array(x)).transform(_as_array(x)).astype(np.float32)
         y_full = self.y_scaler.fit(_as_array(y)).transform(_as_array(y)).astype(np.float32)
-        self.model_ = self._build_model(x_full.shape[1], y_full.shape[1])
+        self._resolve_device()
+        self.model_ = self._build_model(x_full.shape[1], y_full.shape[1]).to(self.device_)
         self._fit_fixed_epochs(x_full, y_full, getattr(self, "best_epoch_", self.max_epochs))
         return self
 
     def predict(self, x: pd.DataFrame) -> np.ndarray:
         import torch
 
+        self._resolve_device()
+        self.model_ = self.model_.to(self.device_)
         x_values = self.x_scaler.transform(_as_array(x)).astype(np.float32)
         with torch.no_grad():
-            pred = self.model_(torch.from_numpy(x_values)).numpy()
+            pred = self.model_(_move_tensor(torch.from_numpy(x_values), self.device_)).detach().cpu().numpy()
         return self.y_scaler.inverse_transform(pred)
+
+    def __getstate__(self) -> dict[str, object]:
+        state = self.__dict__.copy()
+        if state.get("model_") is not None:
+            state["model_"] = _copy_model_to_cpu(state["model_"])
+        state["device_"] = "cpu"
+        return state
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        self.__dict__.update(state)
+        self._resolve_device()
+        if getattr(self, "model_", None) is not None:
+            self.model_ = self.model_.to(self.device_)
 
 
 class _SequenceStaticDataset:
@@ -732,6 +879,15 @@ class _SequenceStaticNet:
         self.static_mlp.eval()
         self.fusion.eval()
 
+    def to(self, device):
+        self.token_projection = self.token_projection.to(device)
+        self.position_embedding = self.position_embedding.to(device)
+        self.transformer = self.transformer.to(device)
+        self.static_embeddings = self.static_embeddings.to(device)
+        self.static_mlp = self.static_mlp.to(device)
+        self.fusion = self.fusion.to(device)
+        return self
+
     def __call__(self, sequence, static_ids):
         import torch
 
@@ -763,8 +919,20 @@ class TorchSequenceStaticRegressor:
         self.patience = patience
         self.batch_size = batch_size
         self.random_state = random_state
+        self.device = _default_torch_device()
         self.x_scaler = Standardizer()
         self.y_scaler = Standardizer()
+
+    def _resolve_device(self):
+        import torch
+
+        requested = self.device if self.device != "cuda" or _gpu_available() else "cpu"
+        self.device_ = torch.device(requested)
+        if self.device_.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+            if hasattr(torch, "set_float32_matmul_precision"):
+                torch.set_float32_matmul_precision("high")
+        return self.device_
 
     def _prepare_sequence_tensor(self, sequence, mean_t, scale_t):
         import torch
@@ -793,17 +961,24 @@ class TorchSequenceStaticRegressor:
     def _train_epochs(self, dataset: _SequenceStaticDataset, epochs: int) -> None:
         import torch
 
-        loader = torch.utils.data.DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=True)
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            **_torch_loader_kwargs(
+                device=self.device_.type,
+                shuffle=True,
+                batch_size=min(self.batch_size, len(dataset)),
+            ),
+        )
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
         loss_fn = torch.nn.MSELoss()
-        mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32))
-        scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32))
+        mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32)).to(self.device_)
+        scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32)).to(self.device_)
         self.model_.train()
         for _ in range(max(epochs, 1)):
             for sequence, static_ids, target in loader:
-                sequence = self._prepare_sequence_tensor(sequence, mean_t, scale_t)
-                pred = self.model_(sequence, static_ids.long())
-                loss = loss_fn(pred, target.float())
+                sequence = self._prepare_sequence_tensor(_move_tensor(sequence, self.device_), mean_t, scale_t)
+                pred = self.model_(sequence, _move_tensor(static_ids.long(), self.device_))
+                loss = loss_fn(pred, _move_tensor(target.float(), self.device_))
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -819,6 +994,9 @@ class TorchSequenceStaticRegressor:
         import torch
 
         torch.manual_seed(self.random_state)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.random_state)
+        self._resolve_device()
         self.static_columns_ = list(x["static_categorical"].keys())
         self.static_vocab_sizes_ = [
             int(np.max(x["static_categorical"][column])) + 1 if len(x["static_categorical"][column]) else 1
@@ -850,17 +1028,20 @@ class TorchSequenceStaticRegressor:
             sequence_dim=len(x["store"].feature_columns),
             static_cardinalities=self.static_vocab_sizes_,
             output_dim=y_train.shape[1],
-        )
+        ).to(self.device_)
         self.output_dim_ = y_train.shape[1]
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
         loss_fn = torch.nn.MSELoss()
         train_loader = torch.utils.data.DataLoader(
             train_dataset,
-            batch_size=min(self.batch_size, len(train_dataset)),
-            shuffle=True,
+            **_torch_loader_kwargs(
+                device=self.device_.type,
+                shuffle=True,
+                batch_size=min(self.batch_size, len(train_dataset)),
+            ),
         )
-        mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32))
-        scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32))
+        mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32)).to(self.device_)
+        scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32)).to(self.device_)
         best_state = copy.deepcopy(self.model_.state_dict())
         best_metric = np.inf
         best_epoch = 1
@@ -868,9 +1049,9 @@ class TorchSequenceStaticRegressor:
         for epoch in range(self.max_epochs):
             self.model_.train()
             for sequence, static_ids, target in train_loader:
-                sequence = self._prepare_sequence_tensor(sequence, mean_t, scale_t)
-                pred = self.model_(sequence, static_ids.long())
-                loss = loss_fn(pred, target.float())
+                sequence = self._prepare_sequence_tensor(_move_tensor(sequence, self.device_), mean_t, scale_t)
+                pred = self.model_(sequence, _move_tensor(static_ids.long(), self.device_))
+                loss = loss_fn(pred, _move_tensor(target.float(), self.device_))
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -891,20 +1072,28 @@ class TorchSequenceStaticRegressor:
     def _dataset_loss(self, dataset: _SequenceStaticDataset) -> float:
         import torch
 
-        loader = torch.utils.data.DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=False)
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            **_torch_loader_kwargs(
+                device=self.device_.type,
+                shuffle=False,
+                batch_size=min(self.batch_size, len(dataset)),
+            ),
+        )
         loss_fn = torch.nn.MSELoss()
-        mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32))
-        scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32))
+        mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32)).to(self.device_)
+        scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32)).to(self.device_)
         self.model_.eval()
         losses: list[float] = []
         with torch.no_grad():
             for sequence, static_ids, target in loader:
-                sequence = self._prepare_sequence_tensor(sequence, mean_t, scale_t)
-                pred = self.model_(sequence, static_ids.long())
-                losses.append(float(loss_fn(pred, target.float()).item()))
+                sequence = self._prepare_sequence_tensor(_move_tensor(sequence, self.device_), mean_t, scale_t)
+                pred = self.model_(sequence, _move_tensor(static_ids.long(), self.device_))
+                losses.append(float(loss_fn(pred, _move_tensor(target.float(), self.device_)).item()))
         return float(np.mean(losses)) if losses else np.inf
 
     def refit_full(self, x: dict[str, object], y: pd.DataFrame) -> "TorchSequenceStaticRegressor":
+        self._resolve_device()
         train_rows = x["store"].fit_rows_through(self._train_cutoff_date(x["metadata"]))
         self.x_scaler.fit(train_rows.astype(np.float64))
         y_train = self.y_scaler.fit(_as_array(y)).transform(_as_array(y)).astype(np.float32)
@@ -920,7 +1109,7 @@ class TorchSequenceStaticRegressor:
             sequence_dim=len(x["store"].feature_columns),
             static_cardinalities=self.static_vocab_sizes_,
             output_dim=y_train.shape[1],
-        )
+        ).to(self.device_)
         self.output_dim_ = y_train.shape[1]
         self._train_epochs(train_dataset, getattr(self, "best_epoch_", self.max_epochs))
         return self
@@ -936,19 +1125,41 @@ class TorchSequenceStaticRegressor:
             window_length=self.window_length,
             static_columns=self.static_columns_,
         )
-        loader = torch.utils.data.DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=False)
-        mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32))
-        scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32))
+        self._resolve_device()
+        self.model_ = self.model_.to(self.device_)
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            **_torch_loader_kwargs(
+                device=self.device_.type,
+                shuffle=False,
+                batch_size=min(self.batch_size, len(dataset)),
+            ),
+        )
+        mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32)).to(self.device_)
+        scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32)).to(self.device_)
         outputs: list[np.ndarray] = []
         self.model_.eval()
         with torch.no_grad():
             for sequence, static_ids in loader:
-                sequence = self._prepare_sequence_tensor(sequence, mean_t, scale_t)
-                pred = self.model_(sequence, static_ids.long()).cpu().numpy()
+                sequence = self._prepare_sequence_tensor(_move_tensor(sequence, self.device_), mean_t, scale_t)
+                pred = self.model_(sequence, _move_tensor(static_ids.long(), self.device_)).detach().cpu().numpy()
                 outputs.append(pred)
         if not outputs:
             return np.empty((0, getattr(self, "output_dim_", 0)), dtype=np.float64)
         return self.y_scaler.inverse_transform(np.vstack(outputs))
+
+    def __getstate__(self) -> dict[str, object]:
+        state = self.__dict__.copy()
+        if state.get("model_") is not None:
+            state["model_"] = _copy_model_to_cpu(state["model_"])
+        state["device_"] = "cpu"
+        return state
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        self.__dict__.update(state)
+        self._resolve_device()
+        if getattr(self, "model_", None) is not None:
+            self.model_ = self.model_.to(self.device_)
 
 
 def is_sequence_static_model(model_name: str) -> bool:

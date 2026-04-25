@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 
+import numpy as np
 import pandas as pd
 
 from src.data.massive_stage1 import compute_daily_features
@@ -225,6 +226,12 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         pred = model.predict(x_val)
 
         self.assertEqual(pred.shape, (len(val_meta), len(dataset.target_columns)))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "torch_seq_static.pkl"
+            save_model_bundle(path, model=model, metadata={"model_name": "torch_seq_static"})
+            loaded = load_model_bundle(path)
+            loaded_pred = loaded["model"].predict(x_val)
+        self.assertTrue(np.allclose(pred, loaded_pred))
 
     def test_latest_feature_sets_use_target_pending_windows(self) -> None:
         stock_features, context_features = _stock_and_context_frames()

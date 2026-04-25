@@ -67,6 +67,14 @@ V1 implementation note:
 - rank models on a leaderboard, mainly by 5/10/20-day rank IC and portfolio spread
 - run all saved models for latest prediction windows so users can compare agreement and disagreement
 
+Current implementation snapshot:
+- `scripts/train_v1_supervised_baselines.py` now defaults to expanding-window walk-forward evaluation.
+- The current baseline suite includes tabular baselines plus `torch_seq_static`.
+- `torch_seq_static` uses a real 60-day sequence branch plus static categorical embeddings for `gics_sector` and `gics_sub_industry`.
+- The sequence-static model is currently wired only for `stock_only` and `stock_relative`.
+- `torch`, `xgboost`, and `lightgbm` now prefer GPU execution when available and fall back to CPU otherwise.
+- Latest inference uses final deployment bundles saved after the walk-forward run completes.
+
 ## Input organization
 
 ### Daily aligned sequence features

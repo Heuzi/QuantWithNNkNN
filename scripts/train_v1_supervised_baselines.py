@@ -163,6 +163,7 @@ def _build_model_metadata(
     flat_feature_columns: list[str] | None = None,
     sequence_feature_columns: list[str] | None = None,
     static_vocabularies: dict[str, dict[str, int]] | None = None,
+    runtime: dict[str, object] | None = None,
 ) -> dict[str, object]:
     input_layout = "sequence_static" if is_sequence_static_model(model_name) else "tabular"
     metadata = {
@@ -183,7 +184,36 @@ def _build_model_metadata(
         metadata["sequence_feature_columns"] = sequence_feature_columns
         metadata["static_categorical_columns"] = list(STATIC_CATEGORICAL_COLUMNS)
         metadata["static_vocabularies"] = static_vocabularies or {}
+    if runtime:
+        metadata["runtime"] = runtime
     return metadata
+
+
+def _model_runtime_metadata(model: object) -> dict[str, object]:
+    runtime: dict[str, object] = {}
+    if hasattr(model, "device"):
+        runtime["requested_device"] = str(getattr(model, "device"))
+    if hasattr(model, "device_"):
+        runtime["resolved_device"] = str(getattr(model, "device_"))
+    if hasattr(model, "device_type_"):
+        runtime["lightgbm_device_type"] = str(getattr(model, "device_type_"))
+    if type(model).__name__ == "XGBoostRegressor" and hasattr(model, "device_"):
+        runtime["xgboost_device"] = str(getattr(model, "device_"))
+    return runtime
+
+
+def _runtime_environment() -> dict[str, object]:
+    info: dict[str, object] = {"gpu_available": False}
+    try:
+        import torch
+
+        info["gpu_available"] = bool(torch.cuda.is_available())
+        if torch.cuda.is_available():
+            info["cuda_device_count"] = int(torch.cuda.device_count())
+            info["cuda_device_name"] = str(torch.cuda.get_device_name(0))
+    except Exception:
+        pass
+    return info
 
 
 def _build_combo_iterable(feature_sets: list[str], model_names: list[str]) -> list[tuple[str, str]]:
@@ -383,6 +413,7 @@ def _train_holdout(
             flat_feature_columns=dataset.feature_columns.get(feature_set),
             sequence_feature_columns=sequence_stores[feature_set].feature_columns if is_sequence_static_model(model_name) else None,
             static_vocabularies=final_vocabularies,
+            runtime=_model_runtime_metadata(model),
         )
         save_model_bundle(model_path, model=model, metadata=model_metadata)
         trained_records.append({**model_metadata, "artifact_path": str(model_path.resolve())})
@@ -535,6 +566,7 @@ def _train_walk_forward(
             flat_feature_columns=dataset.feature_columns.get(feature_set),
             sequence_feature_columns=sequence_stores[feature_set].feature_columns if is_sequence_static_model(model_name) else None,
             static_vocabularies=final_vocabularies,
+            runtime=_model_runtime_metadata(final_model),
         )
         save_model_bundle(model_path, model=final_model, metadata=model_metadata)
         trained_records.append({**model_metadata, "artifact_path": str(model_path.resolve())})
@@ -612,6 +644,7 @@ def main() -> None:
         "models": model_names,
         "row_count": int(len(dataset.metadata)),
         "eval_mode": args.eval_mode,
+        "runtime_environment": _runtime_environment(),
         "notes": [
             "Targets are market-adjusted using the benchmark context table.",
             "Feature summaries are rolling-window last/mean/std values computed from dates <= anchor_date.",

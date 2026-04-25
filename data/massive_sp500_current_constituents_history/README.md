@@ -1,6 +1,6 @@
 # Massive S&P 500 Current-Constituent History
 
-This folder contains a large daily bar dump for the current S&P 500 constituent list, collected from Massive with one long range request per ticker to minimize REST calls.
+This folder contains a large daily bar dump for the current S&P 500 constituent list, collected from Massive with one long-range request per ticker to minimize REST calls.
 
 ## Purpose
 
@@ -16,7 +16,8 @@ Use this dataset for:
 - Constituent source: current S&P 500 list at collection time
 - Constituent count: `503` symbols
 - Requested date range: `1995-01-01` to `2026-04-21`
-- Actual returned coverage from Massive free-plan data: approximately `2024-04-22` to `2026-04-21`
+- Actual returned stock coverage from Massive free-plan data: approximately `2024-04-22` to `2026-04-21`
+- Market-context coverage: approximately `2024-04-24` to `2026-04-23`
 - Frequency: daily
 
 ## Files
@@ -31,29 +32,30 @@ Use this dataset for:
 - `processed/episode_index.csv`: completed supervised stock-window episodes with realized future targets, produced by `scripts/update_massive_daily_dataset.py`
 - `processed/prediction_windows.csv`: latest target-pending sliding windows for production-style prediction after an update, produced by `scripts/update_massive_daily_dataset.py`
 - `processed/incremental_update_manifest.json`: audit record for the latest incremental refresh and rebuild
-- `raw/market_context_bars.csv`: optional SPY and sector ETF raw context bars for V1 supervised models, produced by `scripts/collect_massive_market_context.py`
-- `processed/market_context_features.csv`: optional SPY and sector ETF engineered context features used for market-adjusted targets and context inputs
+- `raw/market_context_bars.csv`: SPY and sector ETF raw context bars for V1 supervised models, produced by `scripts/collect_massive_market_context.py`
+- `processed/market_context_features.csv`: SPY and sector ETF engineered context features used for market-adjusted targets and context inputs
 
 ## Current Scale
 
 - Symbols collected: `503`
-- Daily bar rows: about `249,497`
+- Daily stock bar rows: about `249,497`
 - Failures remaining: `0`
 
 ## Important Caveats
 
 - This is not a historical S&P 500 membership panel.
-- Using today’s constituent list for older periods introduces survivorship bias.
-- Despite requesting data back to `1995-01-01`, the free-plan response only returned about two years of history.
-- This folder now includes engineered daily features and same-date normalized features, with the large processed CSV outputs stored in Git LFS.
-- It still does not include anchor episodes or filing-dated fundamentals.
+- Using today's constituent list for older periods introduces survivorship bias.
+- Despite requesting data back to `1995-01-01`, the free-plan response only returned about two years of stock history.
+- The stock table and the market-context table do not end on the same date. Latest stock anchors currently top out at `2026-04-21`, while the context table extends to `2026-04-23`.
+- This folder does not yet include filing-dated fundamentals or a historically correct constituent-membership panel.
 
 ## Suggested Agent Usage
 
 - Prefer this folder when you need broad large-cap daily market data rather than a tiny smoke-test sample.
-- Before training, build a processed feature table and episode index from `raw/daily_market_bars.csv`.
+- Before training, build or refresh the processed feature tables from `raw/daily_market_bars.csv`.
 - Before V1 supervised training, collect market context with `py -3.11 scripts/collect_massive_market_context.py --dataset-root data\massive_sp500_current_constituents_history --rate-limit-calls 5 --rate-limit-period-seconds 60`.
 - Train V1 supervised baselines with `py -3.11 scripts/train_v1_supervised_baselines.py --dataset-root data\massive_sp500_current_constituents_history`.
+  The trainer now defaults to walk-forward evaluation and will use GPU-accelerated `torch`, `xgboost`, and `lightgbm` paths when available.
 - Score latest windows with all saved models using `py -3.11 scripts/predict_v1_supervised_baselines.py --run-dir artifacts\v1_baselines\<run_name> --dataset-root data\massive_sp500_current_constituents_history`.
 - To refresh the dataset with recent Massive bars and rebuild training/inference artifacts, run `python scripts/update_massive_daily_dataset.py --dataset-root data\massive_sp500_current_constituents_history`.
 - Do not present results from this folder as historically unbiased S&P 500 backtests unless historical membership is added later.

@@ -12,7 +12,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.data.v1_dataset import (  # noqa: E402
+    STATIC_CATEGORICAL_COLUMNS,
     build_latest_v1_feature_sets,
+    build_sequence_feature_store,
+    encode_static_categories,
     load_daily_features,
     load_market_context_features,
 )
@@ -49,6 +52,16 @@ def _aligned_features(frame: pd.DataFrame, feature_columns: list[str]) -> pd.Dat
         for col in feature_columns
     }
     return pd.DataFrame(columns, index=frame.index)
+
+
+def _resolve_model_index_path(run_dir: Path) -> Path:
+    preferred = run_dir / "final_models.json"
+    fallback = run_dir / "trained_models.json"
+    if preferred.exists():
+        return preferred
+    if fallback.exists():
+        return fallback
+    raise SystemExit(f"Missing model index. Checked: {preferred} and {fallback}")
 
 
 def _parse_benchmark_return_assumption(value: str, target_columns: list[str]) -> dict[str, float]:
@@ -95,10 +108,8 @@ def _add_implied_close_columns(
 def main() -> None:
     args = parse_args()
     run_dir = Path(args.run_dir)
-    model_index_path = run_dir / "trained_models.json"
+    model_index_path = _resolve_model_index_path(run_dir)
     leaderboard_path = run_dir / "leaderboard.csv"
-    if not model_index_path.exists():
-        raise SystemExit(f"Missing trained model index: {model_index_path}")
 
     stock_features = load_daily_features(args.dataset_root)
     context_features = load_market_context_features(args.dataset_root, stock_features=stock_features)
@@ -122,12 +133,53 @@ def main() -> None:
     metadata = _add_anchor_close(metadata, stock_features)
     leaderboard = pd.read_csv(leaderboard_path) if leaderboard_path.exists() else pd.DataFrame()
     prediction_frames: list[pd.DataFrame] = []
+    sequence_stores: dict[tuple[str, tuple[str, ...]], object] = {}
     for record in model_index["models"]:
         feature_set = record["feature_set"]
         model_name = record["model_name"]
         bundle = load_model_bundle(record["artifact_path"])
         model = bundle["model"]
-        x = _aligned_features(feature_sets[feature_set], list(record["feature_columns"]))
+        bundle_metadata = bundle.get("metadata", {})
+        input_layout = str(record.get("input_layout") or bundle_metadata.get("input_layout") or "tabular")
+        if input_layout == "sequence_static":
+            sequence_feature_columns = list(
+                record.get("sequence_feature_columns")
+                or bundle_metadata.get("sequence_feature_columns")
+                or []
+            )
+            static_columns = list(
+                record.get("static_categorical_columns")
+                or bundle_metadata.get("static_categorical_columns")
+                or STATIC_CATEGORICAL_COLUMNS
+            )
+            static_vocabularies = dict(
+                record.get("static_vocabularies")
+                or bundle_metadata.get("static_vocabularies")
+                or {}
+            )
+            benchmark_ticker = str(
+                record.get("benchmark_ticker") or bundle_metadata.get("benchmark_ticker") or first_model["benchmark_ticker"]
+            )
+            cache_key = (feature_set, tuple(sequence_feature_columns))
+            if cache_key not in sequence_stores:
+                sequence_stores[cache_key] = build_sequence_feature_store(
+                    stock_features,
+                    feature_set,
+                    benchmark_ticker=benchmark_ticker,
+                    feature_columns=sequence_feature_columns,
+                )
+            x = {
+                "store": sequence_stores[cache_key],
+                "metadata": metadata.reset_index(drop=True),
+                "static_categorical": encode_static_categories(
+                    metadata.reset_index(drop=True),
+                    static_vocabularies,
+                    columns=static_columns,
+                ),
+            }
+        else:
+            feature_columns = list(record.get("feature_columns") or bundle_metadata.get("feature_columns") or [])
+            x = _aligned_features(feature_sets[feature_set], feature_columns)
         pred = model.predict(x)
         rank = None
         recommended = False

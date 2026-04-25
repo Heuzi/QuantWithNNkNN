@@ -106,6 +106,8 @@ FEATURE_SET_NAMES = (
     "stock_relative_market",
     "stock_relative_market_sector",
 )
+SEQUENCE_FEATURE_SET_NAMES = ("stock_only", "stock_relative")
+STATIC_CATEGORICAL_COLUMNS = ("gics_sector", "gics_sub_industry")
 
 
 @dataclass(frozen=True)
@@ -116,6 +118,69 @@ class V1Dataset:
     target_columns: list[str]
     feature_columns: dict[str, list[str]]
     split_by_date: dict[str, tuple[str, str]]
+
+
+@dataclass(frozen=True)
+class WalkForwardFold:
+    fold_id: int
+    train_dates: tuple[str, ...]
+    val_dates: tuple[str, ...]
+    oos_dates: tuple[str, ...]
+    purge_gap: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "fold_id": self.fold_id,
+            "train_dates": list(self.train_dates),
+            "val_dates": list(self.val_dates),
+            "oos_dates": list(self.oos_dates),
+            "purge_gap": self.purge_gap,
+            "train_start_date": self.train_dates[0] if self.train_dates else None,
+            "train_end_date": self.train_dates[-1] if self.train_dates else None,
+            "val_start_date": self.val_dates[0] if self.val_dates else None,
+            "val_end_date": self.val_dates[-1] if self.val_dates else None,
+            "oos_start_date": self.oos_dates[0] if self.oos_dates else None,
+            "oos_end_date": self.oos_dates[-1] if self.oos_dates else None,
+        }
+
+
+@dataclass(frozen=True)
+class SequenceFeatureStore:
+    feature_set: str
+    feature_columns: list[str]
+    ticker_arrays: dict[str, np.ndarray]
+    ticker_dates: dict[str, np.ndarray]
+
+    def get_window(self, ticker: str, end_index: int, window_length: int) -> np.ndarray:
+        rows = self.ticker_arrays[str(ticker).upper()]
+        start = end_index - window_length + 1
+        if start < 0 or end_index >= len(rows):
+            raise IndexError(f"Invalid window for {ticker=} {end_index=} {window_length=}")
+        return rows[start : end_index + 1]
+
+    def fit_rows(self, train_dates: Sequence[str]) -> np.ndarray:
+        train_dates_set = {str(value) for value in train_dates}
+        pieces: list[np.ndarray] = []
+        for ticker, rows in self.ticker_arrays.items():
+            dates = self.ticker_dates[ticker]
+            mask = np.isin(dates, list(train_dates_set))
+            if mask.any():
+                pieces.append(rows[mask])
+        if not pieces:
+            return np.empty((0, len(self.feature_columns)), dtype=np.float32)
+        return np.concatenate(pieces, axis=0)
+
+    def fit_rows_through(self, cutoff_date: str) -> np.ndarray:
+        pieces: list[np.ndarray] = []
+        cutoff = str(cutoff_date)
+        for ticker, rows in self.ticker_arrays.items():
+            dates = self.ticker_dates[ticker]
+            mask = dates <= cutoff
+            if mask.any():
+                pieces.append(rows[mask])
+        if not pieces:
+            return np.empty((0, len(self.feature_columns)), dtype=np.float32)
+        return np.concatenate(pieces, axis=0)
 
 
 def parse_horizons(value: str | Sequence[int] | None) -> tuple[int, ...]:
@@ -188,6 +253,122 @@ def select_context_feature_columns(df: pd.DataFrame) -> list[str]:
     return _available_numeric_columns(df, CONTEXT_FEATURES)
 
 
+def select_sequence_feature_columns(stock_features: pd.DataFrame, feature_set: str) -> list[str]:
+    if feature_set not in SEQUENCE_FEATURE_SET_NAMES:
+        raise ValueError(f"Sequence inputs are only supported for {SEQUENCE_FEATURE_SET_NAMES}, got {feature_set}.")
+    return select_stock_feature_columns(stock_features, include_relative=feature_set != "stock_only")
+
+
+def _filtered_stock_universe(
+    stock_features: pd.DataFrame,
+    *,
+    benchmark_ticker: str = DEFAULT_BENCHMARK_TICKER,
+) -> pd.DataFrame:
+    excluded = set(MARKET_CONTEXT_TICKERS)
+    if benchmark_ticker.upper():
+        excluded.add(benchmark_ticker.upper())
+    stocks = stock_features[~stock_features["ticker"].isin(excluded)].copy()
+    stocks = stocks.sort_values(["ticker", "date"]).reset_index(drop=True)
+    stocks["window_row_count"] = stocks.groupby("ticker").cumcount() + 1
+    return stocks
+
+
+def build_sequence_feature_store(
+    stock_features: pd.DataFrame,
+    feature_set: str,
+    *,
+    benchmark_ticker: str = DEFAULT_BENCHMARK_TICKER,
+    feature_columns: Sequence[str] | None = None,
+) -> SequenceFeatureStore:
+    stocks = _filtered_stock_universe(stock_features, benchmark_ticker=benchmark_ticker)
+    resolved_feature_columns = list(feature_columns) if feature_columns is not None else select_sequence_feature_columns(stocks, feature_set)
+    if not resolved_feature_columns:
+        raise ValueError(f"No sequence feature columns available for {feature_set}.")
+    ticker_arrays: dict[str, np.ndarray] = {}
+    ticker_dates: dict[str, np.ndarray] = {}
+    for ticker, group in stocks.groupby("ticker", sort=False):
+        group_values = group.reindex(columns=resolved_feature_columns, fill_value=0.0)
+        ticker_arrays[str(ticker).upper()] = group_values.astype(float).to_numpy(dtype=np.float32)
+        ticker_dates[str(ticker).upper()] = group["date"].astype(str).to_numpy(dtype=object)
+    return SequenceFeatureStore(
+        feature_set=feature_set,
+        feature_columns=resolved_feature_columns,
+        ticker_arrays=ticker_arrays,
+        ticker_dates=ticker_dates,
+    )
+
+
+def build_category_vocabularies(
+    metadata: pd.DataFrame,
+    *,
+    columns: Sequence[str] = STATIC_CATEGORICAL_COLUMNS,
+) -> dict[str, dict[str, int]]:
+    vocabularies: dict[str, dict[str, int]] = {}
+    for column in columns:
+        values = sorted(
+            {
+                str(value)
+                for value in metadata[column].dropna().astype(str).tolist()
+                if str(value).strip()
+            }
+        )
+        vocabularies[column] = {value: idx + 1 for idx, value in enumerate(values)}
+    return vocabularies
+
+
+def encode_static_categories(
+    metadata: pd.DataFrame,
+    vocabularies: dict[str, dict[str, int]],
+    *,
+    columns: Sequence[str] = STATIC_CATEGORICAL_COLUMNS,
+) -> dict[str, np.ndarray]:
+    encoded: dict[str, np.ndarray] = {}
+    for column in columns:
+        vocab = vocabularies.get(column, {})
+        values = metadata[column].fillna("").astype(str)
+        encoded[column] = values.map(lambda value: int(vocab.get(value, 0))).to_numpy(dtype=np.int64)
+    return encoded
+
+
+def build_walk_forward_folds(
+    metadata: pd.DataFrame,
+    *,
+    min_train_dates: int = 252,
+    val_block_size: int = 21,
+    oos_block_size: int = 21,
+    purge_gap: int = 20,
+) -> list[WalkForwardFold]:
+    dates = sorted(metadata["anchor_date"].dropna().astype(str).unique().tolist())
+    folds: list[WalkForwardFold] = []
+    oos_start_idx = min_train_dates + val_block_size + purge_gap
+    fold_id = 0
+    while oos_start_idx + oos_block_size <= len(dates):
+        eligible_dates = dates[: max(0, oos_start_idx - purge_gap)]
+        if len(eligible_dates) < min_train_dates + val_block_size:
+            break
+        train_dates = tuple(eligible_dates[:-val_block_size])
+        val_dates = tuple(eligible_dates[-val_block_size:])
+        oos_dates = tuple(dates[oos_start_idx : oos_start_idx + oos_block_size])
+        if len(train_dates) < min_train_dates or not val_dates or not oos_dates:
+            break
+        folds.append(
+            WalkForwardFold(
+                fold_id=fold_id,
+                train_dates=train_dates,
+                val_dates=val_dates,
+                oos_dates=oos_dates,
+                purge_gap=purge_gap,
+            )
+        )
+        fold_id += 1
+        oos_start_idx += oos_block_size
+    return folds
+
+
+def rows_for_dates(metadata: pd.DataFrame, dates: Sequence[str]) -> pd.Series:
+    return metadata["anchor_date"].astype(str).isin({str(value) for value in dates})
+
+
 def add_window_summaries(
     df: pd.DataFrame,
     *,
@@ -235,12 +416,7 @@ def build_multi_horizon_targets(
         )
     benchmark_close_by_date = benchmark.set_index("date")["close"].astype(float)
 
-    excluded = set(MARKET_CONTEXT_TICKERS)
-    if benchmark_ticker.upper():
-        excluded.add(benchmark_ticker.upper())
-    stocks = stock_features[~stock_features["ticker"].isin(excluded)].copy()
-    stocks = stocks.sort_values(["ticker", "date"]).reset_index(drop=True)
-    stocks["window_row_count"] = stocks.groupby("ticker").cumcount() + 1
+    stocks = _filtered_stock_universe(stock_features, benchmark_ticker=benchmark_ticker)
 
     target_frames: list[pd.DataFrame] = []
     max_horizon = max(horizons)
@@ -353,7 +529,9 @@ def build_v1_dataset(
         window_length=window_length,
     )
 
-    metadata = targets[["ticker", "anchor_date", "gics_sector", "gics_sub_industry", "sector_etf"]].copy()
+    metadata = targets[
+        ["ticker", "anchor_date", "gics_sector", "gics_sub_industry", "sector_etf", "window_row_count"]
+    ].copy()
     stock_only = targets.merge(
         stock_only_summary,
         left_on=["ticker", "anchor_date"],
@@ -431,17 +609,15 @@ def build_latest_v1_feature_sets(
         stocks = stocks[stocks["date"] <= cutoff]
         context = context[context["date"] <= cutoff]
 
-    excluded = set(MARKET_CONTEXT_TICKERS)
-    excluded.add(benchmark_ticker.upper())
-    stocks = stocks[~stocks["ticker"].isin(excluded)].copy()
-    stocks = stocks.sort_values(["ticker", "date"]).reset_index(drop=True)
-    stocks["window_row_count"] = stocks.groupby("ticker").cumcount() + 1
+    stocks = _filtered_stock_universe(stocks, benchmark_ticker=benchmark_ticker)
     latest_idx = stocks.groupby("ticker")["date"].idxmax()
     latest = stocks.loc[latest_idx].copy()
     latest = latest[latest["window_row_count"] >= window_length]
     latest = latest.rename(columns={"date": "anchor_date"})
     latest["sector_etf"] = latest["gics_sector"].map(SECTOR_ETF_BY_GICS)
-    metadata = latest[["ticker", "anchor_date", "gics_sector", "gics_sub_industry", "sector_etf"]].reset_index(drop=True)
+    metadata = latest[
+        ["ticker", "anchor_date", "gics_sector", "gics_sub_industry", "sector_etf", "window_row_count"]
+    ].reset_index(drop=True)
 
     stock_only_cols = select_stock_feature_columns(stock_features, include_relative=False)
     stock_relative_cols = select_stock_feature_columns(stock_features, include_relative=True)
@@ -497,7 +673,7 @@ def build_latest_v1_feature_sets(
         "stock_relative_market": feature_frame(stock_relative, include_market=True, include_sector=False),
         "stock_relative_market_sector": feature_frame(stock_relative, include_market=True, include_sector=True),
     }
-    non_features = {"ticker", "anchor_date", "gics_sector", "gics_sub_industry", "sector_etf"}
+    non_features = {"ticker", "anchor_date", "gics_sector", "gics_sub_industry", "sector_etf", "window_row_count"}
     feature_sets: dict[str, pd.DataFrame] = {}
     feature_columns: dict[str, list[str]] = {}
     for name, frame in frames.items():

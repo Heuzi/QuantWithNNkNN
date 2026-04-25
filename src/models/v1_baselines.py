@@ -1,23 +1,44 @@
 from __future__ import annotations
 
+import copy
 import json
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Any, Protocol, Sequence
 
 import numpy as np
 import pandas as pd
 
 
 EPS = 1e-12
+BASELINE_MODEL_NAMES = [
+    "zero",
+    "mean",
+    "momentum_heuristic",
+    "ridge",
+    "elastic_net",
+    "lightgbm",
+    "xgboost",
+    "sklearn_hist_gb",
+    "sklearn_mlp",
+    "torch_mlp",
+]
+SEQUENCE_STATIC_MODEL_NAME = "torch_seq_static"
 
 
 class Predictor(Protocol):
-    def fit(self, x: pd.DataFrame, y: pd.DataFrame) -> "Predictor":
+    def fit(
+        self,
+        x: Any,
+        y: pd.DataFrame,
+        *,
+        val_x: Any | None = None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "Predictor":
         ...
 
-    def predict(self, x: pd.DataFrame) -> np.ndarray:
+    def predict(self, x: Any) -> np.ndarray:
         ...
 
 
@@ -27,6 +48,11 @@ class Standardizer:
     scale_: np.ndarray | None = None
 
     def fit(self, x: np.ndarray) -> "Standardizer":
+        if x.size == 0:
+            width = x.shape[-1] if x.ndim >= 2 else 0
+            self.mean_ = np.zeros(width, dtype=np.float64)
+            self.scale_ = np.ones(width, dtype=np.float64)
+            return self
         valid = np.isfinite(x)
         counts = valid.sum(axis=0)
         sums = np.where(valid, x, 0.0).sum(axis=0)
@@ -54,30 +80,67 @@ class Standardizer:
         return x * self.scale_ + self.mean_
 
 
-def _as_array(frame: pd.DataFrame) -> np.ndarray:
-    return frame.astype(float).to_numpy(dtype=np.float64)
+def _as_array(frame: pd.DataFrame | np.ndarray) -> np.ndarray:
+    if isinstance(frame, pd.DataFrame):
+        return frame.astype(float).to_numpy(dtype=np.float64)
+    return np.asarray(frame, dtype=np.float64)
+
+
+def _hstack_static_arrays(static_categorical: dict[str, np.ndarray], columns: Sequence[str]) -> np.ndarray:
+    if not columns:
+        return np.empty((len(next(iter(static_categorical.values()), [])), 0), dtype=np.int64)
+    return np.column_stack([static_categorical[column] for column in columns]).astype(np.int64)
 
 
 class ZeroPredictor:
-    def fit(self, x: pd.DataFrame, y: pd.DataFrame) -> "ZeroPredictor":
+    def fit(
+        self,
+        x: Any,
+        y: pd.DataFrame,
+        *,
+        val_x: Any | None = None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "ZeroPredictor":
         self.output_dim_ = y.shape[1]
         return self
 
-    def predict(self, x: pd.DataFrame) -> np.ndarray:
-        return np.zeros((len(x), self.output_dim_), dtype=np.float64)
+    def predict(self, x: Any) -> np.ndarray:
+        if isinstance(x, dict):
+            count = len(x["metadata"])
+        else:
+            count = len(x)
+        return np.zeros((count, self.output_dim_), dtype=np.float64)
 
 
 class MeanPredictor:
-    def fit(self, x: pd.DataFrame, y: pd.DataFrame) -> "MeanPredictor":
+    def fit(
+        self,
+        x: Any,
+        y: pd.DataFrame,
+        *,
+        val_x: Any | None = None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "MeanPredictor":
         self.mean_ = y.astype(float).mean(axis=0).to_numpy(dtype=np.float64)
         return self
 
-    def predict(self, x: pd.DataFrame) -> np.ndarray:
-        return np.tile(self.mean_, (len(x), 1))
+    def predict(self, x: Any) -> np.ndarray:
+        if isinstance(x, dict):
+            count = len(x["metadata"])
+        else:
+            count = len(x)
+        return np.tile(self.mean_, (count, 1))
 
 
 class MomentumHeuristicPredictor:
-    def fit(self, x: pd.DataFrame, y: pd.DataFrame) -> "MomentumHeuristicPredictor":
+    def fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        *,
+        val_x: Any | None = None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "MomentumHeuristicPredictor":
         self.target_mean_ = y.astype(float).mean(axis=0).to_numpy(dtype=np.float64)
         self.momentum_cols_ = [
             col
@@ -108,11 +171,10 @@ class SklearnRegressor:
 
     def _make_estimator(self):
         from sklearn.ensemble import HistGradientBoostingRegressor
+        from sklearn.impute import SimpleImputer
         from sklearn.linear_model import ElasticNet, Ridge
         from sklearn.multioutput import MultiOutputRegressor
-        from sklearn.neural_network import MLPRegressor as SklearnMLPRegressor
         from sklearn.pipeline import make_pipeline
-        from sklearn.impute import SimpleImputer
         from sklearn.preprocessing import StandardScaler
 
         if self.estimator_name == "sklearn_ridge":
@@ -124,21 +186,6 @@ class SklearnRegressor:
             )
         if self.estimator_name == "sklearn_elastic_net":
             estimator = ElasticNet(alpha=0.0005, l1_ratio=0.2, max_iter=3000, random_state=13)
-            return make_pipeline(
-                SimpleImputer(strategy="constant", fill_value=0.0, keep_empty_features=True),
-                StandardScaler(),
-                estimator,
-            )
-        if self.estimator_name == "sklearn_mlp":
-            estimator = SklearnMLPRegressor(
-                hidden_layer_sizes=(96, 48),
-                activation="relu",
-                learning_rate_init=0.001,
-                max_iter=80,
-                random_state=17,
-                early_stopping=True,
-                n_iter_no_change=8,
-            )
             return make_pipeline(
                 SimpleImputer(strategy="constant", fill_value=0.0, keep_empty_features=True),
                 StandardScaler(),
@@ -158,7 +205,14 @@ class SklearnRegressor:
             )
         raise ValueError(f"Unknown sklearn estimator: {self.estimator_name}")
 
-    def fit(self, x: pd.DataFrame, y: pd.DataFrame) -> "SklearnRegressor":
+    def fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        *,
+        val_x: Any | None = None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "SklearnRegressor":
         self.model_ = self._make_estimator()
         self.model_.fit(x, y)
         return self
@@ -167,107 +221,379 @@ class SklearnRegressor:
         return np.asarray(self.model_.predict(x), dtype=np.float64)
 
 
-class LightGBMRegressor:
-    def fit(self, x: pd.DataFrame, y: pd.DataFrame) -> "LightGBMRegressor":
-        from lightgbm import LGBMRegressor
-        from sklearn.impute import SimpleImputer
-        from sklearn.multioutput import MultiOutputRegressor
-        from sklearn.pipeline import make_pipeline
+class SklearnMLPPredictor:
+    def __init__(
+        self,
+        *,
+        hidden_layer_sizes: tuple[int, ...] = (96, 48),
+        learning_rate_init: float = 0.001,
+        max_epochs: int = 80,
+        patience: int = 8,
+        tol: float = 1e-4,
+        random_state: int = 17,
+    ) -> None:
+        self.hidden_layer_sizes = hidden_layer_sizes
+        self.learning_rate_init = learning_rate_init
+        self.max_epochs = max_epochs
+        self.patience = patience
+        self.tol = tol
+        self.random_state = random_state
 
-        estimator = LGBMRegressor(
-            n_estimators=160,
-            learning_rate=0.03,
-            num_leaves=31,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            objective="regression",
-            random_state=23,
-            verbosity=-1,
+    def _build_model(self):
+        from sklearn.neural_network import MLPRegressor
+
+        return MLPRegressor(
+            hidden_layer_sizes=self.hidden_layer_sizes,
+            activation="relu",
+            learning_rate_init=self.learning_rate_init,
+            max_iter=1,
+            shuffle=True,
+            warm_start=True,
+            random_state=self.random_state,
         )
-        self.model_ = make_pipeline(
-            SimpleImputer(strategy="constant", fill_value=0.0, keep_empty_features=True),
-            MultiOutputRegressor(estimator),
-        )
-        self.model_.fit(x, y)
+
+    def _prepare(self, x: pd.DataFrame, *, fit: bool) -> np.ndarray:
+        from sklearn.impute import SimpleImputer
+        from sklearn.preprocessing import StandardScaler
+
+        if fit:
+            self.imputer_ = SimpleImputer(strategy="constant", fill_value=0.0, keep_empty_features=True)
+            self.scaler_ = StandardScaler()
+            values = self.imputer_.fit_transform(x)
+            return self.scaler_.fit_transform(values)
+        values = self.imputer_.transform(x)
+        return self.scaler_.transform(values)
+
+    def fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        *,
+        val_x: pd.DataFrame | None = None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "SklearnMLPPredictor":
+        x_train = self._prepare(x, fit=True)
+        y_train = _as_array(y)
+        x_val = self._prepare(val_x, fit=False) if val_x is not None else None
+        y_val_arr = _as_array(val_y) if val_y is not None else None
+
+        self.model_ = self._build_model()
+        best_state: tuple[list[np.ndarray], list[np.ndarray]] | None = None
+        best_metric = np.inf
+        best_epoch = 0
+        epochs_without_improvement = 0
+        for epoch in range(self.max_epochs):
+            self.model_.partial_fit(x_train, y_train)
+            score_x = x_val if x_val is not None else x_train
+            score_y = y_val_arr if y_val_arr is not None else y_train
+            pred = np.asarray(self.model_.predict(score_x), dtype=np.float64)
+            metric = float(np.nanmean((pred - score_y) ** 2))
+            if metric + self.tol < best_metric:
+                best_metric = metric
+                best_epoch = epoch + 1
+                best_state = (
+                    [coef.copy() for coef in self.model_.coefs_],
+                    [intercept.copy() for intercept in self.model_.intercepts_],
+                )
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+            if x_val is not None and epochs_without_improvement >= self.patience:
+                break
+        if best_state is not None:
+            self.model_.coefs_ = [coef.copy() for coef in best_state[0]]
+            self.model_.intercepts_ = [intercept.copy() for intercept in best_state[1]]
+        self.best_epoch_ = max(best_epoch, 1)
+        return self
+
+    def refit_full(self, x: pd.DataFrame, y: pd.DataFrame) -> "SklearnMLPPredictor":
+        x_full = self._prepare(x, fit=True)
+        y_full = _as_array(y)
+        self.model_ = self._build_model()
+        for _ in range(max(getattr(self, "best_epoch_", self.max_epochs), 1)):
+            self.model_.partial_fit(x_full, y_full)
         return self
 
     def predict(self, x: pd.DataFrame) -> np.ndarray:
-        return np.asarray(self.model_.predict(x), dtype=np.float64)
+        x_values = self._prepare(x, fit=False)
+        return np.asarray(self.model_.predict(x_values), dtype=np.float64)
+
+
+class LightGBMRegressor:
+    def __init__(self, *, n_estimators: int = 400, patience: int = 25, random_state: int = 23) -> None:
+        self.n_estimators = n_estimators
+        self.patience = patience
+        self.random_state = random_state
+
+    def _preprocess(self, x: pd.DataFrame, *, fit: bool) -> np.ndarray:
+        from sklearn.impute import SimpleImputer
+
+        if fit:
+            self.imputer_ = SimpleImputer(strategy="constant", fill_value=0.0, keep_empty_features=True)
+            return self.imputer_.fit_transform(x)
+        return self.imputer_.transform(x)
+
+    def fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        *,
+        val_x: pd.DataFrame | None = None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "LightGBMRegressor":
+        from lightgbm import LGBMRegressor, early_stopping
+
+        x_train = self._preprocess(x, fit=True)
+        x_val = self._preprocess(val_x, fit=False) if val_x is not None else None
+        y_train = _as_array(y)
+        y_val_arr = _as_array(val_y) if val_y is not None else None
+        self.models_: list[object] = []
+        self.best_iterations_: list[int] = []
+        for target_idx in range(y_train.shape[1]):
+            estimator = LGBMRegressor(
+                n_estimators=self.n_estimators,
+                learning_rate=0.03,
+                num_leaves=31,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                objective="regression",
+                random_state=self.random_state + target_idx,
+                verbosity=-1,
+            )
+            if x_val is not None and y_val_arr is not None:
+                estimator.fit(
+                    x_train,
+                    y_train[:, target_idx],
+                    eval_set=[(x_val, y_val_arr[:, target_idx])],
+                    eval_metric="rmse",
+                    callbacks=[early_stopping(self.patience, verbose=False)],
+                )
+            else:
+                estimator.fit(x_train, y_train[:, target_idx])
+            best_iteration = int(getattr(estimator, "best_iteration_", 0) or self.n_estimators)
+            self.models_.append(estimator)
+            self.best_iterations_.append(best_iteration)
+        return self
+
+    def refit_full(self, x: pd.DataFrame, y: pd.DataFrame) -> "LightGBMRegressor":
+        from lightgbm import LGBMRegressor
+
+        x_full = self._preprocess(x, fit=True)
+        y_full = _as_array(y)
+        self.models_ = []
+        for target_idx in range(y_full.shape[1]):
+            estimator = LGBMRegressor(
+                n_estimators=int(self.best_iterations_[target_idx]),
+                learning_rate=0.03,
+                num_leaves=31,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                objective="regression",
+                random_state=self.random_state + target_idx,
+                verbosity=-1,
+            )
+            estimator.fit(x_full, y_full[:, target_idx])
+            self.models_.append(estimator)
+        return self
+
+    def predict(self, x: pd.DataFrame) -> np.ndarray:
+        x_values = self._preprocess(x, fit=False)
+        preds = [np.asarray(model.predict(x_values), dtype=np.float64) for model in self.models_]
+        return np.column_stack(preds)
 
 
 class XGBoostRegressor:
-    def fit(self, x: pd.DataFrame, y: pd.DataFrame) -> "XGBoostRegressor":
+    def __init__(self, *, n_estimators: int = 400, patience: int = 25, random_state: int = 29) -> None:
+        self.n_estimators = n_estimators
+        self.patience = patience
+        self.random_state = random_state
+
+    def _preprocess(self, x: pd.DataFrame, *, fit: bool) -> np.ndarray:
         from sklearn.impute import SimpleImputer
-        from sklearn.multioutput import MultiOutputRegressor
-        from sklearn.pipeline import make_pipeline
+
+        if fit:
+            self.imputer_ = SimpleImputer(strategy="constant", fill_value=0.0, keep_empty_features=True)
+            return self.imputer_.fit_transform(x)
+        return self.imputer_.transform(x)
+
+    def fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        *,
+        val_x: pd.DataFrame | None = None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "XGBoostRegressor":
         from xgboost import XGBRegressor
 
-        estimator = XGBRegressor(
-            n_estimators=160,
-            learning_rate=0.03,
-            max_depth=4,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            objective="reg:squarederror",
-            random_state=29,
-            n_jobs=1,
-        )
-        self.model_ = make_pipeline(
-            SimpleImputer(strategy="constant", fill_value=0.0, keep_empty_features=True),
-            MultiOutputRegressor(estimator),
-        )
-        self.model_.fit(x, y)
+        x_train = self._preprocess(x, fit=True)
+        x_val = self._preprocess(val_x, fit=False) if val_x is not None else None
+        y_train = _as_array(y)
+        y_val_arr = _as_array(val_y) if val_y is not None else None
+        self.models_: list[object] = []
+        self.best_iterations_: list[int] = []
+        for target_idx in range(y_train.shape[1]):
+            estimator = XGBRegressor(
+                n_estimators=self.n_estimators,
+                learning_rate=0.03,
+                max_depth=4,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                objective="reg:squarederror",
+                random_state=self.random_state + target_idx,
+                n_jobs=1,
+                early_stopping_rounds=self.patience if x_val is not None and y_val_arr is not None else None,
+            )
+            if x_val is not None and y_val_arr is not None:
+                estimator.fit(
+                    x_train,
+                    y_train[:, target_idx],
+                    eval_set=[(x_val, y_val_arr[:, target_idx])],
+                    verbose=False,
+                )
+            else:
+                estimator.fit(x_train, y_train[:, target_idx], verbose=False)
+            best_iteration = getattr(estimator, "best_iteration", None)
+            if best_iteration is None:
+                best_iteration = getattr(estimator, "best_ntree_limit", None)
+            self.models_.append(estimator)
+            self.best_iterations_.append(int(best_iteration or self.n_estimators))
+        return self
+
+    def refit_full(self, x: pd.DataFrame, y: pd.DataFrame) -> "XGBoostRegressor":
+        from xgboost import XGBRegressor
+
+        x_full = self._preprocess(x, fit=True)
+        y_full = _as_array(y)
+        self.models_ = []
+        for target_idx in range(y_full.shape[1]):
+            estimator = XGBRegressor(
+                n_estimators=int(self.best_iterations_[target_idx]),
+                learning_rate=0.03,
+                max_depth=4,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                objective="reg:squarederror",
+                random_state=self.random_state + target_idx,
+                n_jobs=1,
+            )
+            estimator.fit(x_full, y_full[:, target_idx], verbose=False)
+            self.models_.append(estimator)
         return self
 
     def predict(self, x: pd.DataFrame) -> np.ndarray:
-        return np.asarray(self.model_.predict(x), dtype=np.float64)
+        x_values = self._preprocess(x, fit=False)
+        preds = [np.asarray(model.predict(x_values), dtype=np.float64) for model in self.models_]
+        return np.column_stack(preds)
 
 
 class TorchMLPRegressor:
     def __init__(
         self,
+        *,
         hidden_units: int = 128,
         learning_rate: float = 0.001,
-        epochs: int = 40,
+        max_epochs: int = 80,
+        patience: int = 10,
         batch_size: int = 512,
         random_state: int = 31,
     ) -> None:
         self.hidden_units = hidden_units
         self.learning_rate = learning_rate
-        self.epochs = epochs
+        self.max_epochs = max_epochs
+        self.patience = patience
         self.batch_size = batch_size
         self.random_state = random_state
         self.x_scaler = Standardizer()
         self.y_scaler = Standardizer()
 
-    def fit(self, x: pd.DataFrame, y: pd.DataFrame) -> "TorchMLPRegressor":
+    def _build_model(self, input_dim: int, output_dim: int):
         import torch
 
-        torch.manual_seed(self.random_state)
-        x_values = self.x_scaler.fit(_as_array(x)).transform(_as_array(x)).astype(np.float32)
-        y_values = self.y_scaler.fit(_as_array(y)).transform(_as_array(y)).astype(np.float32)
-        x_tensor = torch.from_numpy(x_values)
-        y_tensor = torch.from_numpy(y_values)
-        self.model_ = torch.nn.Sequential(
-            torch.nn.Linear(x_values.shape[1], self.hidden_units),
+        return torch.nn.Sequential(
+            torch.nn.Linear(input_dim, self.hidden_units),
             torch.nn.ReLU(),
             torch.nn.Dropout(0.05),
             torch.nn.Linear(self.hidden_units, max(self.hidden_units // 2, 16)),
             torch.nn.ReLU(),
-            torch.nn.Linear(max(self.hidden_units // 2, 16), y_values.shape[1]),
+            torch.nn.Linear(max(self.hidden_units // 2, 16), output_dim),
         )
+
+    def _fit_fixed_epochs(self, x_values: np.ndarray, y_values: np.ndarray, epochs: int) -> None:
+        import torch
+
+        dataset = torch.utils.data.TensorDataset(
+            torch.from_numpy(x_values.astype(np.float32)),
+            torch.from_numpy(y_values.astype(np.float32)),
+        )
+        loader = torch.utils.data.DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=True)
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
         loss_fn = torch.nn.MSELoss()
-        n = len(x_tensor)
-        for _ in range(self.epochs):
-            order = torch.randperm(n)
-            for start in range(0, n, self.batch_size):
-                idx = order[start : start + self.batch_size]
-                pred = self.model_(x_tensor[idx])
-                loss = loss_fn(pred, y_tensor[idx])
+        self.model_.train()
+        for _ in range(max(epochs, 1)):
+            for batch_x, batch_y in loader:
+                pred = self.model_(batch_x)
+                loss = loss_fn(pred, batch_y)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+
+    def fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        *,
+        val_x: pd.DataFrame | None = None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "TorchMLPRegressor":
+        import torch
+
+        torch.manual_seed(self.random_state)
+        x_train = self.x_scaler.fit(_as_array(x)).transform(_as_array(x)).astype(np.float32)
+        y_train = self.y_scaler.fit(_as_array(y)).transform(_as_array(y)).astype(np.float32)
+        x_val = self.x_scaler.transform(_as_array(val_x)).astype(np.float32) if val_x is not None else None
+        y_val_arr = self.y_scaler.transform(_as_array(val_y)).astype(np.float32) if val_y is not None else None
+        self.model_ = self._build_model(x_train.shape[1], y_train.shape[1])
+        dataset = torch.utils.data.TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train))
+        loader = torch.utils.data.DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=True)
+        optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
+        loss_fn = torch.nn.MSELoss()
+        best_state = copy.deepcopy(self.model_.state_dict())
+        best_metric = np.inf
+        best_epoch = 1
+        epochs_without_improvement = 0
+        for epoch in range(self.max_epochs):
+            self.model_.train()
+            for batch_x, batch_y in loader:
+                pred = self.model_(batch_x)
+                loss = loss_fn(pred, batch_y)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+            metric_x = x_val if x_val is not None else x_train
+            metric_y = y_val_arr if y_val_arr is not None else y_train
+            self.model_.eval()
+            with torch.no_grad():
+                pred = self.model_(torch.from_numpy(metric_x)).numpy()
+            metric = float(np.nanmean((pred - metric_y) ** 2))
+            if metric + 1e-6 < best_metric:
+                best_metric = metric
+                best_state = copy.deepcopy(self.model_.state_dict())
+                best_epoch = epoch + 1
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+            if x_val is not None and epochs_without_improvement >= self.patience:
+                break
+        self.model_.load_state_dict(best_state)
+        self.best_epoch_ = best_epoch
+        return self
+
+    def refit_full(self, x: pd.DataFrame, y: pd.DataFrame) -> "TorchMLPRegressor":
+        x_full = self.x_scaler.fit(_as_array(x)).transform(_as_array(x)).astype(np.float32)
+        y_full = self.y_scaler.fit(_as_array(y)).transform(_as_array(y)).astype(np.float32)
+        self.model_ = self._build_model(x_full.shape[1], y_full.shape[1])
+        self._fit_fixed_epochs(x_full, y_full, getattr(self, "best_epoch_", self.max_epochs))
         return self
 
     def predict(self, x: pd.DataFrame) -> np.ndarray:
@@ -279,7 +605,368 @@ class TorchMLPRegressor:
         return self.y_scaler.inverse_transform(pred)
 
 
-def make_model(model_name: str) -> Predictor:
+class _SequenceStaticDataset:
+    def __init__(
+        self,
+        *,
+        store: Any,
+        metadata: pd.DataFrame,
+        static_categorical: dict[str, np.ndarray],
+        window_length: int,
+        target_frame: pd.DataFrame | None = None,
+        static_columns: Sequence[str],
+    ) -> None:
+        self.store = store
+        self.tickers = metadata["ticker"].astype(str).str.upper().tolist()
+        self.end_indices = metadata["window_row_count"].astype(int).to_numpy(dtype=np.int64) - 1
+        self.window_length = window_length
+        self.static_columns = list(static_columns)
+        self.static_values = _hstack_static_arrays(static_categorical, self.static_columns)
+        self.targets = _as_array(target_frame).astype(np.float32) if target_frame is not None else None
+
+    def __len__(self) -> int:
+        return len(self.tickers)
+
+    def __getitem__(self, index: int):
+        sequence = self.store.get_window(self.tickers[index], int(self.end_indices[index]), self.window_length).astype(
+            np.float32
+        )
+        static_ids = self.static_values[index].astype(np.int64)
+        if self.targets is None:
+            return sequence, static_ids
+        return sequence, static_ids, self.targets[index]
+
+
+class _SequenceStaticNet:
+    def __init__(
+        self,
+        *,
+        sequence_dim: int,
+        static_cardinalities: Sequence[int],
+        output_dim: int,
+        window_length: int,
+        hidden_dim: int = 128,
+        static_hidden_dim: int = 64,
+        nhead: int = 4,
+        num_layers: int = 2,
+        dropout: float = 0.1,
+    ) -> None:
+        import torch
+
+        super().__init__()
+        self.window_length = window_length
+        self.token_projection = torch.nn.Linear(sequence_dim, hidden_dim)
+        self.position_embedding = torch.nn.Embedding(window_length, hidden_dim)
+        encoder_layer = torch.nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=nhead,
+            dim_feedforward=256,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.transformer = torch.nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        embedding_dims = [min(32, max(4, (cardinality + 1) // 4)) for cardinality in static_cardinalities]
+        self.static_embeddings = torch.nn.ModuleList(
+            [torch.nn.Embedding(cardinality, emb_dim) for cardinality, emb_dim in zip(static_cardinalities, embedding_dims)]
+        )
+        static_input_dim = int(sum(embedding_dims))
+        self.static_mlp = torch.nn.Sequential(
+            torch.nn.Linear(static_input_dim, static_hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(dropout),
+            torch.nn.Linear(static_hidden_dim, static_hidden_dim),
+            torch.nn.ReLU(),
+        )
+        self.fusion = torch.nn.Sequential(
+            torch.nn.Linear(hidden_dim + static_hidden_dim, hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(dropout),
+            torch.nn.Linear(hidden_dim, output_dim),
+        )
+
+    def parameters(self):
+        import itertools
+
+        modules = [
+            self.token_projection,
+            self.position_embedding,
+            self.transformer,
+            self.static_embeddings,
+            self.static_mlp,
+            self.fusion,
+        ]
+        return itertools.chain.from_iterable(module.parameters() for module in modules)
+
+    def state_dict(self):
+        return {
+            "token_projection": self.token_projection.state_dict(),
+            "position_embedding": self.position_embedding.state_dict(),
+            "transformer": self.transformer.state_dict(),
+            "static_embeddings": [module.state_dict() for module in self.static_embeddings],
+            "static_mlp": self.static_mlp.state_dict(),
+            "fusion": self.fusion.state_dict(),
+        }
+
+    def load_state_dict(self, state_dict: dict[str, object]) -> None:
+        self.token_projection.load_state_dict(state_dict["token_projection"])
+        self.position_embedding.load_state_dict(state_dict["position_embedding"])
+        self.transformer.load_state_dict(state_dict["transformer"])
+        for module, state in zip(self.static_embeddings, state_dict["static_embeddings"]):
+            module.load_state_dict(state)
+        self.static_mlp.load_state_dict(state_dict["static_mlp"])
+        self.fusion.load_state_dict(state_dict["fusion"])
+
+    def train(self) -> None:
+        self.token_projection.train()
+        self.position_embedding.train()
+        self.transformer.train()
+        self.static_embeddings.train()
+        self.static_mlp.train()
+        self.fusion.train()
+
+    def eval(self) -> None:
+        self.token_projection.eval()
+        self.position_embedding.eval()
+        self.transformer.eval()
+        self.static_embeddings.eval()
+        self.static_mlp.eval()
+        self.fusion.eval()
+
+    def __call__(self, sequence, static_ids):
+        import torch
+
+        positions = torch.arange(sequence.shape[1], device=sequence.device)
+        token = self.token_projection(sequence) + self.position_embedding(positions)[None, :, :]
+        encoded = self.transformer(token)
+        pooled = encoded.mean(dim=1)
+        embedded = [module(static_ids[:, idx]) for idx, module in enumerate(self.static_embeddings)]
+        static_repr = self.static_mlp(torch.cat(embedded, dim=1))
+        return self.fusion(torch.cat([pooled, static_repr], dim=1))
+
+
+class TorchSequenceStaticRegressor:
+    def __init__(
+        self,
+        *,
+        window_length: int = 60,
+        hidden_dim: int = 128,
+        learning_rate: float = 0.001,
+        max_epochs: int = 60,
+        patience: int = 10,
+        batch_size: int = 256,
+        random_state: int = 37,
+    ) -> None:
+        self.window_length = window_length
+        self.hidden_dim = hidden_dim
+        self.learning_rate = learning_rate
+        self.max_epochs = max_epochs
+        self.patience = patience
+        self.batch_size = batch_size
+        self.random_state = random_state
+        self.x_scaler = Standardizer()
+        self.y_scaler = Standardizer()
+
+    def _prepare_sequence_tensor(self, sequence, mean_t, scale_t):
+        import torch
+
+        mean_view = mean_t.view(1, 1, -1)
+        scale_view = scale_t.view(1, 1, -1)
+        sequence = sequence.to(dtype=torch.float32)
+        sequence = torch.where(torch.isfinite(sequence), sequence, mean_view)
+        return (sequence - mean_view) / scale_view
+
+    def _train_cutoff_date(self, metadata: pd.DataFrame) -> str:
+        dates = metadata["anchor_date"].dropna().astype(str)
+        if dates.empty:
+            raise ValueError("Sequence/static training metadata is empty.")
+        return str(dates.max())
+
+    def _build_model(self, *, sequence_dim: int, static_cardinalities: Sequence[int], output_dim: int):
+        return _SequenceStaticNet(
+            sequence_dim=sequence_dim,
+            static_cardinalities=static_cardinalities,
+            output_dim=output_dim,
+            window_length=self.window_length,
+            hidden_dim=self.hidden_dim,
+        )
+
+    def _train_epochs(self, dataset: _SequenceStaticDataset, epochs: int) -> None:
+        import torch
+
+        loader = torch.utils.data.DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=True)
+        optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
+        loss_fn = torch.nn.MSELoss()
+        mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32))
+        scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32))
+        self.model_.train()
+        for _ in range(max(epochs, 1)):
+            for sequence, static_ids, target in loader:
+                sequence = self._prepare_sequence_tensor(sequence, mean_t, scale_t)
+                pred = self.model_(sequence, static_ids.long())
+                loss = loss_fn(pred, target.float())
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+    def fit(
+        self,
+        x: dict[str, object],
+        y: pd.DataFrame,
+        *,
+        val_x: dict[str, object] | None = None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "TorchSequenceStaticRegressor":
+        import torch
+
+        torch.manual_seed(self.random_state)
+        self.static_columns_ = list(x["static_categorical"].keys())
+        self.static_vocab_sizes_ = [
+            int(np.max(x["static_categorical"][column])) + 1 if len(x["static_categorical"][column]) else 1
+            for column in self.static_columns_
+        ]
+        train_rows = x["store"].fit_rows_through(self._train_cutoff_date(x["metadata"]))
+        self.x_scaler.fit(train_rows.astype(np.float64))
+        y_train = self.y_scaler.fit(_as_array(y)).transform(_as_array(y)).astype(np.float32)
+        y_val_arr = self.y_scaler.transform(_as_array(val_y)).astype(np.float32) if val_y is not None else None
+        train_dataset = _SequenceStaticDataset(
+            store=x["store"],
+            metadata=x["metadata"],
+            static_categorical=x["static_categorical"],
+            target_frame=pd.DataFrame(y_train, columns=y.columns),
+            window_length=self.window_length,
+            static_columns=self.static_columns_,
+        )
+        val_dataset = None
+        if val_x is not None and val_y is not None:
+            val_dataset = _SequenceStaticDataset(
+                store=val_x["store"],
+                metadata=val_x["metadata"],
+                static_categorical=val_x["static_categorical"],
+                target_frame=pd.DataFrame(y_val_arr, columns=val_y.columns),
+                window_length=self.window_length,
+                static_columns=self.static_columns_,
+            )
+        self.model_ = self._build_model(
+            sequence_dim=len(x["store"].feature_columns),
+            static_cardinalities=self.static_vocab_sizes_,
+            output_dim=y_train.shape[1],
+        )
+        self.output_dim_ = y_train.shape[1]
+        optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
+        loss_fn = torch.nn.MSELoss()
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=min(self.batch_size, len(train_dataset)),
+            shuffle=True,
+        )
+        mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32))
+        scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32))
+        best_state = copy.deepcopy(self.model_.state_dict())
+        best_metric = np.inf
+        best_epoch = 1
+        epochs_without_improvement = 0
+        for epoch in range(self.max_epochs):
+            self.model_.train()
+            for sequence, static_ids, target in train_loader:
+                sequence = self._prepare_sequence_tensor(sequence, mean_t, scale_t)
+                pred = self.model_(sequence, static_ids.long())
+                loss = loss_fn(pred, target.float())
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+            metric = self._dataset_loss(val_dataset if val_dataset is not None else train_dataset)
+            if metric + 1e-6 < best_metric:
+                best_metric = metric
+                best_state = copy.deepcopy(self.model_.state_dict())
+                best_epoch = epoch + 1
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+            if val_dataset is not None and epochs_without_improvement >= self.patience:
+                break
+        self.model_.load_state_dict(best_state)
+        self.best_epoch_ = best_epoch
+        return self
+
+    def _dataset_loss(self, dataset: _SequenceStaticDataset) -> float:
+        import torch
+
+        loader = torch.utils.data.DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=False)
+        loss_fn = torch.nn.MSELoss()
+        mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32))
+        scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32))
+        self.model_.eval()
+        losses: list[float] = []
+        with torch.no_grad():
+            for sequence, static_ids, target in loader:
+                sequence = self._prepare_sequence_tensor(sequence, mean_t, scale_t)
+                pred = self.model_(sequence, static_ids.long())
+                losses.append(float(loss_fn(pred, target.float()).item()))
+        return float(np.mean(losses)) if losses else np.inf
+
+    def refit_full(self, x: dict[str, object], y: pd.DataFrame) -> "TorchSequenceStaticRegressor":
+        train_rows = x["store"].fit_rows_through(self._train_cutoff_date(x["metadata"]))
+        self.x_scaler.fit(train_rows.astype(np.float64))
+        y_train = self.y_scaler.fit(_as_array(y)).transform(_as_array(y)).astype(np.float32)
+        train_dataset = _SequenceStaticDataset(
+            store=x["store"],
+            metadata=x["metadata"],
+            static_categorical=x["static_categorical"],
+            target_frame=pd.DataFrame(y_train, columns=y.columns),
+            window_length=self.window_length,
+            static_columns=self.static_columns_,
+        )
+        self.model_ = self._build_model(
+            sequence_dim=len(x["store"].feature_columns),
+            static_cardinalities=self.static_vocab_sizes_,
+            output_dim=y_train.shape[1],
+        )
+        self.output_dim_ = y_train.shape[1]
+        self._train_epochs(train_dataset, getattr(self, "best_epoch_", self.max_epochs))
+        return self
+
+    def predict(self, x: dict[str, object]) -> np.ndarray:
+        import torch
+
+        dataset = _SequenceStaticDataset(
+            store=x["store"],
+            metadata=x["metadata"],
+            static_categorical=x["static_categorical"],
+            target_frame=None,
+            window_length=self.window_length,
+            static_columns=self.static_columns_,
+        )
+        loader = torch.utils.data.DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=False)
+        mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32))
+        scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32))
+        outputs: list[np.ndarray] = []
+        self.model_.eval()
+        with torch.no_grad():
+            for sequence, static_ids in loader:
+                sequence = self._prepare_sequence_tensor(sequence, mean_t, scale_t)
+                pred = self.model_(sequence, static_ids.long()).cpu().numpy()
+                outputs.append(pred)
+        if not outputs:
+            return np.empty((0, getattr(self, "output_dim_", 0)), dtype=np.float64)
+        return self.y_scaler.inverse_transform(np.vstack(outputs))
+
+
+def is_sequence_static_model(model_name: str) -> bool:
+    return model_name == SEQUENCE_STATIC_MODEL_NAME
+
+
+def default_model_names(eval_mode: str = "walk_forward") -> list[str]:
+    names = list(BASELINE_MODEL_NAMES)
+    if eval_mode == "walk_forward":
+        names.append(SEQUENCE_STATIC_MODEL_NAME)
+    return names
+
+
+def available_model_names() -> list[str]:
+    return default_model_names(eval_mode="walk_forward")
+
+
+def make_model(model_name: str, *, window_length: int = 60) -> Predictor:
     if model_name == "zero":
         return ZeroPredictor()
     if model_name == "mean":
@@ -303,25 +990,12 @@ def make_model(model_name: str) -> Predictor:
     if model_name == "mlp":
         return TorchMLPRegressor()
     if model_name == "sklearn_mlp":
-        return SklearnRegressor("sklearn_mlp")
+        return SklearnMLPPredictor()
     if model_name == "torch_mlp":
         return TorchMLPRegressor()
+    if model_name == SEQUENCE_STATIC_MODEL_NAME:
+        return TorchSequenceStaticRegressor(window_length=window_length)
     raise ValueError(f"Unknown model: {model_name}")
-
-
-def default_model_names() -> list[str]:
-    return [
-        "zero",
-        "mean",
-        "momentum_heuristic",
-        "ridge",
-        "elastic_net",
-        "lightgbm",
-        "xgboost",
-        "sklearn_hist_gb",
-        "sklearn_mlp",
-        "torch_mlp",
-    ]
 
 
 def _rank(values: np.ndarray) -> np.ndarray:
@@ -402,6 +1076,7 @@ def prediction_frame(
     feature_set: str,
     leaderboard_rank: int | None = None,
     recommended: bool = False,
+    y_true: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     metadata_columns = ["ticker", "anchor_date"]
     if "anchor_close" in metadata.columns:
@@ -414,11 +1089,14 @@ def prediction_frame(
     for idx, target in enumerate(target_columns):
         pred_col = target.replace("market_adjusted_return", "pred_market_adjusted_return")
         out[pred_col] = y_pred[:, idx]
+        if y_true is not None:
+            actual_col = target.replace("market_adjusted_return", "actual_market_adjusted_return")
+            out[actual_col] = y_true[target].to_numpy()
     return out
 
 
-def build_leaderboard(metrics: pd.DataFrame) -> pd.DataFrame:
-    val = metrics[metrics["split"] == "val"].copy()
+def build_metric_summary(metrics: pd.DataFrame, *, split_name: str = "val") -> pd.DataFrame:
+    val = metrics[metrics["split"] == split_name].copy()
     preferred_targets = [target for target in val["target"].unique() if not target.endswith("_1d")]
     if preferred_targets:
         val = val[val["target"].isin(preferred_targets)]
@@ -441,7 +1119,12 @@ def build_leaderboard(metrics: pd.DataFrame) -> pd.DataFrame:
     ).reset_index(drop=True)
     grouped["leaderboard_rank"] = np.arange(1, len(grouped) + 1)
     grouped["recommended"] = grouped["leaderboard_rank"] <= min(3, len(grouped))
+    grouped["source_split"] = split_name
     return grouped
+
+
+def build_leaderboard(metrics: pd.DataFrame, *, split_name: str = "val") -> pd.DataFrame:
+    return build_metric_summary(metrics, split_name=split_name)
 
 
 def save_model_bundle(path: str | Path, *, model: Predictor, metadata: dict[str, object]) -> None:

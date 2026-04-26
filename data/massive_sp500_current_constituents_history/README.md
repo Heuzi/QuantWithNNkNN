@@ -34,6 +34,7 @@ Use this dataset for:
 - `processed/incremental_update_manifest.json`: audit record for the latest incremental refresh and rebuild
 - `raw/market_context_bars.csv`: SPY and sector ETF raw context bars for V1 supervised models, produced by `scripts/collect_massive_market_context.py`
 - `processed/market_context_features.csv`: SPY and sector ETF engineered context features used for market-adjusted targets and context inputs
+- V1 classification labels are now built at training time from the processed stock/context tables, including `market_outperform_any_20d_gt_5pct`
 
 ## Current Scale
 
@@ -55,7 +56,8 @@ Use this dataset for:
 - Before training, build or refresh the processed feature tables from `raw/daily_market_bars.csv`.
 - Before V1 supervised training, collect market context with `py -3.11 scripts/collect_massive_market_context.py --dataset-root data\massive_sp500_current_constituents_history --rate-limit-calls 5 --rate-limit-period-seconds 60`.
 - Train V1 supervised baselines with `py -3.11 scripts/train_v1_supervised_baselines.py --dataset-root data\massive_sp500_current_constituents_history`.
-  The trainer now defaults to walk-forward evaluation and will use GPU-accelerated `torch`, `xgboost`, and `lightgbm` paths when available.
+  The trainer now defaults to walk-forward evaluation, supports `--task-type regression|classification|both`, and will use GPU-accelerated `torch`, `xgboost`, and `lightgbm` paths when available.
 - Score latest windows with all saved models using `py -3.11 scripts/predict_v1_supervised_baselines.py --run-dir artifacts\v1_baselines\<run_name> --dataset-root data\massive_sp500_current_constituents_history`.
 - To refresh the dataset with recent Massive bars and rebuild training/inference artifacts, run `python scripts/update_massive_daily_dataset.py --dataset-root data\massive_sp500_current_constituents_history`.
+- The incremental updater is now premium-history ready on cold starts: if no local raw bars exist, it defaults to `--start-date 1995-01-01`. Free-plan accounts may still receive a much shorter vendor-limited range.
 - Do not present results from this folder as historically unbiased S&P 500 backtests unless historical membership is added later.

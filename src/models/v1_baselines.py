@@ -25,6 +25,14 @@ BASELINE_MODEL_NAMES = [
     "torch_mlp",
 ]
 SEQUENCE_STATIC_MODEL_NAME = "torch_seq_static"
+CLASSIFICATION_MODEL_NAMES = [
+    "logistic_regression",
+    "lightgbm_classifier",
+    "xgboost_classifier",
+    "sklearn_mlp_classifier",
+    "torch_mlp_classifier",
+]
+SEQUENCE_STATIC_CLASSIFICATION_MODEL_NAME = "torch_seq_static_classifier"
 
 
 class Predictor(Protocol):
@@ -125,6 +133,20 @@ def _copy_model_to_cpu(model):
     if hasattr(model_copy, "to"):
         model_copy = model_copy.to("cpu")
     return model_copy
+
+
+class _ConstantProbabilityClassifier:
+    def __init__(self, probability: float) -> None:
+        self.probability = float(np.clip(probability, 0.0, 1.0))
+
+    def predict_proba(self, x):
+        count = len(x)
+        positive = np.full(count, self.probability, dtype=np.float64)
+        negative = 1.0 - positive
+        return np.column_stack([negative, positive])
+
+    def predict(self, x):
+        return (self.predict_proba(x)[:, 1] >= 0.5).astype(float)
 
 
 class ZeroPredictor:
@@ -1162,11 +1184,804 @@ class TorchSequenceStaticRegressor:
             self.model_ = self.model_.to(self.device_)
 
 
+class LogisticClassifier:
+    def _prepare(self, x: pd.DataFrame, *, fit: bool) -> np.ndarray:
+        from sklearn.impute import SimpleImputer
+        from sklearn.preprocessing import StandardScaler
+
+        if fit:
+            self.imputer_ = SimpleImputer(strategy="constant", fill_value=0.0, keep_empty_features=True)
+            self.scaler_ = StandardScaler()
+            values = self.imputer_.fit_transform(x)
+            return self.scaler_.fit_transform(values)
+        values = self.imputer_.transform(x)
+        return self.scaler_.transform(values)
+
+    def fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        *,
+        val_x: pd.DataFrame | None = None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "LogisticClassifier":
+        from sklearn.linear_model import LogisticRegression
+
+        x_train = self._prepare(x, fit=True)
+        target = _as_array(y).reshape(-1)
+        if np.unique(target).size < 2:
+            self.model_ = _ConstantProbabilityClassifier(float(target[0]) if len(target) else 0.0)
+            return self
+        self.model_ = LogisticRegression(max_iter=2000, C=1.0, class_weight="balanced", random_state=41)
+        self.model_.fit(x_train, target)
+        return self
+
+    def predict(self, x: pd.DataFrame) -> np.ndarray:
+        x_values = self._prepare(x, fit=False)
+        return self.model_.predict_proba(x_values)[:, 1:2].astype(np.float64)
+
+
+class LightGBMClassifier:
+    def __init__(
+        self,
+        *,
+        n_estimators: int = 500,
+        patience: int = 25,
+        random_state: int = 43,
+        prefer_gpu: bool = True,
+    ) -> None:
+        self.n_estimators = n_estimators
+        self.patience = patience
+        self.random_state = random_state
+        self.prefer_gpu = prefer_gpu
+
+    def _preprocess(self, x: pd.DataFrame, *, fit: bool) -> np.ndarray:
+        from sklearn.impute import SimpleImputer
+
+        if fit:
+            self.imputer_ = SimpleImputer(strategy="constant", fill_value=0.0, keep_empty_features=True)
+            return self.imputer_.fit_transform(x)
+        return self.imputer_.transform(x)
+
+    def fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        *,
+        val_x: pd.DataFrame | None = None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "LightGBMClassifier":
+        from lightgbm import LGBMClassifier, early_stopping
+
+        x_train = self._preprocess(x, fit=True)
+        x_val = self._preprocess(val_x, fit=False) if val_x is not None else None
+        y_train = _as_array(y).reshape(-1)
+        if np.unique(y_train).size < 2:
+            self.model_ = _ConstantProbabilityClassifier(float(y_train[0]) if len(y_train) else 0.0)
+            self.best_iteration_ = 1
+            self.device_type_ = "cpu"
+            return self
+        y_val_arr = _as_array(val_y).reshape(-1) if val_y is not None else None
+        self.device_type_ = "gpu" if self.prefer_gpu and _gpu_available() else "cpu"
+        estimator_kwargs = {
+            "n_estimators": self.n_estimators,
+            "learning_rate": 0.03,
+            "num_leaves": 31,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "objective": "binary",
+            "random_state": self.random_state,
+            "verbosity": -1,
+            "device_type": self.device_type_,
+            "class_weight": "balanced",
+        }
+        estimator = LGBMClassifier(**estimator_kwargs)
+        try:
+            if x_val is not None and y_val_arr is not None:
+                estimator.fit(
+                    x_train,
+                    y_train,
+                    eval_set=[(x_val, y_val_arr)],
+                    eval_metric="binary_logloss",
+                    callbacks=[early_stopping(self.patience, verbose=False)],
+                )
+            else:
+                estimator.fit(x_train, y_train)
+        except Exception:
+            if self.device_type_ != "gpu":
+                raise
+            self.device_type_ = "cpu"
+            estimator = LGBMClassifier(**{**estimator_kwargs, "device_type": self.device_type_})
+            if x_val is not None and y_val_arr is not None:
+                estimator.fit(
+                    x_train,
+                    y_train,
+                    eval_set=[(x_val, y_val_arr)],
+                    eval_metric="binary_logloss",
+                    callbacks=[early_stopping(self.patience, verbose=False)],
+                )
+            else:
+                estimator.fit(x_train, y_train)
+        self.model_ = estimator
+        self.best_iteration_ = int(getattr(estimator, "best_iteration_", 0) or self.n_estimators)
+        return self
+
+    def refit_full(self, x: pd.DataFrame, y: pd.DataFrame) -> "LightGBMClassifier":
+        from lightgbm import LGBMClassifier
+
+        x_full = self._preprocess(x, fit=True)
+        y_full = _as_array(y).reshape(-1)
+        if np.unique(y_full).size < 2:
+            self.model_ = _ConstantProbabilityClassifier(float(y_full[0]) if len(y_full) else 0.0)
+            return self
+        self.model_ = LGBMClassifier(
+            n_estimators=int(getattr(self, "best_iteration_", self.n_estimators)),
+            learning_rate=0.03,
+            num_leaves=31,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            objective="binary",
+            random_state=self.random_state,
+            verbosity=-1,
+            device_type=getattr(self, "device_type_", "cpu"),
+            class_weight="balanced",
+        )
+        self.model_.fit(x_full, y_full)
+        return self
+
+    def predict(self, x: pd.DataFrame) -> np.ndarray:
+        x_values = self._preprocess(x, fit=False)
+        return self.model_.predict_proba(x_values)[:, 1:2].astype(np.float64)
+
+
+class XGBoostClassifier:
+    def __init__(
+        self,
+        *,
+        n_estimators: int = 500,
+        patience: int = 25,
+        random_state: int = 47,
+        prefer_gpu: bool = True,
+    ) -> None:
+        self.n_estimators = n_estimators
+        self.patience = patience
+        self.random_state = random_state
+        self.prefer_gpu = prefer_gpu
+
+    def _preprocess(self, x: pd.DataFrame, *, fit: bool) -> np.ndarray:
+        from sklearn.impute import SimpleImputer
+
+        if fit:
+            self.imputer_ = SimpleImputer(strategy="constant", fill_value=0.0, keep_empty_features=True)
+            return self.imputer_.fit_transform(x)
+        return self.imputer_.transform(x)
+
+    def fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        *,
+        val_x: pd.DataFrame | None = None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "XGBoostClassifier":
+        from xgboost import XGBClassifier
+
+        x_train = self._preprocess(x, fit=True)
+        x_val = self._preprocess(val_x, fit=False) if val_x is not None else None
+        y_train = _as_array(y).reshape(-1)
+        if np.unique(y_train).size < 2:
+            self.model_ = _ConstantProbabilityClassifier(float(y_train[0]) if len(y_train) else 0.0)
+            self.best_iteration_ = 1
+            self.device_ = "cpu"
+            return self
+        y_val_arr = _as_array(val_y).reshape(-1) if val_y is not None else None
+        scale_pos_weight = float((len(y_train) - y_train.sum()) / max(y_train.sum(), 1.0))
+        self.device_ = "cuda" if self.prefer_gpu and _gpu_available() else "cpu"
+        estimator_kwargs = {
+            "n_estimators": self.n_estimators,
+            "learning_rate": 0.03,
+            "max_depth": 4,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "objective": "binary:logistic",
+            "random_state": self.random_state,
+            "n_jobs": 1,
+            "tree_method": "hist",
+            "device": self.device_,
+            "eval_metric": "logloss",
+            "scale_pos_weight": max(scale_pos_weight, 1.0),
+            "early_stopping_rounds": self.patience if x_val is not None and y_val_arr is not None else None,
+        }
+        estimator = XGBClassifier(**estimator_kwargs)
+        try:
+            if x_val is not None and y_val_arr is not None:
+                estimator.fit(x_train, y_train, eval_set=[(x_val, y_val_arr)], verbose=False)
+            else:
+                estimator.fit(x_train, y_train, verbose=False)
+        except Exception:
+            if self.device_ != "cuda":
+                raise
+            self.device_ = "cpu"
+            estimator = XGBClassifier(**{**estimator_kwargs, "device": self.device_})
+            if x_val is not None and y_val_arr is not None:
+                estimator.fit(x_train, y_train, eval_set=[(x_val, y_val_arr)], verbose=False)
+            else:
+                estimator.fit(x_train, y_train, verbose=False)
+        self.model_ = estimator
+        best_iteration = getattr(estimator, "best_iteration", None)
+        if best_iteration is None:
+            best_iteration = getattr(estimator, "best_ntree_limit", None)
+        self.best_iteration_ = int(best_iteration or self.n_estimators)
+        return self
+
+    def refit_full(self, x: pd.DataFrame, y: pd.DataFrame) -> "XGBoostClassifier":
+        from xgboost import XGBClassifier
+
+        x_full = self._preprocess(x, fit=True)
+        y_full = _as_array(y).reshape(-1)
+        if np.unique(y_full).size < 2:
+            self.model_ = _ConstantProbabilityClassifier(float(y_full[0]) if len(y_full) else 0.0)
+            return self
+        scale_pos_weight = float((len(y_full) - y_full.sum()) / max(y_full.sum(), 1.0))
+        self.model_ = XGBClassifier(
+            n_estimators=int(getattr(self, "best_iteration_", self.n_estimators)),
+            learning_rate=0.03,
+            max_depth=4,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            objective="binary:logistic",
+            random_state=self.random_state,
+            n_jobs=1,
+            tree_method="hist",
+            device=getattr(self, "device_", "cpu"),
+            eval_metric="logloss",
+            scale_pos_weight=max(scale_pos_weight, 1.0),
+        )
+        self.model_.fit(x_full, y_full, verbose=False)
+        return self
+
+    def predict(self, x: pd.DataFrame) -> np.ndarray:
+        x_values = self._preprocess(x, fit=False)
+        return self.model_.predict_proba(x_values)[:, 1:2].astype(np.float64)
+
+
+class SklearnMLPClassifier:
+    def __init__(
+        self,
+        *,
+        hidden_layer_sizes: tuple[int, ...] = (96, 48),
+        learning_rate_init: float = 0.001,
+        max_epochs: int = 80,
+        patience: int = 8,
+        tol: float = 1e-4,
+        random_state: int = 53,
+    ) -> None:
+        self.hidden_layer_sizes = hidden_layer_sizes
+        self.learning_rate_init = learning_rate_init
+        self.max_epochs = max_epochs
+        self.patience = patience
+        self.tol = tol
+        self.random_state = random_state
+
+    def _build_model(self):
+        from sklearn.neural_network import MLPClassifier
+
+        return MLPClassifier(
+            hidden_layer_sizes=self.hidden_layer_sizes,
+            activation="relu",
+            learning_rate_init=self.learning_rate_init,
+            max_iter=1,
+            shuffle=True,
+            warm_start=True,
+            random_state=self.random_state,
+        )
+
+    def _prepare(self, x: pd.DataFrame, *, fit: bool) -> np.ndarray:
+        from sklearn.impute import SimpleImputer
+        from sklearn.preprocessing import StandardScaler
+
+        if fit:
+            self.imputer_ = SimpleImputer(strategy="constant", fill_value=0.0, keep_empty_features=True)
+            self.scaler_ = StandardScaler()
+            values = self.imputer_.fit_transform(x)
+            return self.scaler_.fit_transform(values)
+        values = self.imputer_.transform(x)
+        return self.scaler_.transform(values)
+
+    def fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        *,
+        val_x: pd.DataFrame | None = None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "SklearnMLPClassifier":
+        from sklearn.metrics import log_loss
+
+        x_train = self._prepare(x, fit=True)
+        y_train = _as_array(y).reshape(-1)
+        if np.unique(y_train).size < 2:
+            self.model_ = _ConstantProbabilityClassifier(float(y_train[0]) if len(y_train) else 0.0)
+            self.best_epoch_ = 1
+            return self
+        x_val = self._prepare(val_x, fit=False) if val_x is not None else None
+        y_val_arr = _as_array(val_y).reshape(-1) if val_y is not None else None
+        self.model_ = self._build_model()
+        best_state: tuple[list[np.ndarray], list[np.ndarray]] | None = None
+        best_metric = np.inf
+        best_epoch = 0
+        epochs_without_improvement = 0
+        for epoch in range(self.max_epochs):
+            if epoch == 0:
+                self.model_.partial_fit(x_train, y_train, classes=np.array([0.0, 1.0]))
+            else:
+                self.model_.partial_fit(x_train, y_train)
+            score_x = x_val if x_val is not None else x_train
+            score_y = y_val_arr if y_val_arr is not None else y_train
+            prob = np.clip(self.model_.predict_proba(score_x)[:, 1], EPS, 1.0 - EPS)
+            metric = float(log_loss(score_y, prob, labels=[0.0, 1.0]))
+            if metric + self.tol < best_metric:
+                best_metric = metric
+                best_epoch = epoch + 1
+                best_state = (
+                    [coef.copy() for coef in self.model_.coefs_],
+                    [intercept.copy() for intercept in self.model_.intercepts_],
+                )
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+            if x_val is not None and epochs_without_improvement >= self.patience:
+                break
+        if best_state is not None:
+            self.model_.coefs_ = [coef.copy() for coef in best_state[0]]
+            self.model_.intercepts_ = [intercept.copy() for intercept in best_state[1]]
+        self.best_epoch_ = max(best_epoch, 1)
+        return self
+
+    def refit_full(self, x: pd.DataFrame, y: pd.DataFrame) -> "SklearnMLPClassifier":
+        x_full = self._prepare(x, fit=True)
+        y_full = _as_array(y).reshape(-1)
+        if np.unique(y_full).size < 2:
+            self.model_ = _ConstantProbabilityClassifier(float(y_full[0]) if len(y_full) else 0.0)
+            return self
+        self.model_ = self._build_model()
+        for epoch in range(max(getattr(self, "best_epoch_", self.max_epochs), 1)):
+            if epoch == 0:
+                self.model_.partial_fit(x_full, y_full, classes=np.array([0.0, 1.0]))
+            else:
+                self.model_.partial_fit(x_full, y_full)
+        return self
+
+    def predict(self, x: pd.DataFrame) -> np.ndarray:
+        x_values = self._prepare(x, fit=False)
+        return self.model_.predict_proba(x_values)[:, 1:2].astype(np.float64)
+
+
+class TorchMLPClassifier:
+    def __init__(
+        self,
+        *,
+        hidden_units: int = 128,
+        learning_rate: float = 0.001,
+        max_epochs: int = 80,
+        patience: int = 10,
+        batch_size: int = 512,
+        random_state: int = 59,
+    ) -> None:
+        self.hidden_units = hidden_units
+        self.learning_rate = learning_rate
+        self.max_epochs = max_epochs
+        self.patience = patience
+        self.batch_size = batch_size
+        self.random_state = random_state
+        self.device = _default_torch_device()
+        self.x_scaler = Standardizer()
+
+    def _resolve_device(self):
+        import torch
+
+        requested = self.device if self.device != "cuda" or _gpu_available() else "cpu"
+        self.device_ = torch.device(requested)
+        if self.device_.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+            if hasattr(torch, "set_float32_matmul_precision"):
+                torch.set_float32_matmul_precision("high")
+        return self.device_
+
+    def _build_model(self, input_dim: int):
+        import torch
+
+        return torch.nn.Sequential(
+            torch.nn.Linear(input_dim, self.hidden_units),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.05),
+            torch.nn.Linear(self.hidden_units, max(self.hidden_units // 2, 16)),
+            torch.nn.ReLU(),
+            torch.nn.Linear(max(self.hidden_units // 2, 16), 1),
+        )
+
+    def _fit_fixed_epochs(self, x_values: np.ndarray, y_values: np.ndarray, epochs: int) -> None:
+        import torch
+
+        dataset = torch.utils.data.TensorDataset(
+            torch.from_numpy(x_values.astype(np.float32)),
+            torch.from_numpy(y_values.astype(np.float32)),
+        )
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            **_torch_loader_kwargs(device=self.device_.type, shuffle=True, batch_size=min(self.batch_size, len(dataset))),
+        )
+        optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
+        loss_fn = torch.nn.BCEWithLogitsLoss()
+        self.model_.train()
+        for _ in range(max(epochs, 1)):
+            for batch_x, batch_y in loader:
+                pred = self.model_(_move_tensor(batch_x, self.device_))
+                loss = loss_fn(pred, _move_tensor(batch_y, self.device_))
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+    def fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        *,
+        val_x: pd.DataFrame | None = None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "TorchMLPClassifier":
+        import torch
+
+        torch.manual_seed(self.random_state)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.random_state)
+        self._resolve_device()
+        x_train = self.x_scaler.fit(_as_array(x)).transform(_as_array(x)).astype(np.float32)
+        y_train = _as_array(y).reshape(-1, 1).astype(np.float32)
+        if np.unique(y_train).size < 2:
+            self.constant_probability_ = float(y_train[0, 0]) if len(y_train) else 0.0
+            self.best_epoch_ = 1
+            return self
+        x_val = self.x_scaler.transform(_as_array(val_x)).astype(np.float32) if val_x is not None else None
+        y_val_arr = _as_array(val_y).reshape(-1, 1).astype(np.float32) if val_y is not None else None
+        self.model_ = self._build_model(x_train.shape[1]).to(self.device_)
+        dataset = torch.utils.data.TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train))
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            **_torch_loader_kwargs(device=self.device_.type, shuffle=True, batch_size=min(self.batch_size, len(dataset))),
+        )
+        optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
+        loss_fn = torch.nn.BCEWithLogitsLoss()
+        best_state = copy.deepcopy(self.model_.state_dict())
+        best_metric = np.inf
+        best_epoch = 1
+        epochs_without_improvement = 0
+        for epoch in range(self.max_epochs):
+            self.model_.train()
+            for batch_x, batch_y in loader:
+                pred = self.model_(_move_tensor(batch_x, self.device_))
+                loss = loss_fn(pred, _move_tensor(batch_y, self.device_))
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+            metric_x = x_val if x_val is not None else x_train
+            metric_y = y_val_arr if y_val_arr is not None else y_train
+            self.model_.eval()
+            with torch.no_grad():
+                logits = self.model_(_move_tensor(torch.from_numpy(metric_x), self.device_)).detach().cpu().numpy()
+            prob = 1.0 / (1.0 + np.exp(-logits))
+            metric = float(np.nanmean(-(metric_y * np.log(np.clip(prob, EPS, 1.0 - EPS)) + (1.0 - metric_y) * np.log(np.clip(1.0 - prob, EPS, 1.0 - EPS)))))
+            if metric + 1e-6 < best_metric:
+                best_metric = metric
+                best_state = copy.deepcopy(self.model_.state_dict())
+                best_epoch = epoch + 1
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+            if x_val is not None and epochs_without_improvement >= self.patience:
+                break
+        self.model_.load_state_dict(best_state)
+        self.best_epoch_ = best_epoch
+        return self
+
+    def refit_full(self, x: pd.DataFrame, y: pd.DataFrame) -> "TorchMLPClassifier":
+        x_full = self.x_scaler.fit(_as_array(x)).transform(_as_array(x)).astype(np.float32)
+        y_full = _as_array(y).reshape(-1, 1).astype(np.float32)
+        if np.unique(y_full).size < 2:
+            self.constant_probability_ = float(y_full[0, 0]) if len(y_full) else 0.0
+            return self
+        self._resolve_device()
+        self.model_ = self._build_model(x_full.shape[1]).to(self.device_)
+        self._fit_fixed_epochs(x_full, y_full, getattr(self, "best_epoch_", self.max_epochs))
+        return self
+
+    def predict(self, x: pd.DataFrame) -> np.ndarray:
+        import torch
+
+        x_values = self.x_scaler.transform(_as_array(x)).astype(np.float32)
+        if hasattr(self, "constant_probability_"):
+            return np.full((len(x_values), 1), float(self.constant_probability_), dtype=np.float64)
+        self._resolve_device()
+        self.model_ = self.model_.to(self.device_)
+        self.model_.eval()
+        with torch.no_grad():
+            logits = self.model_(_move_tensor(torch.from_numpy(x_values), self.device_)).detach().cpu().numpy()
+        return (1.0 / (1.0 + np.exp(-logits))).astype(np.float64)
+
+    def __getstate__(self) -> dict[str, object]:
+        state = self.__dict__.copy()
+        if state.get("model_") is not None:
+            state["model_"] = _copy_model_to_cpu(state["model_"])
+        state["device_"] = "cpu"
+        return state
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        self.__dict__.update(state)
+        self._resolve_device()
+        if getattr(self, "model_", None) is not None:
+            self.model_ = self.model_.to(self.device_)
+
+
+class TorchSequenceStaticClassifier:
+    def __init__(
+        self,
+        *,
+        window_length: int = 60,
+        hidden_dim: int = 128,
+        learning_rate: float = 0.001,
+        max_epochs: int = 60,
+        patience: int = 10,
+        batch_size: int = 256,
+        random_state: int = 61,
+    ) -> None:
+        self.window_length = window_length
+        self.hidden_dim = hidden_dim
+        self.learning_rate = learning_rate
+        self.max_epochs = max_epochs
+        self.patience = patience
+        self.batch_size = batch_size
+        self.random_state = random_state
+        self.device = _default_torch_device()
+        self.x_scaler = Standardizer()
+
+    def _resolve_device(self):
+        import torch
+
+        requested = self.device if self.device != "cuda" or _gpu_available() else "cpu"
+        self.device_ = torch.device(requested)
+        if self.device_.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+            if hasattr(torch, "set_float32_matmul_precision"):
+                torch.set_float32_matmul_precision("high")
+        return self.device_
+
+    def _prepare_sequence_tensor(self, sequence, mean_t, scale_t):
+        import torch
+
+        mean_view = mean_t.view(1, 1, -1)
+        scale_view = scale_t.view(1, 1, -1)
+        sequence = sequence.to(dtype=torch.float32)
+        sequence = torch.where(torch.isfinite(sequence), sequence, mean_view)
+        return (sequence - mean_view) / scale_view
+
+    def _train_cutoff_date(self, metadata: pd.DataFrame) -> str:
+        dates = metadata["anchor_date"].dropna().astype(str)
+        if dates.empty:
+            raise ValueError("Sequence/static training metadata is empty.")
+        return str(dates.max())
+
+    def _build_model(self, *, sequence_dim: int, static_cardinalities: Sequence[int]):
+        return _SequenceStaticNet(
+            sequence_dim=sequence_dim,
+            static_cardinalities=static_cardinalities,
+            output_dim=1,
+            window_length=self.window_length,
+            hidden_dim=self.hidden_dim,
+        )
+
+    def _dataset_logloss(self, dataset: _SequenceStaticDataset) -> float:
+        import torch
+
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            **_torch_loader_kwargs(device=self.device_.type, shuffle=False, batch_size=min(self.batch_size, len(dataset))),
+        )
+        loss_fn = torch.nn.BCEWithLogitsLoss()
+        mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32)).to(self.device_)
+        scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32)).to(self.device_)
+        self.model_.eval()
+        losses: list[float] = []
+        with torch.no_grad():
+            for sequence, static_ids, target in loader:
+                sequence = self._prepare_sequence_tensor(_move_tensor(sequence, self.device_), mean_t, scale_t)
+                logits = self.model_(sequence, _move_tensor(static_ids.long(), self.device_))
+                losses.append(float(loss_fn(logits, _move_tensor(target.float(), self.device_)).item()))
+        return float(np.mean(losses)) if losses else np.inf
+
+    def _train_epochs(self, dataset: _SequenceStaticDataset, epochs: int) -> None:
+        import torch
+
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            **_torch_loader_kwargs(device=self.device_.type, shuffle=True, batch_size=min(self.batch_size, len(dataset))),
+        )
+        optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
+        loss_fn = torch.nn.BCEWithLogitsLoss()
+        mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32)).to(self.device_)
+        scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32)).to(self.device_)
+        self.model_.train()
+        for _ in range(max(epochs, 1)):
+            for sequence, static_ids, target in loader:
+                sequence = self._prepare_sequence_tensor(_move_tensor(sequence, self.device_), mean_t, scale_t)
+                logits = self.model_(sequence, _move_tensor(static_ids.long(), self.device_))
+                loss = loss_fn(logits, _move_tensor(target.float(), self.device_))
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+    def fit(
+        self,
+        x: dict[str, object],
+        y: pd.DataFrame,
+        *,
+        val_x: dict[str, object] | None = None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "TorchSequenceStaticClassifier":
+        import torch
+
+        torch.manual_seed(self.random_state)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.random_state)
+        self._resolve_device()
+        self.static_columns_ = list(x["static_categorical"].keys())
+        self.static_vocab_sizes_ = [
+            int(np.max(x["static_categorical"][column])) + 1 if len(x["static_categorical"][column]) else 1
+            for column in self.static_columns_
+        ]
+        train_rows = x["store"].fit_rows_through(self._train_cutoff_date(x["metadata"]))
+        self.x_scaler.fit(train_rows.astype(np.float64))
+        y_train = _as_array(y).reshape(-1, 1).astype(np.float32)
+        if np.unique(y_train).size < 2:
+            self.constant_probability_ = float(y_train[0, 0]) if len(y_train) else 0.0
+            self.best_epoch_ = 1
+            return self
+        y_val_arr = _as_array(val_y).reshape(-1, 1).astype(np.float32) if val_y is not None else None
+        train_dataset = _SequenceStaticDataset(
+            store=x["store"],
+            metadata=x["metadata"],
+            static_categorical=x["static_categorical"],
+            target_frame=pd.DataFrame(y_train, columns=y.columns),
+            window_length=self.window_length,
+            static_columns=self.static_columns_,
+        )
+        val_dataset = None
+        if val_x is not None and val_y is not None:
+            val_dataset = _SequenceStaticDataset(
+                store=val_x["store"],
+                metadata=val_x["metadata"],
+                static_categorical=val_x["static_categorical"],
+                target_frame=pd.DataFrame(y_val_arr, columns=val_y.columns),
+                window_length=self.window_length,
+                static_columns=self.static_columns_,
+            )
+        self.model_ = self._build_model(
+            sequence_dim=len(x["store"].feature_columns),
+            static_cardinalities=self.static_vocab_sizes_,
+        ).to(self.device_)
+        optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
+        loss_fn = torch.nn.BCEWithLogitsLoss()
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            **_torch_loader_kwargs(device=self.device_.type, shuffle=True, batch_size=min(self.batch_size, len(train_dataset))),
+        )
+        mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32)).to(self.device_)
+        scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32)).to(self.device_)
+        best_state = copy.deepcopy(self.model_.state_dict())
+        best_metric = np.inf
+        best_epoch = 1
+        epochs_without_improvement = 0
+        for epoch in range(self.max_epochs):
+            self.model_.train()
+            for sequence, static_ids, target in train_loader:
+                sequence = self._prepare_sequence_tensor(_move_tensor(sequence, self.device_), mean_t, scale_t)
+                logits = self.model_(sequence, _move_tensor(static_ids.long(), self.device_))
+                loss = loss_fn(logits, _move_tensor(target.float(), self.device_))
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+            metric = self._dataset_logloss(val_dataset if val_dataset is not None else train_dataset)
+            if metric + 1e-6 < best_metric:
+                best_metric = metric
+                best_state = copy.deepcopy(self.model_.state_dict())
+                best_epoch = epoch + 1
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+            if val_dataset is not None and epochs_without_improvement >= self.patience:
+                break
+        self.model_.load_state_dict(best_state)
+        self.best_epoch_ = best_epoch
+        return self
+
+    def refit_full(self, x: dict[str, object], y: pd.DataFrame) -> "TorchSequenceStaticClassifier":
+        self._resolve_device()
+        train_rows = x["store"].fit_rows_through(self._train_cutoff_date(x["metadata"]))
+        self.x_scaler.fit(train_rows.astype(np.float64))
+        y_train = _as_array(y).reshape(-1, 1).astype(np.float32)
+        if np.unique(y_train).size < 2:
+            self.constant_probability_ = float(y_train[0, 0]) if len(y_train) else 0.0
+            return self
+        train_dataset = _SequenceStaticDataset(
+            store=x["store"],
+            metadata=x["metadata"],
+            static_categorical=x["static_categorical"],
+            target_frame=pd.DataFrame(y_train, columns=y.columns),
+            window_length=self.window_length,
+            static_columns=self.static_columns_,
+        )
+        self.model_ = self._build_model(
+            sequence_dim=len(x["store"].feature_columns),
+            static_cardinalities=self.static_vocab_sizes_,
+        ).to(self.device_)
+        self._train_epochs(train_dataset, getattr(self, "best_epoch_", self.max_epochs))
+        return self
+
+    def predict(self, x: dict[str, object]) -> np.ndarray:
+        import torch
+
+        dataset = _SequenceStaticDataset(
+            store=x["store"],
+            metadata=x["metadata"],
+            static_categorical=x["static_categorical"],
+            target_frame=None,
+            window_length=self.window_length,
+            static_columns=self.static_columns_,
+        )
+        if hasattr(self, "constant_probability_"):
+            return np.full((len(dataset), 1), float(self.constant_probability_), dtype=np.float64)
+        self._resolve_device()
+        self.model_ = self.model_.to(self.device_)
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            **_torch_loader_kwargs(device=self.device_.type, shuffle=False, batch_size=min(self.batch_size, len(dataset))),
+        )
+        mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32)).to(self.device_)
+        scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32)).to(self.device_)
+        outputs: list[np.ndarray] = []
+        self.model_.eval()
+        with torch.no_grad():
+            for sequence, static_ids in loader:
+                sequence = self._prepare_sequence_tensor(_move_tensor(sequence, self.device_), mean_t, scale_t)
+                logits = self.model_(sequence, _move_tensor(static_ids.long(), self.device_)).detach().cpu().numpy()
+                outputs.append(1.0 / (1.0 + np.exp(-logits)))
+        if not outputs:
+            return np.empty((0, 1), dtype=np.float64)
+        return np.vstack(outputs).astype(np.float64)
+
+    def __getstate__(self) -> dict[str, object]:
+        state = self.__dict__.copy()
+        if state.get("model_") is not None:
+            state["model_"] = _copy_model_to_cpu(state["model_"])
+        state["device_"] = "cpu"
+        return state
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        self.__dict__.update(state)
+        self._resolve_device()
+        if getattr(self, "model_", None) is not None:
+            self.model_ = self.model_.to(self.device_)
+
+
 def is_sequence_static_model(model_name: str) -> bool:
-    return model_name == SEQUENCE_STATIC_MODEL_NAME
+    return model_name in {SEQUENCE_STATIC_MODEL_NAME, SEQUENCE_STATIC_CLASSIFICATION_MODEL_NAME}
 
 
-def default_model_names(eval_mode: str = "walk_forward") -> list[str]:
+def default_model_names(eval_mode: str = "walk_forward", *, task_type: str = "regression") -> list[str]:
+    if task_type == "classification":
+        names = list(CLASSIFICATION_MODEL_NAMES)
+        if eval_mode == "walk_forward":
+            names.append(SEQUENCE_STATIC_CLASSIFICATION_MODEL_NAME)
+        return names
     names = list(BASELINE_MODEL_NAMES)
     if eval_mode == "walk_forward":
         names.append(SEQUENCE_STATIC_MODEL_NAME)
@@ -1174,10 +1989,27 @@ def default_model_names(eval_mode: str = "walk_forward") -> list[str]:
 
 
 def available_model_names() -> list[str]:
-    return default_model_names(eval_mode="walk_forward")
+    return default_model_names(eval_mode="walk_forward") + default_model_names(
+        eval_mode="walk_forward",
+        task_type="classification",
+    )
 
 
-def make_model(model_name: str, *, window_length: int = 60) -> Predictor:
+def make_model(model_name: str, *, window_length: int = 60, task_type: str = "regression") -> Predictor:
+    if task_type == "classification":
+        if model_name == "logistic_regression":
+            return LogisticClassifier()
+        if model_name == "lightgbm_classifier":
+            return LightGBMClassifier()
+        if model_name == "xgboost_classifier":
+            return XGBoostClassifier()
+        if model_name == "sklearn_mlp_classifier":
+            return SklearnMLPClassifier()
+        if model_name == "torch_mlp_classifier":
+            return TorchMLPClassifier()
+        if model_name == SEQUENCE_STATIC_CLASSIFICATION_MODEL_NAME:
+            return TorchSequenceStaticClassifier(window_length=window_length)
+        raise ValueError(f"Unknown classification model: {model_name}")
     if model_name == "zero":
         return ZeroPredictor()
     if model_name == "mean":
@@ -1278,6 +2110,76 @@ def evaluate_predictions(
     return rows
 
 
+def evaluate_classification_predictions(
+    metadata: pd.DataFrame,
+    y_true: pd.DataFrame,
+    y_score: np.ndarray,
+    *,
+    target_columns: Sequence[str],
+    model_name: str,
+    feature_set: str,
+    split_name: str,
+    realized_returns: pd.DataFrame | None = None,
+    realized_return_column: str | None = None,
+) -> list[dict[str, object]]:
+    from sklearn.metrics import average_precision_score, roc_auc_score
+
+    rows: list[dict[str, object]] = []
+    true_values = y_true[target_columns].astype(float).to_numpy()
+    realized = None
+    if realized_returns is not None and realized_return_column and realized_return_column in realized_returns.columns:
+        realized = realized_returns[realized_return_column].astype(float).to_numpy()
+    for idx, target in enumerate(target_columns):
+        actual = true_values[:, idx]
+        score = np.clip(y_score[:, idx], EPS, 1.0 - EPS)
+        pred_label = (score >= 0.5).astype(float)
+        try:
+            pr_auc = float(average_precision_score(actual, score))
+        except Exception:
+            pr_auc = None
+        if np.unique(actual[np.isfinite(actual)]).size >= 2:
+            try:
+                roc_auc = float(roc_auc_score(actual, score))
+            except Exception:
+                roc_auc = None
+        else:
+            roc_auc = None
+        top_precisions: list[float] = []
+        spreads: list[float] = []
+        event_rate_spreads: list[float] = []
+        for _, group_idx in metadata.groupby("anchor_date").indices.items():
+            group_idx = np.asarray(group_idx)
+            if len(group_idx) < 10:
+                continue
+            q = max(1, int(np.ceil(len(group_idx) * 0.1)))
+            order = np.argsort(score[group_idx])
+            top_idx = group_idx[order[-q:]]
+            bottom_idx = group_idx[order[:q]]
+            top_precisions.append(float(np.nanmean(actual[top_idx])))
+            event_rate_spreads.append(float(np.nanmean(actual[top_idx]) - np.nanmean(actual[bottom_idx])))
+            if realized is not None:
+                spreads.append(float(np.nanmean(realized[top_idx]) - np.nanmean(realized[bottom_idx])))
+        rows.append(
+            {
+                "model_name": model_name,
+                "feature_set": feature_set,
+                "split": split_name,
+                "target": target,
+                "pr_auc": pr_auc,
+                "roc_auc": roc_auc,
+                "top_decile_precision": float(np.nanmean(top_precisions)) if top_precisions else None,
+                "top_bottom_spread": float(np.nanmean(spreads)) if spreads else None,
+                "top_bottom_event_rate_spread": float(np.nanmean(event_rate_spreads)) if event_rate_spreads else None,
+                "accuracy": float(np.nanmean(pred_label == actual)),
+                "positive_rate": float(np.nanmean(actual)),
+                "row_count": int(len(actual)),
+                "date_count": int(metadata["anchor_date"].nunique()),
+                "realized_return_column": realized_return_column,
+            }
+        )
+    return rows
+
+
 def prediction_frame(
     metadata: pd.DataFrame,
     y_pred: np.ndarray,
@@ -1288,6 +2190,7 @@ def prediction_frame(
     leaderboard_rank: int | None = None,
     recommended: bool = False,
     y_true: pd.DataFrame | None = None,
+    task_type: str = "regression",
 ) -> pd.DataFrame:
     metadata_columns = ["ticker", "anchor_date"]
     if "anchor_close" in metadata.columns:
@@ -1295,13 +2198,23 @@ def prediction_frame(
     out = metadata[metadata_columns].copy()
     out["model_name"] = model_name
     out["feature_set"] = feature_set
+    out["task_type"] = task_type
     out["leaderboard_rank"] = leaderboard_rank
     out["recommended"] = recommended
     for idx, target in enumerate(target_columns):
-        pred_col = target.replace("market_adjusted_return", "pred_market_adjusted_return")
+        if task_type == "classification":
+            pred_col = f"pred_prob_{target}"
+            flag_col = f"pred_flag_{target}"
+        else:
+            pred_col = target.replace("market_adjusted_return", "pred_market_adjusted_return")
         out[pred_col] = y_pred[:, idx]
+        if task_type == "classification":
+            out[flag_col] = (y_pred[:, idx] >= 0.5).astype(bool)
         if y_true is not None:
-            actual_col = target.replace("market_adjusted_return", "actual_market_adjusted_return")
+            if task_type == "classification":
+                actual_col = f"actual_{target}"
+            else:
+                actual_col = target.replace("market_adjusted_return", "actual_market_adjusted_return")
             out[actual_col] = y_true[target].to_numpy()
     return out
 
@@ -1336,6 +2249,49 @@ def build_metric_summary(metrics: pd.DataFrame, *, split_name: str = "val") -> p
 
 def build_leaderboard(metrics: pd.DataFrame, *, split_name: str = "val") -> pd.DataFrame:
     return build_metric_summary(metrics, split_name=split_name)
+
+
+def build_classification_metric_summary(metrics: pd.DataFrame, *, split_name: str = "val") -> pd.DataFrame:
+    val = metrics[metrics["split"] == split_name].copy()
+    for column in (
+        "pr_auc",
+        "roc_auc",
+        "top_decile_precision",
+        "top_bottom_spread",
+        "accuracy",
+        "positive_rate",
+    ):
+        if column in val.columns:
+            val[column] = pd.to_numeric(val[column], errors="coerce")
+    grouped = (
+        val.groupby(["model_name", "feature_set"], dropna=False)
+        .agg(
+            mean_pr_auc=("pr_auc", "mean"),
+            mean_roc_auc=("roc_auc", "mean"),
+            mean_top_decile_precision=("top_decile_precision", "mean"),
+            mean_top_bottom_spread=("top_bottom_spread", "mean"),
+            mean_accuracy=("accuracy", "mean"),
+            mean_positive_rate=("positive_rate", "mean"),
+        )
+        .reset_index()
+    )
+    grouped["selection_score"] = (
+        grouped["mean_pr_auc"].fillna(-999.0)
+        + grouped["mean_top_decile_precision"].fillna(0.0)
+        + grouped["mean_top_bottom_spread"].fillna(0.0)
+    )
+    grouped = grouped.sort_values(
+        ["selection_score", "mean_pr_auc", "mean_roc_auc", "mean_top_decile_precision", "mean_top_bottom_spread"],
+        ascending=[False, False, False, False, False],
+    ).reset_index(drop=True)
+    grouped["leaderboard_rank"] = np.arange(1, len(grouped) + 1)
+    grouped["recommended"] = grouped["leaderboard_rank"] <= min(3, len(grouped))
+    grouped["source_split"] = split_name
+    return grouped
+
+
+def build_classification_leaderboard(metrics: pd.DataFrame, *, split_name: str = "val") -> pd.DataFrame:
+    return build_classification_metric_summary(metrics, split_name=split_name)
 
 
 def save_model_bundle(path: str | Path, *, model: Predictor, metadata: dict[str, object]) -> None:

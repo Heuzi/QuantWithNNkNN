@@ -69,6 +69,11 @@ V1 implementation note:
 
 Current implementation snapshot:
 - `scripts/train_v1_supervised_baselines.py` now defaults to expanding-window walk-forward evaluation.
+- The current baseline suite now supports both regression and event classification.
+- Regression still uses the multi-horizon market-adjusted return targets.
+- Classification now adds `market_outperform_any_20d_gt_5pct`, a PIT-safe label that is positive when pathwise benchmark-relative excess return exceeds `5%` at any point in the next 20 trading days.
+- The trainer can run `regression`, `classification`, or `both` in one pass.
+- Regression and classification leaderboards and deploy bundles are written separately so downstream analysis can choose one or both tasks.
 - The current baseline suite includes tabular baselines plus `torch_seq_static`.
 - `torch_seq_static` uses a real 60-day sequence branch plus static categorical embeddings for `gics_sector` and `gics_sub_industry`.
 - The sequence-static model is currently wired only for `stock_only` and `stock_relative`.

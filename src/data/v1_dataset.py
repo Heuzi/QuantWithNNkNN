@@ -12,6 +12,9 @@ import pandas as pd
 DEFAULT_HORIZONS = (1, 5, 10, 20)
 DEFAULT_WINDOW_LENGTH = 60
 DEFAULT_BENCHMARK_TICKER = "SPY"
+DEFAULT_CLASSIFICATION_HORIZON = 20
+DEFAULT_CLASSIFICATION_THRESHOLD = 0.05
+DEFAULT_CLASSIFICATION_EVENT_TYPE = "anytime_pathwise_outperform"
 
 SECTOR_ETF_BY_GICS = {
     "Communication Services": "XLC",
@@ -116,6 +119,7 @@ class V1Dataset:
     targets: pd.DataFrame
     feature_sets: dict[str, pd.DataFrame]
     target_columns: list[str]
+    classification_target_columns: list[str]
     feature_columns: dict[str, list[str]]
     split_by_date: dict[str, tuple[str, str]]
 
@@ -193,6 +197,11 @@ def parse_horizons(value: str | Sequence[int] | None) -> tuple[int, ...]:
 
 def target_column(horizon: int) -> str:
     return f"market_adjusted_return_{horizon}d"
+
+
+def classification_target_column(*, horizon: int = DEFAULT_CLASSIFICATION_HORIZON, threshold: float = DEFAULT_CLASSIFICATION_THRESHOLD) -> str:
+    threshold_pct = int(round(float(threshold) * 100))
+    return f"market_outperform_any_{int(horizon)}d_gt_{threshold_pct}pct"
 
 
 def _read_csv(path: Path) -> pd.DataFrame:
@@ -407,6 +416,8 @@ def build_multi_horizon_targets(
     horizons: Sequence[int],
     window_length: int,
     benchmark_ticker: str = DEFAULT_BENCHMARK_TICKER,
+    classification_horizon: int = DEFAULT_CLASSIFICATION_HORIZON,
+    classification_threshold: float = DEFAULT_CLASSIFICATION_THRESHOLD,
 ) -> pd.DataFrame:
     benchmark = context_features[context_features["ticker"] == benchmark_ticker.upper()].copy()
     if benchmark.empty:
@@ -420,6 +431,10 @@ def build_multi_horizon_targets(
 
     target_frames: list[pd.DataFrame] = []
     max_horizon = max(horizons)
+    classification_col = classification_target_column(
+        horizon=classification_horizon,
+        threshold=classification_threshold,
+    )
     for _, group in stocks.groupby("ticker", sort=False):
         group = group.copy()
         for horizon in horizons:
@@ -431,6 +446,19 @@ def build_multi_horizon_targets(
             benchmark_return = benchmark_future / benchmark_anchor - 1.0
             group[target_column(horizon)] = stock_return - benchmark_return
             group[f"future_date_{horizon}d"] = future_date
+        path_excess_cols: list[str] = []
+        benchmark_anchor = group["date"].map(benchmark_close_by_date)
+        anchor_close = group["close"].astype(float)
+        for path_step in range(1, classification_horizon + 1):
+            future_close = group["close"].shift(-path_step).astype(float)
+            future_date = group["date"].shift(-path_step)
+            stock_return = future_close / anchor_close - 1.0
+            benchmark_future = future_date.map(benchmark_close_by_date)
+            benchmark_return = benchmark_future / benchmark_anchor - 1.0
+            path_col = f"market_adjusted_return_path_{path_step}d"
+            group[path_col] = stock_return - benchmark_return
+            path_excess_cols.append(path_col)
+        group[classification_col] = (group[path_excess_cols].max(axis=1) > float(classification_threshold)).astype(float)
         group["has_all_future_horizons"] = group.groupby("ticker").cumcount() <= len(group) - max_horizon - 1
         target_frames.append(group)
 
@@ -443,10 +471,12 @@ def build_multi_horizon_targets(
         "gics_sub_industry",
         "window_row_count",
         *target_cols,
+        classification_col,
     ]
     targets = targets[keep_cols]
     targets = targets[targets["window_row_count"] >= window_length]
     targets = targets.dropna(subset=target_cols)
+    targets = targets.dropna(subset=[classification_col])
     targets = targets.rename(columns={"date": "anchor_date"})
     targets["sector_etf"] = targets["gics_sector"].map(SECTOR_ETF_BY_GICS)
     return targets.reset_index(drop=True)
@@ -493,15 +523,22 @@ def build_v1_dataset(
     window_length: int = DEFAULT_WINDOW_LENGTH,
     benchmark_ticker: str = DEFAULT_BENCHMARK_TICKER,
     max_episodes: int | None = None,
+    classification_horizon: int = DEFAULT_CLASSIFICATION_HORIZON,
+    classification_threshold: float = DEFAULT_CLASSIFICATION_THRESHOLD,
 ) -> V1Dataset:
     horizons = tuple(horizons)
     target_cols = [target_column(horizon) for horizon in horizons]
+    classification_cols = [
+        classification_target_column(horizon=classification_horizon, threshold=classification_threshold)
+    ]
     targets = build_multi_horizon_targets(
         stock_features,
         context_features,
         horizons=horizons,
         window_length=window_length,
         benchmark_ticker=benchmark_ticker,
+        classification_horizon=classification_horizon,
+        classification_threshold=classification_threshold,
     )
     if max_episodes is not None and len(targets) > max_episodes:
         targets = targets.sort_values(["anchor_date", "ticker"]).tail(max_episodes).reset_index(drop=True)
@@ -586,9 +623,10 @@ def build_v1_dataset(
 
     return V1Dataset(
         metadata=metadata,
-        targets=targets[["ticker", "anchor_date", *target_cols]].copy(),
+        targets=targets[["ticker", "anchor_date", *target_cols, *classification_cols]].copy(),
         feature_sets=feature_sets,
         target_columns=target_cols,
+        classification_target_columns=classification_cols,
         feature_columns=feature_columns,
         split_by_date={},
     )
@@ -719,12 +757,18 @@ def prepare_xy(
     feature_set: str,
     split: pd.Series,
     split_name: str,
+    *,
+    task_type: str = "regression",
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     frame = dataset.feature_sets[feature_set]
     rows = split == split_name
     meta = dataset.metadata.loc[rows].reset_index(drop=True)
     x = frame.loc[rows, dataset.feature_columns[feature_set]].reset_index(drop=True)
-    y = dataset.targets.loc[rows, dataset.target_columns].reset_index(drop=True)
+    if task_type == "classification":
+        target_columns = dataset.classification_target_columns
+    else:
+        target_columns = dataset.target_columns
+    y = dataset.targets.loc[rows, target_columns].reset_index(drop=True)
     return meta, x, y
 
 

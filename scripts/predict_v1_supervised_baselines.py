@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run all trained V1 baseline models from a run directory on latest prediction windows."
     )
-    parser.add_argument("--run-dir", required=True, help="Training run directory containing trained_models.json.")
+    parser.add_argument("--run-dir", required=True, help="Training run directory containing final_models.json.")
     parser.add_argument(
         "--dataset-root",
         default="data/massive_sp500_current_constituents_history",
@@ -38,9 +38,9 @@ def parse_args() -> argparse.Namespace:
         "--benchmark-return-assumption",
         default="0",
         help=(
-            "Assumed benchmark return used to translate predicted market-adjusted "
+            "Assumed benchmark return used to translate regression market-adjusted "
             "returns into implied future closes. Use one value for all horizons, "
-            "or comma-separated values matching the model target horizons."
+            "or comma-separated values matching a regression model's target horizons."
         ),
     )
     return parser.parse_args()
@@ -73,7 +73,7 @@ def _parse_benchmark_return_assumption(value: str, target_columns: list[str]) ->
         returns = returns * len(target_columns)
     if len(returns) != len(target_columns):
         raise SystemExit(
-            "--benchmark-return-assumption must be one value or match the number of target horizons."
+            "--benchmark-return-assumption must be one value or match the number of regression target horizons."
         )
     return dict(zip(target_columns, returns))
 
@@ -100,29 +100,33 @@ def _add_implied_close_columns(
     for target in target_columns:
         pred_col = target.replace("market_adjusted_return", "pred_market_adjusted_return")
         close_col = target.replace("market_adjusted_return", "pred_close_if_benchmark_assumption")
+        if pred_col not in out.columns:
+            continue
         benchmark_return = benchmark_return_by_target[target]
         out[close_col] = out["anchor_close"] * (1.0 + out[pred_col] + benchmark_return)
     return out
+
+
+def _leaderboard_for_task(run_dir: Path, task_type: str) -> pd.DataFrame:
+    path = run_dir / ("leaderboard.csv" if task_type == "regression" else "classification_leaderboard.csv")
+    return pd.read_csv(path) if path.exists() else pd.DataFrame()
 
 
 def main() -> None:
     args = parse_args()
     run_dir = Path(args.run_dir)
     model_index_path = _resolve_model_index_path(run_dir)
-    leaderboard_path = run_dir / "leaderboard.csv"
+    model_index = json.loads(model_index_path.read_text(encoding="utf-8"))
+    if not model_index.get("models"):
+        raise SystemExit(f"No models found in {model_index_path}")
 
     stock_features = load_daily_features(args.dataset_root)
     context_features = load_market_context_features(args.dataset_root, stock_features=stock_features)
     if context_features.empty:
         raise SystemExit("Market context features are missing. Run scripts/collect_massive_market_context.py first.")
 
-    model_index = json.loads(model_index_path.read_text(encoding="utf-8"))
+    regression_records = [record for record in model_index["models"] if record.get("task_type", "regression") == "regression"]
     first_model = model_index["models"][0]
-    target_columns = list(first_model["target_columns"])
-    benchmark_return_by_target = _parse_benchmark_return_assumption(
-        args.benchmark_return_assumption,
-        target_columns,
-    )
     metadata, feature_sets, _ = build_latest_v1_feature_sets(
         stock_features,
         context_features,
@@ -131,10 +135,15 @@ def main() -> None:
         anchor_date=args.anchor_date or None,
     )
     metadata = _add_anchor_close(metadata, stock_features)
-    leaderboard = pd.read_csv(leaderboard_path) if leaderboard_path.exists() else pd.DataFrame()
-    prediction_frames: list[pd.DataFrame] = []
     sequence_stores: dict[tuple[str, tuple[str, ...]], object] = {}
+    leaderboards = {
+        "regression": _leaderboard_for_task(run_dir, "regression"),
+        "classification": _leaderboard_for_task(run_dir, "classification"),
+    }
+    prediction_frames: list[pd.DataFrame] = []
+
     for record in model_index["models"]:
+        task_type = str(record.get("task_type") or "regression")
         feature_set = record["feature_set"]
         model_name = record["model_name"]
         bundle = load_model_bundle(record["artifact_path"])
@@ -181,6 +190,7 @@ def main() -> None:
             feature_columns = list(record.get("feature_columns") or bundle_metadata.get("feature_columns") or [])
             x = _aligned_features(feature_sets[feature_set], feature_columns)
         pred = model.predict(x)
+        leaderboard = leaderboards.get(task_type, pd.DataFrame())
         rank = None
         recommended = False
         if not leaderboard.empty:
@@ -199,16 +209,25 @@ def main() -> None:
                 feature_set=feature_set,
                 leaderboard_rank=rank,
                 recommended=recommended,
+                task_type=task_type,
             )
         )
 
     predictions = pd.concat(prediction_frames, ignore_index=True) if prediction_frames else pd.DataFrame()
-    if not predictions.empty:
-        predictions = _add_implied_close_columns(
-            predictions,
-            target_columns=target_columns,
+    if not predictions.empty and regression_records:
+        regression_targets = list(regression_records[0]["target_columns"])
+        benchmark_return_by_target = _parse_benchmark_return_assumption(
+            args.benchmark_return_assumption,
+            regression_targets,
+        )
+        regression_mask = predictions["task_type"] == "regression"
+        regression_predictions = _add_implied_close_columns(
+            predictions.loc[regression_mask].copy(),
+            target_columns=regression_targets,
             benchmark_return_by_target=benchmark_return_by_target,
         )
+        non_regression_predictions = predictions.loc[~regression_mask].copy()
+        predictions = pd.concat([regression_predictions, non_regression_predictions], ignore_index=True)
     output_file = Path(args.output_file) if args.output_file else run_dir / "latest_predictions.csv"
     output_file.parent.mkdir(parents=True, exist_ok=True)
     predictions.to_csv(output_file, index=False)

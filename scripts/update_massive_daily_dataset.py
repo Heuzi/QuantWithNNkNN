@@ -93,8 +93,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--start-date",
-        default="2024-01-01",
-        help="Fallback inclusive YYYY-MM-DD used when no existing raw bars are present.",
+        default="1995-01-01",
+        help=(
+            "Fallback inclusive YYYY-MM-DD used when no existing raw bars are present. "
+            "This is premium-history ready; free-plan accounts may still receive a shorter range."
+        ),
     )
     parser.add_argument("--end-date", default=default_end.isoformat(), help="Inclusive YYYY-MM-DD.")
     parser.add_argument(

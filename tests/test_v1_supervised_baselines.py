@@ -21,6 +21,7 @@ from src.data.v1_dataset import (
     build_sequence_feature_store,
     build_v1_dataset,
     build_walk_forward_folds,
+    classification_target_column,
     chronological_split,
     encode_static_categories,
     prepare_xy,
@@ -104,6 +105,7 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         )
 
         self.assertIn("market_adjusted_return_20d", dataset.target_columns)
+        self.assertIn(classification_target_column(), dataset.classification_target_columns)
         self.assertIn("stock_relative_market_sector", dataset.feature_sets)
         sector_cols = dataset.feature_columns["stock_relative_market_sector"]
         self.assertTrue(any(col.startswith("market_context_") for col in sector_cols))
@@ -123,6 +125,7 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         split = chronological_split(dataset.metadata, train_fraction=0.6, val_fraction=0.2)
         train_meta, x_train, y_train = prepare_xy(dataset, "stock_only", split, "train")
         val_meta, x_val, y_val = prepare_xy(dataset, "stock_only", split, "val")
+        _, _, y_val_class = prepare_xy(dataset, "stock_only", split, "val", task_type="classification")
 
         model = make_model("ridge").fit(x_train, y_train)
         pred = model.predict(x_val)
@@ -140,6 +143,7 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         leaderboard = build_leaderboard(metrics)
 
         self.assertEqual(pred.shape[1], 2)
+        self.assertEqual(y_val_class.shape[1], 1)
         self.assertEqual(int(leaderboard.iloc[0]["leaderboard_rank"]), 1)
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "test_v1_supervised_model.pkl"
@@ -232,6 +236,25 @@ class V1SupervisedBaselineTests(unittest.TestCase):
             loaded = load_model_bundle(path)
             loaded_pred = loaded["model"].predict(x_val)
         self.assertTrue(np.allclose(pred, loaded_pred))
+
+    def test_classification_target_and_model_smoke(self) -> None:
+        stock_features, context_features = _stock_and_context_frames(days=75)
+        dataset = build_v1_dataset(
+            stock_features,
+            context_features,
+            horizons=(1, 5, 20),
+            window_length=10,
+            benchmark_ticker="SPY",
+        )
+        self.assertIn(classification_target_column(), dataset.targets.columns)
+        self.assertTrue(set(dataset.targets[classification_target_column()].unique()).issubset({0.0, 1.0}))
+        split = chronological_split(dataset.metadata, train_fraction=0.6, val_fraction=0.2)
+        _, x_train, y_train = prepare_xy(dataset, "stock_only", split, "train", task_type="classification")
+        val_meta, x_val, y_val = prepare_xy(dataset, "stock_only", split, "val", task_type="classification")
+        model = make_model("logistic_regression", task_type="classification").fit(x_train, y_train)
+        pred = model.predict(x_val)
+        self.assertEqual(pred.shape, (len(val_meta), 1))
+        self.assertTrue(np.all((pred >= 0.0) & (pred <= 1.0)))
 
     def test_latest_feature_sets_use_target_pending_windows(self) -> None:
         stock_features, context_features = _stock_and_context_frames()
@@ -331,7 +354,10 @@ class V1SupervisedBaselineTests(unittest.TestCase):
             self.assertTrue((walk_run / "fold_metrics.csv").exists())
             self.assertTrue((walk_run / "oos_predictions.csv").exists())
             self.assertTrue((walk_run / "oos_leaderboard.csv").exists())
+            self.assertTrue((walk_run / "classification_oos_predictions.csv").exists())
+            self.assertTrue((walk_run / "classification_oos_leaderboard.csv").exists())
             self.assertTrue((walk_run / "final_models.json").exists())
+            self.assertTrue((walk_run / "final_classification_models.json").exists())
             self.assertTrue((walk_run / "comparison.csv").exists())
             self.assertTrue((walk_run / "comparison_summary.json").exists())
 
@@ -354,6 +380,7 @@ class V1SupervisedBaselineTests(unittest.TestCase):
             latest_predictions = pd.read_csv(walk_run / "latest_predictions.csv")
             self.assertIn("torch_seq_static", set(latest_predictions["model_name"]))
             self.assertIn("ridge", set(latest_predictions["model_name"]))
+            self.assertIn("classification", set(latest_predictions["task_type"]))
 
     @unittest.skipUnless(importlib.util.find_spec("lightgbm") is not None, "lightgbm is not installed")
     def test_lightgbm_fit_predict_smoke(self) -> None:

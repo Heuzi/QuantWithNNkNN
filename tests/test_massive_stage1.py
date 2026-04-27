@@ -44,6 +44,8 @@ class MassiveStage1Tests(unittest.TestCase):
         self.assertAlmostEqual(second["gap_pct"], 0.05)
         self.assertAlmostEqual(second["intraday_return"], (11.0 / 10.5) - 1.0)
         self.assertAlmostEqual(second["close_to_vwap_pct"], (11.0 / 10.7) - 1.0)
+        self.assertAlmostEqual(second["close_location"], 1.0)
+        self.assertAlmostEqual(second["true_range_pct"], (11.0 - 10.0) / 10.0)
 
     def test_compute_daily_features_adds_rolling_volume_and_momentum_features(self) -> None:
         bars = []
@@ -73,6 +75,8 @@ class MassiveStage1Tests(unittest.TestCase):
         self.assertIsNotNone(last["price_vs_sma_20d"])
         self.assertIsNotNone(last["price_vs_sma_60d"])
         self.assertIsNotNone(last["volume_ratio_20d"])
+        self.assertIsNotNone(last["dollar_volume_ratio_5d"])
+        self.assertIsNotNone(last["volume_zscore_20d"])
         self.assertTrue(last["has_60d_history"])
 
     def test_compute_episode_index_respects_window_and_benchmark_adjustment(self) -> None:

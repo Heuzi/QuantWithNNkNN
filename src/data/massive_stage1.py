@@ -403,6 +403,8 @@ def compute_daily_features(bars: Sequence[dict[str, object]]) -> list[dict[str, 
             intraday_return = None
             hl_range_pct = None
             close_to_vwap_pct = None
+            close_location = None
+            true_range_pct = None
 
             if prev_close and close is not None and prev_close != 0:
                 return_1d = (float(close) / prev_close) - 1.0
@@ -414,6 +416,13 @@ def compute_daily_features(bars: Sequence[dict[str, object]]) -> list[dict[str, 
                 intraday_return = (float(close) / float(open_)) - 1.0
             if close not in (None, 0) and high is not None and low is not None:
                 hl_range_pct = (float(high) - float(low)) / float(close)
+                if float(high) != float(low):
+                    close_location = (float(close) - float(low)) / (float(high) - float(low))
+            if prev_close and prev_close != 0 and high is not None and low is not None:
+                high_f = float(high)
+                low_f = float(low)
+                true_range = max(high_f - low_f, abs(high_f - prev_close), abs(low_f - prev_close))
+                true_range_pct = true_range / prev_close
             if close not in (None, 0) and vwap not in (None, 0):
                 close_to_vwap_pct = (float(close) / float(vwap)) - 1.0
 
@@ -433,6 +442,8 @@ def compute_daily_features(bars: Sequence[dict[str, object]]) -> list[dict[str, 
             momentum_20d = None
             momentum_60d = None
             volume_ratio_20d = None
+            dollar_volume_ratio_5d = None
+            volume_zscore_20d = None
 
             if len(prior_closes) >= 4 and close is not None and prior_closes[-4] != 0:
                 rolling_return_5d = (float(close) / prior_closes[-4]) - 1.0
@@ -456,6 +467,15 @@ def compute_daily_features(bars: Sequence[dict[str, object]]) -> list[dict[str, 
                 rolling_avg_dollar_volume_60d = statistics.mean(
                     list(prior_dollar_volume)[-59:] + [float(dollar_volume)]
                 )
+            if len(prior_dollar_volume) >= 4 and dollar_volume not in (None, 0):
+                avg_dollar_volume_5d = statistics.mean(list(prior_dollar_volume)[-4:] + [float(dollar_volume)])
+                if avg_dollar_volume_5d != 0:
+                    dollar_volume_ratio_5d = float(dollar_volume) / avg_dollar_volume_5d
+            if len(prior_volume) >= 19 and volume is not None:
+                volume_window_20d = list(prior_volume)[-19:] + [float(volume)]
+                volume_std_20d = statistics.pstdev(volume_window_20d)
+                if volume_std_20d != 0:
+                    volume_zscore_20d = (float(volume) - statistics.mean(volume_window_20d)) / volume_std_20d
             if len(prior_closes) >= 19:
                 sma_close_20d = _mean_or_none(list(prior_closes)[-19:] + ([float(close)] if close is not None else []))
             if len(prior_closes) >= 59:
@@ -481,6 +501,8 @@ def compute_daily_features(bars: Sequence[dict[str, object]]) -> list[dict[str, 
                     "intraday_return": intraday_return,
                     "hl_range_pct": hl_range_pct,
                     "close_to_vwap_pct": close_to_vwap_pct,
+                    "close_location": close_location,
+                    "true_range_pct": true_range_pct,
                     "rolling_return_5d": rolling_return_5d,
                     "rolling_return_20d": rolling_return_20d,
                     "rolling_return_60d": rolling_return_60d,
@@ -497,6 +519,8 @@ def compute_daily_features(bars: Sequence[dict[str, object]]) -> list[dict[str, 
                     "momentum_20d": momentum_20d,
                     "momentum_60d": momentum_60d,
                     "volume_ratio_20d": volume_ratio_20d,
+                    "dollar_volume_ratio_5d": dollar_volume_ratio_5d,
+                    "volume_zscore_20d": volume_zscore_20d,
                     "has_prev_close": prev_close is not None,
                     "has_20d_history": len(prior_closes) >= 19,
                     "has_60d_history": len(prior_closes) >= 59,

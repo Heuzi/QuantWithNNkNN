@@ -58,8 +58,8 @@ Use this file as the shared handoff note when switching between computers or Cod
   Reason: It preserves reproducibility and gives a direct baseline for comparison.
 - Decision: Add `torch_seq_static` as the first true sequence-plus-static model.
   Reason: It matches the architecture roadmap better than the older flattened-only baselines.
-- Decision: Prefer GPU execution automatically for `torch`, `xgboost`, and `lightgbm`, with CPU fallback.
-  Reason: Full walk-forward benchmarking is expensive enough that automatic acceleration is worth using wherever the stack supports it.
+- Decision: Prefer GPU execution automatically for `torch`, `xgboost`, and `lightgbm`, with CPU fallback and persisted fallback metadata.
+  Reason: Full walk-forward benchmarking is expensive enough that automatic acceleration is worth using wherever the stack supports it, and benchmark artifacts need to show whether a model really used an accelerator.
 - Decision: Serialize torch-based model bundles in a CPU-safe way, then move them back onto the best available device after load.
   Reason: GPU-trained artifacts should stay portable across sessions and machines.
 - Decision: Add a binary classification task alongside regression instead of replacing regression.
@@ -84,10 +84,19 @@ Use this file as the shared handoff note when switching between computers or Cod
   - regression and classification now train side by side
   - task-specific artifacts are written separately
   - latest prediction now handles mixed-task model indexes
+  - `torch_seq_static` now supports sequence component ablations with stock-only, relative-stock, market-context, and sector-context daily tokens
+  - sequence-static torch baselines now use a CPU-feasible default epoch budget: `max_epochs=20`, `patience=4`, batch size `512`
+  - the fullest sequence layout is `stock_relative_market_sector_sequence`
+  - Priority A daily features from the current Massive OHLCV/context tables are available: `close_location`, `true_range_pct`, `dollar_volume_ratio_5d`, `volume_zscore_20d`, and stock-vs-market/sector 1d/5d return features
+  - compact tabular and sequence feature profiles are available, with `stock_relative_market_sector_compact` around 191 tabular columns and `stock_relative_market_sector_compact_sequence` around 65 daily-token columns after Priority A fields
 - Classification task details:
   - label column: `market_outperform_any_20d_gt_5pct`
   - positive when pathwise stock excess return over `SPY` exceeds `5%` anywhere in the next 20 trading days
-  - classification models currently include logistic regression, LightGBM, XGBoost, sklearn MLP, torch MLP, and optional `torch_seq_static_classifier`
+  - classification models currently include logistic regression, elastic-net logistic regression, LightGBM, XGBoost, sklearn MLP, torch MLP, and optional `torch_seq_static_classifier`
+- Input layout details:
+  - tabular baselines consume one flattened episode row with rolling `__last`, `__mean60`, and `__std60` features
+  - sequence models consume `[batch_size, window_length, features_per_day]` daily-token tensors
+  - default `window_length` is 60 trading days
 - Evidence from tests:
   - the end-to-end smoke run now writes both regression and classification OOS artifacts
   - `latest_predictions.csv` now includes both `task_type = regression` and `task_type = classification`
@@ -107,7 +116,7 @@ Use this file as the shared handoff note when switching between computers or Cod
   - some early or tiny walk-forward folds can be extremely imbalanced or even single-class; the code now falls back to constant-probability classifiers in those cases, but the metric quality is still limited on such folds.
   - classification top-bottom realized spread currently uses the realized 20-day market-adjusted endpoint return as its realized spread proxy.
 - Modeling risks:
-  - `torch_seq_static` is implemented, but its current architecture/hyperparameters underperform the better tabular baselines.
+  - `torch_seq_static` is implemented, but its current architecture/hyperparameters may still underperform the better tabular baselines and should be rebenchmarked after the new context-aware sequence layouts are used.
   - `elastic_net` can emit convergence warnings on the widest feature sets.
 
 ## What Was Tested

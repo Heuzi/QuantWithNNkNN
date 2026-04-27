@@ -32,6 +32,7 @@ from src.data.v1_dataset import (  # noqa: E402
     parse_horizons,
     rows_for_dates,
     save_dataset_manifest,
+    sequence_feature_config,
     split_ranges,
     target_column,
 )
@@ -210,6 +211,7 @@ def _build_model_metadata(
     split_summary: dict[str, dict[str, str | int | None]] | None = None,
     flat_feature_columns: list[str] | None = None,
     sequence_feature_columns: list[str] | None = None,
+    sequence_components: dict[str, bool] | None = None,
     static_vocabularies: dict[str, dict[str, int]] | None = None,
     runtime: dict[str, object] | None = None,
     classification_threshold: float | None = None,
@@ -239,6 +241,7 @@ def _build_model_metadata(
         metadata["feature_columns"] = flat_feature_columns
     if sequence_feature_columns is not None:
         metadata["sequence_feature_columns"] = sequence_feature_columns
+        metadata["sequence_components"] = sequence_components or sequence_feature_config(feature_set).to_dict()
         metadata["static_categorical_columns"] = list(STATIC_CATEGORICAL_COLUMNS)
         metadata["static_vocabularies"] = static_vocabularies or {}
     if runtime:
@@ -434,6 +437,7 @@ def _train_task_holdout(
     args: argparse.Namespace,
     dataset: V1Dataset,
     stock_features: pd.DataFrame,
+    context_features: pd.DataFrame,
     feature_sets: list[str],
     model_names: list[str],
     horizons: tuple[int, ...],
@@ -452,6 +456,7 @@ def _train_task_holdout(
         feature_set: build_sequence_feature_store(
             stock_features,
             feature_set,
+            context_features=context_features,
             benchmark_ticker=args.benchmark_ticker,
         )
         for feature_set in feature_sets
@@ -547,6 +552,7 @@ def _train_task_holdout(
             split_summary=split_summary,
             flat_feature_columns=dataset.feature_columns.get(feature_set),
             sequence_feature_columns=sequence_stores[feature_set].feature_columns if is_sequence_static_model(model_name) else None,
+            sequence_components=sequence_feature_config(feature_set).to_dict() if is_sequence_static_model(model_name) else None,
             static_vocabularies=final_vocabularies,
             runtime=_model_runtime_metadata(model),
             classification_threshold=args.classification_threshold,
@@ -589,6 +595,7 @@ def _train_task_walk_forward(
     args: argparse.Namespace,
     dataset: V1Dataset,
     stock_features: pd.DataFrame,
+    context_features: pd.DataFrame,
     feature_sets: list[str],
     model_names: list[str],
     horizons: tuple[int, ...],
@@ -613,6 +620,7 @@ def _train_task_walk_forward(
         feature_set: build_sequence_feature_store(
             stock_features,
             feature_set,
+            context_features=context_features,
             benchmark_ticker=args.benchmark_ticker,
         )
         for feature_set in feature_sets
@@ -750,6 +758,7 @@ def _train_task_walk_forward(
             eval_mode=args.eval_mode,
             flat_feature_columns=dataset.feature_columns.get(feature_set),
             sequence_feature_columns=sequence_stores[feature_set].feature_columns if is_sequence_static_model(model_name) else None,
+            sequence_components=sequence_feature_config(feature_set).to_dict() if is_sequence_static_model(model_name) else None,
             static_vocabularies=final_vocabularies,
             runtime=_model_runtime_metadata(final_model),
             classification_threshold=args.classification_threshold,
@@ -794,9 +803,10 @@ def main() -> None:
     args = parse_args()
     horizons = parse_horizons(args.horizons)
     feature_sets = [item.strip() for item in args.feature_sets.split(",") if item.strip()]
-    invalid_sets = [name for name in feature_sets if name not in FEATURE_SET_NAMES]
+    valid_feature_sets = tuple(dict.fromkeys((*FEATURE_SET_NAMES, *SEQUENCE_FEATURE_SET_NAMES)))
+    invalid_sets = [name for name in feature_sets if name not in valid_feature_sets]
     if invalid_sets:
-        raise SystemExit(f"Unknown feature set(s): {invalid_sets}. Valid: {FEATURE_SET_NAMES}")
+        raise SystemExit(f"Unknown feature set(s): {invalid_sets}. Valid: {valid_feature_sets}")
 
     run_name = args.run_name or datetime.utcnow().strftime(f"{args.eval_mode}_%Y%m%d_%H%M%S")
     output_dir = Path(args.output_root) / run_name
@@ -836,7 +846,14 @@ def main() -> None:
         "classification_event_type": DEFAULT_CLASSIFICATION_EVENT_TYPE,
         "window_length": args.window_length,
         "benchmark_ticker": args.benchmark_ticker.upper(),
-        "feature_sets": {name: len(dataset.feature_columns[name]) for name in feature_sets},
+        "feature_sets": {
+            name: (
+                len(dataset.feature_columns[name])
+                if name in dataset.feature_columns
+                else {"sequence_components": sequence_feature_config(name).to_dict()}
+            )
+            for name in feature_sets
+        },
         "models": task_models,
         "row_count": int(len(dataset.metadata)),
         "eval_mode": args.eval_mode,
@@ -872,6 +889,7 @@ def main() -> None:
                 args=args,
                 dataset=dataset,
                 stock_features=stock_features,
+                context_features=context_features,
                 feature_sets=feature_sets,
                 model_names=model_names,
                 horizons=horizons,
@@ -886,6 +904,7 @@ def main() -> None:
                 args=args,
                 dataset=dataset,
                 stock_features=stock_features,
+                context_features=context_features,
                 feature_sets=feature_sets,
                 model_names=model_names,
                 horizons=horizons,

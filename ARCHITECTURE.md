@@ -76,7 +76,7 @@ Current implementation snapshot:
 - Regression and classification leaderboards and deploy bundles are written separately so downstream analysis can choose one or both tasks.
 - The current baseline suite includes tabular baselines plus `torch_seq_static`.
 - `torch_seq_static` uses a real 60-day sequence branch plus static categorical embeddings for `gics_sector` and `gics_sub_industry`.
-- The sequence-static model is currently wired only for `stock_only` and `stock_relative`.
+- The sequence-static model supports component ablations over stock-only, relative stock, market context, and sector ETF context sequence tokens, including `stock_relative_market_sector_sequence`.
 - `torch`, `xgboost`, and `lightgbm` now prefer GPU execution when available and fall back to CPU otherwise.
 - Latest inference uses final deployment bundles saved after the walk-forward run completes.
 

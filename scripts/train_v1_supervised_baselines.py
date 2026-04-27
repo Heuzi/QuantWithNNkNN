@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+import os
 from pathlib import Path
 import sys
 
@@ -259,20 +260,33 @@ def _model_runtime_metadata(model: object) -> dict[str, object]:
         runtime["lightgbm_device_type"] = str(getattr(model, "device_type_"))
     if type(model).__name__ in {"XGBoostRegressor", "XGBoostClassifier"} and hasattr(model, "device_"):
         runtime["xgboost_device"] = str(getattr(model, "device_"))
+    if hasattr(model, "prefer_gpu"):
+        runtime["prefer_gpu"] = bool(getattr(model, "prefer_gpu"))
+    if getattr(model, "gpu_fallback_error_", ""):
+        runtime["gpu_fallback_error"] = str(getattr(model, "gpu_fallback_error_"))
     return runtime
 
 
 def _runtime_environment() -> dict[str, object]:
     info: dict[str, object] = {"gpu_available": False}
+    gpu_visible_from_env = False
+    for env_name in ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"):
+        if env_name in os.environ:
+            visible_devices = os.environ[env_name]
+            info[env_name.lower()] = visible_devices
+            if visible_devices.strip().lower() not in {"", "-1", "none", "void"}:
+                gpu_visible_from_env = True
+    info["gpu_visible_from_env"] = gpu_visible_from_env
     try:
         import torch
 
-        info["gpu_available"] = bool(torch.cuda.is_available())
+        info["torch_cuda_available"] = bool(torch.cuda.is_available())
+        info["gpu_available"] = bool(torch.cuda.is_available()) or gpu_visible_from_env
         if torch.cuda.is_available():
             info["cuda_device_count"] = int(torch.cuda.device_count())
             info["cuda_device_name"] = str(torch.cuda.get_device_name(0))
     except Exception:
-        pass
+        info["gpu_available"] = gpu_visible_from_env
     return info
 
 

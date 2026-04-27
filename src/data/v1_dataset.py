@@ -58,6 +58,9 @@ RAW_LEVEL_COLUMNS = {
     "rolling_avg_dollar_volume_20d",
     "rolling_avg_dollar_volume_60d",
 }
+MODEL_INPUT_RAW_LEVEL_COLUMNS = set(RAW_LEVEL_COLUMNS)
+MODEL_INPUT_SUMMARY_SUFFIXES = ("__last", "__mean60", "__std60")
+MODEL_INPUT_PREFIXES = ("stock_", "market_context_", "sector_context_", "context_")
 
 BASE_STOCK_FEATURES = [
     "return_1d",
@@ -66,6 +69,8 @@ BASE_STOCK_FEATURES = [
     "intraday_return",
     "hl_range_pct",
     "close_to_vwap_pct",
+    "close_location",
+    "true_range_pct",
     "rolling_return_5d",
     "rolling_return_20d",
     "rolling_return_60d",
@@ -76,6 +81,12 @@ BASE_STOCK_FEATURES = [
     "momentum_20d",
     "momentum_60d",
     "volume_ratio_20d",
+    "dollar_volume_ratio_5d",
+    "volume_zscore_20d",
+    "stock_vs_market_return_1d",
+    "stock_vs_sector_return_1d",
+    "stock_vs_market_return_5d",
+    "stock_vs_sector_return_5d",
     "log1p_volume",
     "log1p_dollar_volume",
     "log1p_rolling_avg_volume_20d",
@@ -91,6 +102,8 @@ CONTEXT_FEATURES = [
     "intraday_return",
     "hl_range_pct",
     "close_to_vwap_pct",
+    "close_location",
+    "true_range_pct",
     "rolling_return_5d",
     "rolling_return_20d",
     "rolling_return_60d",
@@ -101,6 +114,70 @@ CONTEXT_FEATURES = [
     "momentum_20d",
     "momentum_60d",
     "volume_ratio_20d",
+    "dollar_volume_ratio_5d",
+    "volume_zscore_20d",
+]
+
+COMPACT_STOCK_FEATURES = [
+    "log_return_1d",
+    "gap_pct",
+    "intraday_return",
+    "hl_range_pct",
+    "close_to_vwap_pct",
+    "close_location",
+    "true_range_pct",
+    "rolling_return_5d",
+    "rolling_return_20d",
+    "rolling_return_60d",
+    "rolling_vol_20d",
+    "rolling_vol_60d",
+    "price_vs_sma_20d",
+    "price_vs_sma_60d",
+    "volume_ratio_20d",
+    "dollar_volume_ratio_5d",
+    "volume_zscore_20d",
+    "stock_vs_market_return_1d",
+    "stock_vs_sector_return_1d",
+    "stock_vs_market_return_5d",
+    "stock_vs_sector_return_5d",
+    "log1p_dollar_volume",
+]
+
+COMPACT_FULL_PANEL_RELATIVE_FEATURES = [
+    "log1p_dollar_volume__cs_z",
+    "rolling_return_5d__cs_z",
+    "rolling_return_20d__cs_z",
+    "rolling_return_60d__cs_z",
+    "rolling_vol_20d__cs_z",
+    "rolling_vol_60d__cs_z",
+    "price_vs_sma_20d__cs_z",
+    "price_vs_sma_60d__cs_z",
+    "volume_ratio_20d__cs_z",
+]
+
+COMPACT_SECTOR_RELATIVE_FEATURES = [
+    "log1p_dollar_volume__sector_cs_z",
+    "rolling_return_20d__sector_cs_z",
+    "rolling_return_60d__sector_cs_z",
+    "rolling_vol_20d__sector_cs_z",
+    "rolling_vol_60d__sector_cs_z",
+    "volume_ratio_20d__sector_cs_z",
+]
+
+COMPACT_CONTEXT_FEATURES = [
+    "log_return_1d",
+    "rolling_return_5d",
+    "rolling_return_20d",
+    "rolling_return_60d",
+    "rolling_vol_20d",
+    "rolling_vol_60d",
+    "close_location",
+    "true_range_pct",
+    "price_vs_sma_20d",
+    "price_vs_sma_60d",
+    "volume_ratio_20d",
+    "dollar_volume_ratio_5d",
+    "volume_zscore_20d",
 ]
 
 FEATURE_SET_NAMES = (
@@ -108,8 +185,12 @@ FEATURE_SET_NAMES = (
     "stock_relative",
     "stock_relative_market",
     "stock_relative_market_sector",
+    "stock_compact",
+    "stock_relative_compact",
+    "stock_relative_market_compact",
+    "stock_relative_market_sector_compact",
 )
-SEQUENCE_BASE_FEATURE_SET_NAMES = (
+FULL_SEQUENCE_BASE_FEATURE_SET_NAMES = (
     "stock_only",
     "stock_relative",
     "stock_market",
@@ -118,6 +199,20 @@ SEQUENCE_BASE_FEATURE_SET_NAMES = (
     "stock_relative_market",
     "stock_relative_sector",
     "stock_relative_market_sector",
+)
+COMPACT_SEQUENCE_BASE_FEATURE_SET_NAMES = (
+    "stock_compact",
+    "stock_relative_compact",
+    "stock_market_compact",
+    "stock_sector_compact",
+    "stock_market_sector_compact",
+    "stock_relative_market_compact",
+    "stock_relative_sector_compact",
+    "stock_relative_market_sector_compact",
+)
+SEQUENCE_BASE_FEATURE_SET_NAMES = (
+    *FULL_SEQUENCE_BASE_FEATURE_SET_NAMES,
+    *COMPACT_SEQUENCE_BASE_FEATURE_SET_NAMES,
 )
 SEQUENCE_FEATURE_SET_NAMES = (
     *SEQUENCE_BASE_FEATURE_SET_NAMES,
@@ -205,6 +300,7 @@ class SequenceFeatureConfig:
     include_relative: bool
     include_market_context: bool
     include_sector_context: bool
+    compact: bool
 
     def to_dict(self) -> dict[str, bool]:
         return {
@@ -212,6 +308,7 @@ class SequenceFeatureConfig:
             "relative_stock_features": self.include_relative,
             "market_context_features": self.include_market_context,
             "sector_context_features": self.include_sector_context,
+            "compact_feature_profile": self.compact,
         }
 
 
@@ -224,6 +321,7 @@ def sequence_feature_config(feature_set: str) -> SequenceFeatureConfig:
         include_relative="relative" in parts,
         include_market_context="market" in parts,
         include_sector_context="sector" in parts,
+        compact="compact" in parts,
     )
 
 
@@ -280,26 +378,174 @@ def _available_numeric_columns(df: pd.DataFrame, requested: Sequence[str]) -> li
     return [col for col in requested if col in df.columns and pd.api.types.is_numeric_dtype(df[col])]
 
 
-def select_stock_feature_columns(df: pd.DataFrame, include_relative: bool) -> list[str]:
-    cols = _available_numeric_columns(df, BASE_STOCK_FEATURES)
+def _canonical_model_feature_name(column: str) -> str:
+    name = str(column)
+    for suffix in MODEL_INPUT_SUMMARY_SUFFIXES:
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    for prefix in MODEL_INPUT_PREFIXES:
+        if name.startswith(prefix):
+            name = name[len(prefix) :]
+            break
+    return name
+
+
+def raw_level_model_input_columns(columns: Sequence[str]) -> list[str]:
+    return [
+        str(column)
+        for column in columns
+        if _canonical_model_feature_name(str(column)) in MODEL_INPUT_RAW_LEVEL_COLUMNS
+    ]
+
+
+def validate_model_feature_columns(columns: Sequence[str], *, feature_set: str) -> None:
+    raw_columns = raw_level_model_input_columns(columns)
+    if raw_columns:
+        preview = ", ".join(raw_columns[:10])
+        extra = "" if len(raw_columns) <= 10 else f", ... ({len(raw_columns)} total)"
+        raise ValueError(
+            f"Raw level columns are not allowed in model inputs for {feature_set}: {preview}{extra}. "
+            "Use log-scaled, ratio, return, z-score, or percentile features instead."
+        )
+
+
+def add_priority_a_ohlcv_features(features: pd.DataFrame) -> pd.DataFrame:
+    df = features.copy()
+    if df.empty:
+        return df
+    df["_row_order"] = np.arange(len(df))
+    df = df.sort_values(["ticker", "date"]).reset_index(drop=True)
+
+    if "close_location" not in df.columns and {"high", "low", "close"}.issubset(df.columns):
+        spread = df["high"].astype(float) - df["low"].astype(float)
+        df["close_location"] = np.where(
+            spread != 0.0,
+            (df["close"].astype(float) - df["low"].astype(float)) / spread,
+            np.nan,
+        )
+
+    if "true_range_pct" not in df.columns and {"high", "low", "close"}.issubset(df.columns):
+        prev_close = (
+            df["prev_close"].astype(float)
+            if "prev_close" in df.columns
+            else df.groupby("ticker", sort=False)["close"].shift(1).astype(float)
+        )
+        high = df["high"].astype(float)
+        low = df["low"].astype(float)
+        true_range = pd.concat(
+            [
+                high - low,
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        df["true_range_pct"] = np.where(prev_close != 0.0, true_range / prev_close, np.nan)
+
+    if "dollar_volume_ratio_5d" not in df.columns and "dollar_volume" in df.columns:
+        dollar_volume = df["dollar_volume"].astype(float)
+        avg_5d = dollar_volume.groupby(df["ticker"], sort=False).transform(
+            lambda values: values.rolling(5, min_periods=5).mean()
+        )
+        df["dollar_volume_ratio_5d"] = np.where(avg_5d != 0.0, dollar_volume / avg_5d, np.nan)
+
+    if "volume_zscore_20d" not in df.columns and "volume" in df.columns:
+        volume = df["volume"].astype(float)
+        rolling_mean = volume.groupby(df["ticker"], sort=False).transform(
+            lambda values: values.rolling(20, min_periods=20).mean()
+        )
+        rolling_std = volume.groupby(df["ticker"], sort=False).transform(
+            lambda values: values.rolling(20, min_periods=20).std(ddof=0)
+        )
+        df["volume_zscore_20d"] = np.where(rolling_std != 0.0, (volume - rolling_mean) / rolling_std, np.nan)
+
+    df = df.sort_values("_row_order").drop(columns=["_row_order"]).reset_index(drop=True)
+    return df
+
+
+def add_context_relative_return_features(
+    stock_features: pd.DataFrame,
+    context_features: pd.DataFrame,
+    *,
+    benchmark_ticker: str = DEFAULT_BENCHMARK_TICKER,
+) -> pd.DataFrame:
+    stocks = add_priority_a_ohlcv_features(stock_features)
+    context = add_priority_a_ohlcv_features(context_features)
+    if stocks.empty or context.empty:
+        return stocks
+
+    context = context.copy()
+    context["ticker"] = context["ticker"].astype(str).str.upper()
+    context["date"] = context["date"].astype(str)
+    stocks["date"] = stocks["date"].astype(str)
+
+    benchmark = context[context["ticker"] == benchmark_ticker.upper()].set_index("date")
+    if "return_1d" in stocks.columns and "return_1d" in benchmark.columns:
+        stocks["stock_vs_market_return_1d"] = stocks["return_1d"].astype(float) - stocks["date"].map(
+            benchmark["return_1d"].astype(float)
+        )
+    if "rolling_return_5d" in stocks.columns and "rolling_return_5d" in benchmark.columns:
+        stocks["stock_vs_market_return_5d"] = stocks["rolling_return_5d"].astype(float) - stocks["date"].map(
+            benchmark["rolling_return_5d"].astype(float)
+        )
+
+    if "gics_sector" not in stocks.columns:
+        return stocks
+    stocks["sector_etf"] = stocks["gics_sector"].map(SECTOR_ETF_BY_GICS)
+    sector_cols = ["ticker", "date"]
+    for col in ("return_1d", "rolling_return_5d"):
+        if col in context.columns:
+            sector_cols.append(col)
+    if len(sector_cols) <= 2:
+        return stocks
+    sector_context = context[context["ticker"].isin(set(SECTOR_ETF_BY_GICS.values()))][sector_cols].copy()
+    sector_context = sector_context.rename(
+        columns={
+            "ticker": "_sector_etf",
+            "return_1d": "_sector_return_1d",
+            "rolling_return_5d": "_sector_return_5d",
+        }
+    )
+    stocks = stocks.merge(
+        sector_context,
+        left_on=["date", "sector_etf"],
+        right_on=["date", "_sector_etf"],
+        how="left",
+    )
+    if "return_1d" in stocks.columns and "_sector_return_1d" in stocks.columns:
+        stocks["stock_vs_sector_return_1d"] = stocks["return_1d"].astype(float) - stocks["_sector_return_1d"].astype(float)
+    if "rolling_return_5d" in stocks.columns and "_sector_return_5d" in stocks.columns:
+        stocks["stock_vs_sector_return_5d"] = stocks["rolling_return_5d"].astype(float) - stocks["_sector_return_5d"].astype(float)
+    return stocks.drop(columns=["_sector_etf", "_sector_return_1d", "_sector_return_5d"], errors="ignore")
+
+
+def select_stock_feature_columns(df: pd.DataFrame, include_relative: bool, *, compact: bool = False) -> list[str]:
+    cols = _available_numeric_columns(df, COMPACT_STOCK_FEATURES if compact else BASE_STOCK_FEATURES)
     if include_relative:
-        relative = [
-            col
-            for col in df.columns
-            if (
-                col.endswith("__cs_z")
-                or col.endswith("__cs_pct")
-                or col.endswith("__sector_cs_z")
-                or col.endswith("__sector_cs_pct")
+        if compact:
+            relative = _available_numeric_columns(
+                df,
+                [*COMPACT_FULL_PANEL_RELATIVE_FEATURES, *COMPACT_SECTOR_RELATIVE_FEATURES],
             )
-            and pd.api.types.is_numeric_dtype(df[col])
-        ]
+        else:
+            relative = [
+                col
+                for col in df.columns
+                if (
+                    col.endswith("__cs_z")
+                    or col.endswith("__cs_pct")
+                    or col.endswith("__sector_cs_z")
+                    or col.endswith("__sector_cs_pct")
+                )
+                and pd.api.types.is_numeric_dtype(df[col])
+            ]
         cols.extend(relative)
     return list(dict.fromkeys(cols))
 
 
-def select_context_feature_columns(df: pd.DataFrame) -> list[str]:
-    return _available_numeric_columns(df, CONTEXT_FEATURES)
+def select_context_feature_columns(df: pd.DataFrame, *, compact: bool = False) -> list[str]:
+    return _available_numeric_columns(df, COMPACT_CONTEXT_FEATURES if compact else CONTEXT_FEATURES)
 
 
 def select_sequence_feature_columns(
@@ -308,11 +554,15 @@ def select_sequence_feature_columns(
     context_features: pd.DataFrame | None = None,
 ) -> list[str]:
     config = sequence_feature_config(feature_set)
-    cols = select_stock_feature_columns(stock_features, include_relative=config.include_relative)
+    cols = select_stock_feature_columns(
+        stock_features,
+        include_relative=config.include_relative,
+        compact=config.compact,
+    )
     if config.include_market_context or config.include_sector_context:
         if context_features is None:
             raise ValueError(f"{feature_set} sequence inputs require context_features.")
-        context_cols = select_context_feature_columns(context_features)
+        context_cols = select_context_feature_columns(context_features, compact=config.compact)
         if config.include_market_context:
             cols.extend(f"market_context_{col}" for col in context_cols)
             cols.append("market_context_missing")
@@ -345,8 +595,21 @@ def build_sequence_feature_store(
     feature_columns: Sequence[str] | None = None,
 ) -> SequenceFeatureStore:
     config = sequence_feature_config(feature_set)
+    if context_features is not None:
+        stock_features = add_context_relative_return_features(
+            stock_features,
+            context_features,
+            benchmark_ticker=benchmark_ticker,
+        )
+        context_features = add_priority_a_ohlcv_features(context_features)
+    else:
+        stock_features = add_priority_a_ohlcv_features(stock_features)
     stocks = _filtered_stock_universe(stock_features, benchmark_ticker=benchmark_ticker)
-    stock_cols = select_stock_feature_columns(stocks, include_relative=config.include_relative)
+    stock_cols = select_stock_feature_columns(
+        stocks,
+        include_relative=config.include_relative,
+        compact=config.compact,
+    )
     frame = stocks[["ticker", "date", "gics_sector", *stock_cols]].copy()
     frame["sector_etf"] = frame["gics_sector"].map(SECTOR_ETF_BY_GICS)
     generated_feature_columns = list(stock_cols)
@@ -357,7 +620,7 @@ def build_sequence_feature_store(
         context = context_features.copy()
         context["ticker"] = context["ticker"].astype(str).str.upper()
         context["date"] = context["date"].astype(str)
-        context_cols = select_context_feature_columns(context)
+        context_cols = select_context_feature_columns(context, compact=config.compact)
         if not context_cols:
             raise ValueError(f"No context feature columns available for {feature_set}.")
         if config.include_market_context:
@@ -390,6 +653,7 @@ def build_sequence_feature_store(
     resolved_feature_columns = list(feature_columns) if feature_columns is not None else generated_feature_columns
     if not resolved_feature_columns:
         raise ValueError(f"No sequence feature columns available for {feature_set}.")
+    validate_model_feature_columns(resolved_feature_columns, feature_set=feature_set)
     ticker_arrays: dict[str, np.ndarray] = {}
     ticker_dates: dict[str, np.ndarray] = {}
     for ticker, group in frame.groupby("ticker", sort=False):
@@ -623,6 +887,12 @@ def build_v1_dataset(
     classification_horizon: int = DEFAULT_CLASSIFICATION_HORIZON,
     classification_threshold: float = DEFAULT_CLASSIFICATION_THRESHOLD,
 ) -> V1Dataset:
+    stock_features = add_context_relative_return_features(
+        stock_features,
+        context_features,
+        benchmark_ticker=benchmark_ticker,
+    )
+    context_features = add_priority_a_ohlcv_features(context_features)
     horizons = tuple(horizons)
     target_cols = [target_column(horizon) for horizon in horizons]
     classification_cols = [
@@ -642,7 +912,10 @@ def build_v1_dataset(
 
     stock_only_cols = select_stock_feature_columns(stock_features, include_relative=False)
     stock_relative_cols = select_stock_feature_columns(stock_features, include_relative=True)
+    stock_compact_cols = select_stock_feature_columns(stock_features, include_relative=False, compact=True)
+    stock_relative_compact_cols = select_stock_feature_columns(stock_features, include_relative=True, compact=True)
     context_cols = select_context_feature_columns(context_features)
+    compact_context_cols = select_context_feature_columns(context_features, compact=True)
 
     stock_only_summary = add_window_summaries(
         stock_features,
@@ -656,9 +929,27 @@ def build_v1_dataset(
         prefix="stock_",
         window_length=window_length,
     )
+    stock_compact_summary = add_window_summaries(
+        stock_features,
+        feature_cols=stock_compact_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_relative_compact_summary = add_window_summaries(
+        stock_features,
+        feature_cols=stock_relative_compact_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
     context_summary = add_window_summaries(
         context_features,
         feature_cols=context_cols,
+        prefix="context_",
+        window_length=window_length,
+    )
+    compact_context_summary = add_window_summaries(
+        context_features,
+        feature_cols=compact_context_cols,
         prefix="context_",
         window_length=window_length,
     )
@@ -678,15 +969,33 @@ def build_v1_dataset(
         right_on=["ticker", "date"],
         how="left",
     ).drop(columns=["date"], errors="ignore")
+    stock_compact = targets.merge(
+        stock_compact_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+    stock_relative_compact = targets.merge(
+        stock_relative_compact_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
 
-    def feature_frame(base: pd.DataFrame, *, include_market: bool, include_sector: bool) -> pd.DataFrame:
+    def feature_frame(
+        base: pd.DataFrame,
+        *,
+        context_summary_frame: pd.DataFrame,
+        include_market: bool,
+        include_sector: bool,
+    ) -> pd.DataFrame:
         frame = base.copy()
         if include_market:
-            market_context = context_summary.add_prefix("market_")
+            market_context = context_summary_frame.add_prefix("market_")
             market_context = market_context.rename(columns={"market_ticker": "ticker", "market_date": "date"})
             frame = _merge_context(frame, market_context, ticker=benchmark_ticker.upper(), ticker_column=None, prefix="market_context_")
         if include_sector:
-            sector_context = context_summary.add_prefix("sector_")
+            sector_context = context_summary_frame.add_prefix("sector_")
             sector_context = sector_context.rename(columns={"sector_ticker": "ticker", "sector_date": "date"})
             frame = _merge_context(frame, sector_context, ticker=None, ticker_column="sector_etf", prefix="sector_context_")
         return frame
@@ -694,8 +1003,32 @@ def build_v1_dataset(
     frames = {
         "stock_only": stock_only,
         "stock_relative": stock_relative,
-        "stock_relative_market": feature_frame(stock_relative, include_market=True, include_sector=False),
-        "stock_relative_market_sector": feature_frame(stock_relative, include_market=True, include_sector=True),
+        "stock_relative_market": feature_frame(
+            stock_relative,
+            context_summary_frame=context_summary,
+            include_market=True,
+            include_sector=False,
+        ),
+        "stock_relative_market_sector": feature_frame(
+            stock_relative,
+            context_summary_frame=context_summary,
+            include_market=True,
+            include_sector=True,
+        ),
+        "stock_compact": stock_compact,
+        "stock_relative_compact": stock_relative_compact,
+        "stock_relative_market_compact": feature_frame(
+            stock_relative_compact,
+            context_summary_frame=compact_context_summary,
+            include_market=True,
+            include_sector=False,
+        ),
+        "stock_relative_market_sector_compact": feature_frame(
+            stock_relative_compact,
+            context_summary_frame=compact_context_summary,
+            include_market=True,
+            include_sector=True,
+        ),
     }
 
     feature_sets: dict[str, pd.DataFrame] = {}
@@ -716,6 +1049,7 @@ def build_v1_dataset(
             for col in frame.columns
             if col not in non_features and pd.api.types.is_numeric_dtype(frame[col])
         ]
+        validate_model_feature_columns(numeric, feature_set=name)
         feature_sets[name] = frame[["ticker", "anchor_date", *numeric]].copy()
         feature_columns[name] = numeric
 
@@ -745,6 +1079,13 @@ def build_latest_v1_feature_sets(
         stocks = stocks[stocks["date"] <= cutoff]
         context = context[context["date"] <= cutoff]
 
+    stocks = add_context_relative_return_features(
+        stocks,
+        context,
+        benchmark_ticker=benchmark_ticker,
+    )
+    context = add_priority_a_ohlcv_features(context)
+
     stocks = _filtered_stock_universe(stocks, benchmark_ticker=benchmark_ticker)
     latest_idx = stocks.groupby("ticker")["date"].idxmax()
     latest = stocks.loc[latest_idx].copy()
@@ -755,24 +1096,45 @@ def build_latest_v1_feature_sets(
         ["ticker", "anchor_date", "gics_sector", "gics_sub_industry", "sector_etf", "window_row_count"]
     ].reset_index(drop=True)
 
-    stock_only_cols = select_stock_feature_columns(stock_features, include_relative=False)
-    stock_relative_cols = select_stock_feature_columns(stock_features, include_relative=True)
-    context_cols = select_context_feature_columns(context_features)
+    stock_only_cols = select_stock_feature_columns(stocks, include_relative=False)
+    stock_relative_cols = select_stock_feature_columns(stocks, include_relative=True)
+    stock_compact_cols = select_stock_feature_columns(stocks, include_relative=False, compact=True)
+    stock_relative_compact_cols = select_stock_feature_columns(stocks, include_relative=True, compact=True)
+    context_cols = select_context_feature_columns(context)
+    compact_context_cols = select_context_feature_columns(context, compact=True)
     stock_only_summary = add_window_summaries(
-        stock_features,
+        stocks,
         feature_cols=stock_only_cols,
         prefix="stock_",
         window_length=window_length,
     )
     stock_relative_summary = add_window_summaries(
-        stock_features,
+        stocks,
         feature_cols=stock_relative_cols,
         prefix="stock_",
         window_length=window_length,
     )
+    stock_compact_summary = add_window_summaries(
+        stocks,
+        feature_cols=stock_compact_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_relative_compact_summary = add_window_summaries(
+        stocks,
+        feature_cols=stock_relative_compact_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
     context_summary = add_window_summaries(
-        context_features,
+        context,
         feature_cols=context_cols,
+        prefix="context_",
+        window_length=window_length,
+    )
+    compact_context_summary = add_window_summaries(
+        context,
+        feature_cols=compact_context_cols,
         prefix="context_",
         window_length=window_length,
     )
@@ -790,15 +1152,33 @@ def build_latest_v1_feature_sets(
         right_on=["ticker", "date"],
         how="left",
     ).drop(columns=["date"], errors="ignore")
+    stock_compact = base.merge(
+        stock_compact_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+    stock_relative_compact = base.merge(
+        stock_relative_compact_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
 
-    def feature_frame(base_frame: pd.DataFrame, *, include_market: bool, include_sector: bool) -> pd.DataFrame:
+    def feature_frame(
+        base_frame: pd.DataFrame,
+        *,
+        context_summary_frame: pd.DataFrame,
+        include_market: bool,
+        include_sector: bool,
+    ) -> pd.DataFrame:
         frame = base_frame.copy()
         if include_market:
-            market_context = context_summary.add_prefix("market_")
+            market_context = context_summary_frame.add_prefix("market_")
             market_context = market_context.rename(columns={"market_ticker": "ticker", "market_date": "date"})
             frame = _merge_context(frame, market_context, ticker=benchmark_ticker.upper(), ticker_column=None, prefix="market_context_")
         if include_sector:
-            sector_context = context_summary.add_prefix("sector_")
+            sector_context = context_summary_frame.add_prefix("sector_")
             sector_context = sector_context.rename(columns={"sector_ticker": "ticker", "sector_date": "date"})
             frame = _merge_context(frame, sector_context, ticker=None, ticker_column="sector_etf", prefix="sector_context_")
         return frame
@@ -806,8 +1186,32 @@ def build_latest_v1_feature_sets(
     frames = {
         "stock_only": stock_only,
         "stock_relative": stock_relative,
-        "stock_relative_market": feature_frame(stock_relative, include_market=True, include_sector=False),
-        "stock_relative_market_sector": feature_frame(stock_relative, include_market=True, include_sector=True),
+        "stock_relative_market": feature_frame(
+            stock_relative,
+            context_summary_frame=context_summary,
+            include_market=True,
+            include_sector=False,
+        ),
+        "stock_relative_market_sector": feature_frame(
+            stock_relative,
+            context_summary_frame=context_summary,
+            include_market=True,
+            include_sector=True,
+        ),
+        "stock_compact": stock_compact,
+        "stock_relative_compact": stock_relative_compact,
+        "stock_relative_market_compact": feature_frame(
+            stock_relative_compact,
+            context_summary_frame=compact_context_summary,
+            include_market=True,
+            include_sector=False,
+        ),
+        "stock_relative_market_sector_compact": feature_frame(
+            stock_relative_compact,
+            context_summary_frame=compact_context_summary,
+            include_market=True,
+            include_sector=True,
+        ),
     }
     non_features = {"ticker", "anchor_date", "gics_sector", "gics_sub_industry", "sector_etf", "window_row_count"}
     feature_sets: dict[str, pd.DataFrame] = {}
@@ -818,6 +1222,7 @@ def build_latest_v1_feature_sets(
             for col in frame.columns
             if col not in non_features and pd.api.types.is_numeric_dtype(frame[col])
         ]
+        validate_model_feature_columns(numeric, feature_set=name)
         feature_sets[name] = frame[["ticker", "anchor_date", *numeric]].copy()
         feature_columns[name] = numeric
     return metadata, feature_sets, feature_columns

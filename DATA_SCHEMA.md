@@ -163,6 +163,13 @@ Suggested columns:
 - `is_val`
 - `is_test`
 
+V1 supervised targets:
+- Regression targets are continuous market-adjusted future returns, named `market_adjusted_return_{horizon}d`.
+- Default regression horizons are `1`, `5`, `10`, and `20` trading days.
+- The current event-classification target is `market_outperform_any_20d_gt_5pct`.
+- `market_outperform_any_20d_gt_5pct` is positive when the pathwise stock excess return over `SPY` exceeds `5%` at any point in the next 20 trading days.
+- Targets are labels only and must not be included in model input feature columns.
+
 ### Prediction window index table
 One row per latest target-pending `(ticker, anchor_date)` used for production-style inference.
 
@@ -198,6 +205,92 @@ Suggested columns:
 - sector / industry metadata used for same-date relative transforms
 - flags for missingness and source availability
 
+V1 sequence-model layout:
+- A sequence sample is keyed by `(ticker, anchor_date)`.
+- It contains the prior `window_length` rows from this daily sequence table, ending on `anchor_date`.
+- Default `window_length` is 60 trading days.
+- Tensor shape is `[batch_size, window_length, features_per_day]`.
+- Each day is one token. The model sees daily values directly rather than precomputed window summaries.
+
+Implemented sequence feature-set components:
+- stock daily features are always included
+- Priority A daily features add OHLCV-derived shape/liquidity fields and same-date context-relative return fields: `close_location`, `true_range_pct`, `dollar_volume_ratio_5d`, `volume_zscore_20d`, `stock_vs_market_return_1d`, `stock_vs_sector_return_1d`, `stock_vs_market_return_5d`, and `stock_vs_sector_return_5d`
+- relative stock features can add same-date full-panel and same-sector fields such as `return_1d__cs_z`, `log1p_volume__cs_pct`, and `rolling_vol_20d__sector_cs_z`
+- market context can add `SPY` fields prefixed with `market_context_`
+- sector context can add mapped sector ETF fields prefixed with `sector_context_`
+- missing context is represented with `market_context_missing` and `sector_context_missing`
+
+Supported sequence feature-set names:
+- `stock_only_sequence`
+- `stock_relative_sequence`
+- `stock_market_sequence`
+- `stock_sector_sequence`
+- `stock_market_sector_sequence`
+- `stock_relative_market_sequence`
+- `stock_relative_sector_sequence`
+- `stock_relative_market_sector_sequence`
+- `stock_compact_sequence`
+- `stock_relative_compact_sequence`
+- `stock_market_compact_sequence`
+- `stock_sector_compact_sequence`
+- `stock_market_sector_compact_sequence`
+- `stock_relative_market_compact_sequence`
+- `stock_relative_sector_compact_sequence`
+- `stock_relative_market_sector_compact_sequence`
+
+The same component combinations are also accepted without the `_sequence` suffix when used by sequence-capable models.
+
+Compact sequence names use the same component joins as their full counterparts, but select a smaller daily feature profile to reduce redundant and highly correlated inputs.
+
+### Flattened episode feature table
+One row per `(ticker, anchor_date)` for tabular baselines.
+
+Implemented tabular feature sets:
+- `stock_only`
+- `stock_relative`
+- `stock_relative_market`
+- `stock_relative_market_sector`
+- `stock_compact`
+- `stock_relative_compact`
+- `stock_relative_market_compact`
+- `stock_relative_market_sector_compact`
+
+Approximate feature counts when all expected columns are present:
+- `stock_only`: about 90
+- `stock_relative`: about 279
+- `stock_relative_market`: about 340
+- `stock_relative_market_sector`: about 401
+- `stock_compact`: about 66
+- `stock_relative_compact`: about 111
+- `stock_relative_market_compact`: about 151
+- `stock_relative_market_sector_compact`: about 191
+
+Compact profile policy:
+- prefer `log_return_1d` over both `return_1d` and `log_return_1d`
+- use `rolling_return_*` and drop current exact `momentum_*` aliases
+- prefer `log1p_dollar_volume` over carrying every overlapping volume and dollar-volume level
+- keep Priority A daily shape/liquidity/regime fields because they are low-cost and available from the current Massive OHLCV/context tables
+- keep z-score relative features and drop percentile-rank counterparts for the first compact ablation
+- keep a smaller context set focused on returns, volatility, trend, and liquidity ratio
+
+Rules:
+- use only daily rows with `date <= anchor_date`
+- summarize the prior `window_length` trading days ending on `anchor_date`
+- summarize each selected daily feature as `__last`, `__mean60`, and `__std60`
+- do not include target columns or future-derived values
+- do not include raw level fields such as `open`, `high`, `low`, `close`, `volume`, `dollar_volume`, `vwap`, raw moving averages, or raw previous close in model inputs
+- use transformed alternatives such as returns, ratios, z-scores, percentile ranks, and `log1p_*` liquidity fields
+
+Example columns:
+- `stock_return_1d__last`
+- `stock_return_1d__mean60`
+- `stock_return_1d__std60`
+- `stock_log1p_volume__cs_z__last`
+- `market_context_rolling_vol_20d__mean60`
+- `sector_context_momentum_60d__std60`
+
+This table is intentionally different from the sequence-model input. Tabular baselines receive compressed rolling summaries; sequence models receive the raw daily token sequence.
+
 ### Market context table
 One row per `(context_ticker, date)` for benchmark and sector ETF context.
 
@@ -210,6 +303,7 @@ Rules:
 - keep this table separate from the stock cross-sectional normalization universe
 - join SPY features by anchor date
 - join sector ETF features by anchor date and the stock's GICS sector ETF mapping
+- sequence models join context by daily token date; tabular models join context after rolling-window summarization
 - do not forward-fill missing context unless a later implementation explicitly audits that policy
 
 ### As-of fundamentals table

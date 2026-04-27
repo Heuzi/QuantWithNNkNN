@@ -25,6 +25,7 @@ from src.data.v1_dataset import (
     chronological_split,
     encode_static_categories,
     prepare_xy,
+    raw_level_model_input_columns,
     rows_for_dates,
 )
 from src.models.v1_baselines import (
@@ -107,9 +108,18 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         self.assertIn("market_adjusted_return_20d", dataset.target_columns)
         self.assertIn(classification_target_column(), dataset.classification_target_columns)
         self.assertIn("stock_relative_market_sector", dataset.feature_sets)
+        self.assertIn("stock_relative_market_sector_compact", dataset.feature_sets)
         sector_cols = dataset.feature_columns["stock_relative_market_sector"]
+        compact_sector_cols = dataset.feature_columns["stock_relative_market_sector_compact"]
         self.assertTrue(any(col.startswith("market_context_") for col in sector_cols))
         self.assertTrue(any(col.startswith("sector_context_") for col in sector_cols))
+        self.assertTrue(any("stock_vs_market_return_1d" in col for col in sector_cols))
+        self.assertTrue(any("stock_vs_sector_return_5d" in col for col in sector_cols))
+        self.assertTrue(any("close_location" in col for col in sector_cols))
+        self.assertTrue(any("true_range_pct" in col for col in sector_cols))
+        self.assertTrue(any(col.startswith("market_context_") for col in compact_sector_cols))
+        self.assertTrue(any(col.startswith("sector_context_") for col in compact_sector_cols))
+        self.assertLess(len(compact_sector_cols), len(sector_cols))
         self.assertGreater(len(dataset.targets), 0)
         self.assertIn("window_row_count", dataset.metadata.columns)
 
@@ -221,6 +231,8 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         )
         self.assertTrue(any(col.startswith("market_context_") for col in store.feature_columns))
         self.assertTrue(any(col.startswith("sector_context_") for col in store.feature_columns))
+        self.assertIn("stock_vs_market_return_1d", store.feature_columns)
+        self.assertIn("stock_vs_sector_return_5d", store.feature_columns)
         self.assertIn("market_context_missing", store.feature_columns)
         self.assertIn("sector_context_missing", store.feature_columns)
         self.assertEqual(store.get_window(train_meta.iloc[0]["ticker"], 9, 10).shape[1], len(store.feature_columns))
@@ -277,8 +289,13 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         )
 
         self.assertIn("stock_relative_market_sector", feature_sets)
+        self.assertIn("stock_relative_market_sector_compact", feature_sets)
         self.assertEqual(len(metadata["ticker"].unique()), 12)
         self.assertTrue(feature_columns["stock_relative_market_sector"])
+        self.assertLess(
+            len(feature_columns["stock_relative_market_sector_compact"]),
+            len(feature_columns["stock_relative_market_sector"]),
+        )
 
     def test_sequence_feature_store_can_include_market_and_sector_context(self) -> None:
         stock_features, context_features = _stock_and_context_frames(days=75)
@@ -297,6 +314,37 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         self.assertIn("market_context_missing", store.feature_columns)
         self.assertIn("sector_context_missing", store.feature_columns)
         self.assertEqual(store.get_window("T00", 9, 10).shape, (10, len(store.feature_columns)))
+
+        compact_store = build_sequence_feature_store(
+            stock_features,
+            "stock_relative_market_sector_compact_sequence",
+            context_features=context_features,
+            benchmark_ticker="SPY",
+        )
+        self.assertTrue(any(col.startswith("market_context_") for col in compact_store.feature_columns))
+        self.assertTrue(any(col.startswith("sector_context_") for col in compact_store.feature_columns))
+        self.assertLess(len(compact_store.feature_columns), len(store.feature_columns))
+
+    def test_model_feature_columns_reject_raw_level_inputs(self) -> None:
+        stock_features, context_features = _stock_and_context_frames(days=75)
+
+        with self.assertRaises(ValueError):
+            build_sequence_feature_store(
+                stock_features,
+                "stock_only_sequence",
+                benchmark_ticker="SPY",
+                feature_columns=["open", "log_return_1d"],
+            )
+
+        dataset = build_v1_dataset(
+            stock_features,
+            context_features,
+            horizons=(1, 5),
+            window_length=10,
+            benchmark_ticker="SPY",
+        )
+        for feature_set, columns in dataset.feature_columns.items():
+            self.assertEqual(raw_level_model_input_columns(columns), [], feature_set)
 
     def test_end_to_end_walk_forward_and_prediction_smoke(self) -> None:
         stock_features, context_features = _stock_and_context_frames(days=55)

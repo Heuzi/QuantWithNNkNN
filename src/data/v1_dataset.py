@@ -109,7 +109,20 @@ FEATURE_SET_NAMES = (
     "stock_relative_market",
     "stock_relative_market_sector",
 )
-SEQUENCE_FEATURE_SET_NAMES = ("stock_only", "stock_relative")
+SEQUENCE_BASE_FEATURE_SET_NAMES = (
+    "stock_only",
+    "stock_relative",
+    "stock_market",
+    "stock_sector",
+    "stock_market_sector",
+    "stock_relative_market",
+    "stock_relative_sector",
+    "stock_relative_market_sector",
+)
+SEQUENCE_FEATURE_SET_NAMES = (
+    *SEQUENCE_BASE_FEATURE_SET_NAMES,
+    *(f"{name}_sequence" for name in SEQUENCE_BASE_FEATURE_SET_NAMES),
+)
 STATIC_CATEGORICAL_COLUMNS = ("gics_sector", "gics_sub_industry")
 
 
@@ -187,6 +200,33 @@ class SequenceFeatureStore:
         return np.concatenate(pieces, axis=0)
 
 
+@dataclass(frozen=True)
+class SequenceFeatureConfig:
+    include_relative: bool
+    include_market_context: bool
+    include_sector_context: bool
+
+    def to_dict(self) -> dict[str, bool]:
+        return {
+            "stock_features": True,
+            "relative_stock_features": self.include_relative,
+            "market_context_features": self.include_market_context,
+            "sector_context_features": self.include_sector_context,
+        }
+
+
+def sequence_feature_config(feature_set: str) -> SequenceFeatureConfig:
+    if feature_set not in SEQUENCE_FEATURE_SET_NAMES:
+        raise ValueError(f"Sequence inputs are only supported for {SEQUENCE_FEATURE_SET_NAMES}, got {feature_set}.")
+    canonical = feature_set.removesuffix("_sequence")
+    parts = set(canonical.split("_"))
+    return SequenceFeatureConfig(
+        include_relative="relative" in parts,
+        include_market_context="market" in parts,
+        include_sector_context="sector" in parts,
+    )
+
+
 def parse_horizons(value: str | Sequence[int] | None) -> tuple[int, ...]:
     if value is None:
         return DEFAULT_HORIZONS
@@ -262,10 +302,24 @@ def select_context_feature_columns(df: pd.DataFrame) -> list[str]:
     return _available_numeric_columns(df, CONTEXT_FEATURES)
 
 
-def select_sequence_feature_columns(stock_features: pd.DataFrame, feature_set: str) -> list[str]:
-    if feature_set not in SEQUENCE_FEATURE_SET_NAMES:
-        raise ValueError(f"Sequence inputs are only supported for {SEQUENCE_FEATURE_SET_NAMES}, got {feature_set}.")
-    return select_stock_feature_columns(stock_features, include_relative=feature_set != "stock_only")
+def select_sequence_feature_columns(
+    stock_features: pd.DataFrame,
+    feature_set: str,
+    context_features: pd.DataFrame | None = None,
+) -> list[str]:
+    config = sequence_feature_config(feature_set)
+    cols = select_stock_feature_columns(stock_features, include_relative=config.include_relative)
+    if config.include_market_context or config.include_sector_context:
+        if context_features is None:
+            raise ValueError(f"{feature_set} sequence inputs require context_features.")
+        context_cols = select_context_feature_columns(context_features)
+        if config.include_market_context:
+            cols.extend(f"market_context_{col}" for col in context_cols)
+            cols.append("market_context_missing")
+        if config.include_sector_context:
+            cols.extend(f"sector_context_{col}" for col in context_cols)
+            cols.append("sector_context_missing")
+    return list(dict.fromkeys(cols))
 
 
 def _filtered_stock_universe(
@@ -286,17 +340,60 @@ def build_sequence_feature_store(
     stock_features: pd.DataFrame,
     feature_set: str,
     *,
+    context_features: pd.DataFrame | None = None,
     benchmark_ticker: str = DEFAULT_BENCHMARK_TICKER,
     feature_columns: Sequence[str] | None = None,
 ) -> SequenceFeatureStore:
+    config = sequence_feature_config(feature_set)
     stocks = _filtered_stock_universe(stock_features, benchmark_ticker=benchmark_ticker)
-    resolved_feature_columns = list(feature_columns) if feature_columns is not None else select_sequence_feature_columns(stocks, feature_set)
+    stock_cols = select_stock_feature_columns(stocks, include_relative=config.include_relative)
+    frame = stocks[["ticker", "date", "gics_sector", *stock_cols]].copy()
+    frame["sector_etf"] = frame["gics_sector"].map(SECTOR_ETF_BY_GICS)
+    generated_feature_columns = list(stock_cols)
+
+    if config.include_market_context or config.include_sector_context:
+        if context_features is None:
+            raise ValueError(f"{feature_set} sequence inputs require context_features.")
+        context = context_features.copy()
+        context["ticker"] = context["ticker"].astype(str).str.upper()
+        context["date"] = context["date"].astype(str)
+        context_cols = select_context_feature_columns(context)
+        if not context_cols:
+            raise ValueError(f"No context feature columns available for {feature_set}.")
+        if config.include_market_context:
+            market = context[context["ticker"] == benchmark_ticker.upper()][["date", *context_cols]].copy()
+            market = market.rename(columns={col: f"market_context_{col}" for col in context_cols})
+            frame = frame.merge(market, on="date", how="left")
+            market_cols = [f"market_context_{col}" for col in context_cols]
+            frame["market_context_missing"] = frame[market_cols].isna().all(axis=1).astype(float)
+            generated_feature_columns.extend([*market_cols, "market_context_missing"])
+        if config.include_sector_context:
+            sector = context[context["ticker"].isin(set(SECTOR_ETF_BY_GICS.values()))][
+                ["ticker", "date", *context_cols]
+            ].copy()
+            sector = sector.rename(
+                columns={
+                    "ticker": "_sector_context_ticker",
+                    **{col: f"sector_context_{col}" for col in context_cols},
+                }
+            )
+            frame = frame.merge(
+                sector,
+                left_on=["date", "sector_etf"],
+                right_on=["date", "_sector_context_ticker"],
+                how="left",
+            ).drop(columns=["_sector_context_ticker"], errors="ignore")
+            sector_cols = [f"sector_context_{col}" for col in context_cols]
+            frame["sector_context_missing"] = frame[sector_cols].isna().all(axis=1).astype(float)
+            generated_feature_columns.extend([*sector_cols, "sector_context_missing"])
+
+    resolved_feature_columns = list(feature_columns) if feature_columns is not None else generated_feature_columns
     if not resolved_feature_columns:
         raise ValueError(f"No sequence feature columns available for {feature_set}.")
     ticker_arrays: dict[str, np.ndarray] = {}
     ticker_dates: dict[str, np.ndarray] = {}
-    for ticker, group in stocks.groupby("ticker", sort=False):
-        group_values = group.reindex(columns=resolved_feature_columns, fill_value=0.0)
+    for ticker, group in frame.groupby("ticker", sort=False):
+        group_values = group.reindex(columns=resolved_feature_columns, fill_value=0.0).fillna(0.0)
         ticker_arrays[str(ticker).upper()] = group_values.astype(float).to_numpy(dtype=np.float32)
         ticker_dates[str(ticker).upper()] = group["date"].astype(str).to_numpy(dtype=object)
     return SequenceFeatureStore(
@@ -611,6 +708,7 @@ def build_v1_dataset(
         "sector_etf",
         "window_row_count",
         *target_cols,
+        *classification_cols,
     }
     for name, frame in frames.items():
         numeric = [

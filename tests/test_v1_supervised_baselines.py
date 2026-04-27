@@ -213,7 +213,17 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         y_train = dataset.targets.loc[train_rows, dataset.target_columns].reset_index(drop=True)
         y_val = dataset.targets.loc[val_rows, dataset.target_columns].reset_index(drop=True)
         vocabularies = build_category_vocabularies(train_meta, columns=STATIC_CATEGORICAL_COLUMNS)
-        store = build_sequence_feature_store(stock_features, "stock_relative", benchmark_ticker="SPY")
+        store = build_sequence_feature_store(
+            stock_features,
+            "stock_relative_market_sector_sequence",
+            context_features=context_features,
+            benchmark_ticker="SPY",
+        )
+        self.assertTrue(any(col.startswith("market_context_") for col in store.feature_columns))
+        self.assertTrue(any(col.startswith("sector_context_") for col in store.feature_columns))
+        self.assertIn("market_context_missing", store.feature_columns)
+        self.assertIn("sector_context_missing", store.feature_columns)
+        self.assertEqual(store.get_window(train_meta.iloc[0]["ticker"], 9, 10).shape[1], len(store.feature_columns))
         x_train = {
             "store": store,
             "metadata": train_meta,
@@ -269,6 +279,24 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         self.assertIn("stock_relative_market_sector", feature_sets)
         self.assertEqual(len(metadata["ticker"].unique()), 12)
         self.assertTrue(feature_columns["stock_relative_market_sector"])
+
+    def test_sequence_feature_store_can_include_market_and_sector_context(self) -> None:
+        stock_features, context_features = _stock_and_context_frames(days=75)
+
+        store = build_sequence_feature_store(
+            stock_features,
+            "stock_relative_market_sector_sequence",
+            context_features=context_features,
+            benchmark_ticker="SPY",
+        )
+
+        self.assertTrue(any(col.endswith("__cs_z") for col in store.feature_columns))
+        self.assertTrue(any(col.endswith("__sector_cs_z") for col in store.feature_columns))
+        self.assertTrue(any(col.startswith("market_context_") for col in store.feature_columns))
+        self.assertTrue(any(col.startswith("sector_context_") for col in store.feature_columns))
+        self.assertIn("market_context_missing", store.feature_columns)
+        self.assertIn("sector_context_missing", store.feature_columns)
+        self.assertEqual(store.get_window("T00", 9, 10).shape, (10, len(store.feature_columns)))
 
     def test_end_to_end_walk_forward_and_prediction_smoke(self) -> None:
         stock_features, context_features = _stock_and_context_frames(days=55)

@@ -174,6 +174,7 @@ def main() -> None:
                 sequence_stores[cache_key] = build_sequence_feature_store(
                     stock_features,
                     feature_set,
+                    context_features=context_features,
                     benchmark_ticker=benchmark_ticker,
                     feature_columns=sequence_feature_columns,
                 )

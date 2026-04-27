@@ -4,7 +4,7 @@
     "sector_universe_count": "Conservative row-level minimum of the non-null same-date same-sector group sizes across applicable sector-relative transformed features."
   },
   "date_range": {
-    "max_date": "2026-04-21",
+    "max_date": "2026-04-24",
     "min_date": "2024-04-22"
   },
   "formulas": {
@@ -55,7 +55,7 @@
     "full_panel": 2,
     "sector": 5
   },
-  "row_count": 249497,
+  "row_count": 251014,
   "same_date_only": true,
   "same_sector_only": true,
   "sector_features": [
@@ -73,6 +73,6 @@
   ],
   "sector_source_file": "C:\\Users\\yexia\\Documents\\GitHub\\QuantWithNNkNN\\data\\massive_sp500_current_constituents_history\\raw\\sp500_constituents_current.csv",
   "timing_assumption": "End-of-day only. Same-date close/volume/VWAP-based normalization is allowed because values are assumed known by the date close.",
-  "universe_count": 503,
+  "universe_count": 504,
   "universe_definition": "Current S&P 500 panel present in the processed daily feature input on each date."
 }

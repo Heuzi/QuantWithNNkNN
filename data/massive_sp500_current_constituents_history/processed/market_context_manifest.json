@@ -1,18 +1,18 @@
 {
-  "end_date": "2026-04-23",
-  "feature_rows": 6012,
+  "end_date": "2026-04-25",
+  "feature_rows": 6000,
   "files": {
-    "features": "D:\\QuantWithNNkNN\\data\\massive_sp500_current_constituents_history\\processed\\market_context_features.csv",
-    "raw_bars": "D:\\QuantWithNNkNN\\data\\massive_sp500_current_constituents_history\\raw\\market_context_bars.csv"
+    "features": "C:\\Users\\yexia\\Documents\\GitHub\\QuantWithNNkNN\\data\\massive_sp500_current_constituents_history\\processed\\market_context_features.csv",
+    "raw_bars": "C:\\Users\\yexia\\Documents\\GitHub\\QuantWithNNkNN\\data\\massive_sp500_current_constituents_history\\raw\\market_context_bars.csv"
   },
   "flatfile_dataset": null,
   "flatfile_status": [],
-  "generated_utc": "2026-04-24T18:32:39Z",
+  "generated_utc": "2026-04-26T19:57:43Z",
   "rate_limit": {
     "calls": 5,
     "period_seconds": 60.0
   },
-  "raw_rows": 6012,
+  "raw_rows": 6000,
   "sector_etf_by_gics": {
     "Communication Services": "XLC",
     "Consumer Discretionary": "XLY",
@@ -27,7 +27,7 @@
     "Utilities": "XLU"
   },
   "source": "Massive ticker range daily aggregates",
-  "start_date": "2024-04-24",
+  "start_date": "2024-04-22",
   "tickers": [
     "SPY",
     "XLB",

@@ -15,9 +15,9 @@ Use this dataset for:
 
 - Constituent source: current S&P 500 list at collection time
 - Constituent count: `503` symbols
-- Requested date range: `1995-01-01` to `2026-04-21`
-- Actual returned stock coverage from Massive free-plan data: approximately `2024-04-22` to `2026-04-21`
-- Market-context coverage: approximately `2024-04-24` to `2026-04-23`
+- Requested date range: `1995-01-01` to `2026-04-25`
+- Actual returned stock coverage from Massive free-plan data: approximately `2024-04-22` to `2026-04-24`
+- Market-context coverage: approximately `2024-04-26` to `2026-04-24`
 - Frequency: daily
 
 ## Files
@@ -38,8 +38,9 @@ Use this dataset for:
 
 ## Current Scale
 
-- Symbols collected: `503`
-- Daily stock bar rows: about `249,497`
+- Stock-panel tickers present: `504`
+- Daily stock bar rows: `251,014`
+- Daily market-context rows: `6,000`
 - Failures remaining: `0`
 
 ## Important Caveats
@@ -47,17 +48,21 @@ Use this dataset for:
 - This is not a historical S&P 500 membership panel.
 - Using today's constituent list for older periods introduces survivorship bias.
 - Despite requesting data back to `1995-01-01`, the free-plan response only returned about two years of stock history.
-- The stock table and the market-context table do not end on the same date. Latest stock anchors currently top out at `2026-04-21`, while the context table extends to `2026-04-23`.
+- The incremental stock updater appends the benchmark ticker `SPY` so it can rebuild market-adjusted episode targets and latest prediction windows. That is why the stock raw/processed panel now contains `504` tickers even though the constituent file still contains `503` names.
+- The stock table and the market-context table now both end on `2026-04-24`, but their earliest available dates still differ because Massive returned later context coverage than stock coverage on the left edge.
 - This folder does not yet include filing-dated fundamentals or a historically correct constituent-membership panel.
 
 ## Suggested Agent Usage
 
 - Prefer this folder when you need broad large-cap daily market data rather than a tiny smoke-test sample.
 - Before training, build or refresh the processed feature tables from `raw/daily_market_bars.csv`.
-- Before V1 supervised training, collect market context with `py -3.11 scripts/collect_massive_market_context.py --dataset-root data\massive_sp500_current_constituents_history --rate-limit-calls 5 --rate-limit-period-seconds 60`.
+- Before V1 supervised training, refresh market context with `py -3.11 scripts/collect_massive_market_context.py --dataset-root data\massive_sp500_current_constituents_history --source rest`.
 - Train V1 supervised baselines with `py -3.11 scripts/train_v1_supervised_baselines.py --dataset-root data\massive_sp500_current_constituents_history`.
   The trainer now defaults to walk-forward evaluation, supports `--task-type regression|classification|both`, and will use GPU-accelerated `torch`, `xgboost`, and `lightgbm` paths when available.
 - Score latest windows with all saved models using `py -3.11 scripts/predict_v1_supervised_baselines.py --run-dir artifacts\v1_baselines\<run_name> --dataset-root data\massive_sp500_current_constituents_history`.
-- To refresh the dataset with recent Massive bars and rebuild training/inference artifacts, run `python scripts/update_massive_daily_dataset.py --dataset-root data\massive_sp500_current_constituents_history`.
+- To refresh the stock-side dataset with recent Massive bars and rebuild the stock processed artifacts, run `py -3.11 scripts/update_massive_daily_dataset.py --dataset-root data\massive_sp500_current_constituents_history`.
+- Immediately after the stock refresh, rerun `py -3.11 scripts/collect_massive_market_context.py --dataset-root data\massive_sp500_current_constituents_history --source rest` so `raw/market_context_bars.csv`, `processed/market_context_features.csv`, and `processed/market_context_manifest.json` stay aligned with the latest stock date.
+- The stock refresh command rebuilds `raw/daily_market_bars.csv`, `processed/daily_features.csv`, `processed/daily_features_normalized.csv`, `processed/episode_index.csv`, `processed/prediction_windows.csv`, and `processed/incremental_update_manifest.json`.
+- If you only need to regenerate stock processed artifacts from existing raw bars, run `py -3.11 scripts/update_massive_daily_dataset.py --dataset-root data\massive_sp500_current_constituents_history --skip-fetch`.
 - The incremental updater is now premium-history ready on cold starts: if no local raw bars exist, it defaults to `--start-date 1995-01-01`. Free-plan accounts may still receive a much shorter vendor-limited range.
 - Do not present results from this folder as historically unbiased S&P 500 backtests unless historical membership is added later.

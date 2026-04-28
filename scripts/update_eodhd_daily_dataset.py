@@ -232,13 +232,22 @@ def _limit_universe_for_pilot(universe: list[dict[str, object]], max_tickers: in
             selected_tickers.add(ticker)
         if len(selected) >= max_tickers:
             return selected
-    for row in universe:
-        ticker = str(row.get("ticker") or row.get("symbol") or "").upper()
-        if ticker in selected_tickers:
-            continue
-        selected.append(row)
-        if len(selected) >= max_tickers:
-            break
+
+    def add_rows(rows: list[dict[str, object]]) -> None:
+        for row in rows:
+            ticker = str(row.get("ticker") or row.get("symbol") or "").upper()
+            if ticker in selected_tickers:
+                continue
+            selected.append(row)
+            selected_tickers.add(ticker)
+            if len(selected) >= max_tickers:
+                return
+
+    current_rows = [row for row in universe if row.get("is_delisted") is not True]
+    delisted_rows = [row for row in universe if row.get("is_delisted") is True]
+    add_rows(current_rows)
+    if len(selected) < max_tickers:
+        add_rows(delisted_rows)
     return selected
 
 

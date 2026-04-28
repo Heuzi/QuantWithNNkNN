@@ -2135,7 +2135,14 @@ def available_model_names() -> list[str]:
     )
 
 
-def make_model(model_name: str, *, window_length: int = 60, task_type: str = "regression") -> Predictor:
+def make_model(
+    model_name: str,
+    *,
+    window_length: int = 60,
+    task_type: str = "regression",
+    model_kwargs: dict[str, object] | None = None,
+) -> Predictor:
+    kwargs = dict(model_kwargs or {})
     if task_type == "classification":
         if model_name == "logistic_regression":
             return LogisticClassifier()
@@ -2148,9 +2155,9 @@ def make_model(model_name: str, *, window_length: int = 60, task_type: str = "re
         if model_name == "sklearn_mlp_classifier":
             return SklearnMLPClassifier()
         if model_name == "torch_mlp_classifier":
-            return TorchMLPClassifier()
+            return TorchMLPClassifier(**kwargs)
         if model_name == SEQUENCE_STATIC_CLASSIFICATION_MODEL_NAME:
-            return TorchSequenceStaticClassifier(window_length=window_length)
+            return TorchSequenceStaticClassifier(window_length=window_length, **kwargs)
         raise ValueError(f"Unknown classification model: {model_name}")
     if model_name == "zero":
         return ZeroPredictor()
@@ -2177,9 +2184,9 @@ def make_model(model_name: str, *, window_length: int = 60, task_type: str = "re
     if model_name == "sklearn_mlp":
         return SklearnMLPPredictor()
     if model_name == "torch_mlp":
-        return TorchMLPRegressor()
+        return TorchMLPRegressor(**kwargs)
     if model_name == SEQUENCE_STATIC_MODEL_NAME:
-        return TorchSequenceStaticRegressor(window_length=window_length)
+        return TorchSequenceStaticRegressor(window_length=window_length, **kwargs)
     raise ValueError(f"Unknown model: {model_name}")
 
 

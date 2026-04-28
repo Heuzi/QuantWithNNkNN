@@ -81,6 +81,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--walk-forward-val-block-size", type=int, default=21)
     parser.add_argument("--walk-forward-oos-block-size", type=int, default=21)
     parser.add_argument(
+        "--walk-forward-max-folds",
+        type=int,
+        default=0,
+        help="Optional cap on walk-forward folds. Keeps the most recent folds.",
+    )
+    parser.add_argument(
         "--walk-forward-purge-gap",
         type=int,
         default=0,
@@ -101,6 +107,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--classification-horizon", type=int, default=DEFAULT_CLASSIFICATION_HORIZON)
     parser.add_argument("--classification-threshold", type=float, default=DEFAULT_CLASSIFICATION_THRESHOLD)
+    parser.add_argument("--torch-max-epochs", type=int, default=0, help="Override max epochs for torch models.")
+    parser.add_argument("--torch-patience", type=int, default=0, help="Override early-stop patience for torch models.")
+    parser.add_argument("--torch-batch-size", type=int, default=0, help="Override batch size for torch models.")
+    parser.add_argument("--torch-hidden-units", type=int, default=0, help="Override hidden units for torch MLP models.")
+    parser.add_argument("--torch-hidden-dim", type=int, default=0, help="Override hidden dimension for sequence/static torch models.")
     return parser.parse_args()
 
 
@@ -132,6 +143,24 @@ def _build_combo_iterable(feature_sets: list[str], model_names: list[str]) -> li
     if not combos:
         raise SystemExit("No valid (feature_set, model_name) combinations to train.")
     return combos
+
+
+def _torch_model_kwargs(args: argparse.Namespace, model_name: str) -> dict[str, object]:
+    kwargs: dict[str, object] = {}
+    if not model_name.startswith("torch_"):
+        return kwargs
+    if args.torch_max_epochs and args.torch_max_epochs > 0:
+        kwargs["max_epochs"] = args.torch_max_epochs
+    if args.torch_patience and args.torch_patience > 0:
+        kwargs["patience"] = args.torch_patience
+    if args.torch_batch_size and args.torch_batch_size > 0:
+        kwargs["batch_size"] = args.torch_batch_size
+    if is_sequence_static_model(model_name):
+        if args.torch_hidden_dim and args.torch_hidden_dim > 0:
+            kwargs["hidden_dim"] = args.torch_hidden_dim
+    elif args.torch_hidden_units and args.torch_hidden_units > 0:
+        kwargs["hidden_units"] = args.torch_hidden_units
+    return kwargs
 
 
 def _task_target_columns(dataset: V1Dataset, task_type: str) -> list[str]:
@@ -305,6 +334,7 @@ def _fit_final_deploy_model(
     final_stop_block_size: int,
     sequence_store=None,
     window_length: int,
+    model_kwargs: dict[str, object] | None = None,
 ) -> tuple[object, dict[str, dict[str, int]] | None]:
     final_val_dates = all_dates[-min(final_stop_block_size, max(1, len(all_dates) - 1)) :]
     final_train_dates = all_dates[: len(all_dates) - len(final_val_dates)]
@@ -321,7 +351,12 @@ def _fit_final_deploy_model(
     y_train = dataset.targets.loc[train_rows, target_columns].reset_index(drop=True)
     y_val = dataset.targets.loc[val_rows, target_columns].reset_index(drop=True)
     y_full = dataset.targets.loc[full_rows, target_columns].reset_index(drop=True)
-    final_model = make_model(model_name, window_length=window_length, task_type=task_type)
+    final_model = make_model(
+        model_name,
+        window_length=window_length,
+        task_type=task_type,
+        model_kwargs=model_kwargs,
+    )
     final_vocabularies: dict[str, dict[str, int]] | None = None
     if is_sequence_static_model(model_name):
         final_vocabularies = build_category_vocabularies(full_meta, columns=STATIC_CATEGORICAL_COLUMNS)
@@ -336,7 +371,12 @@ def _fit_final_deploy_model(
     if hasattr(final_model, "refit_full"):
         final_model.refit_full(x_full, y_full)
     else:
-        final_model = make_model(model_name, window_length=window_length, task_type=task_type)
+        final_model = make_model(
+            model_name,
+            window_length=window_length,
+            task_type=task_type,
+            model_kwargs=model_kwargs,
+        )
         final_model.fit(x_full, y_full)
     return final_model, final_vocabularies
 
@@ -502,7 +542,13 @@ def _train_task_holdout(
             _, x_train, _ = _prepare_flat_inputs(dataset, feature_set, train_rows, task_type=task_type)
             _, x_val, _ = _prepare_flat_inputs(dataset, feature_set, val_rows, task_type=task_type)
             _, x_test, _ = _prepare_flat_inputs(dataset, feature_set, test_rows, task_type=task_type)
-        model = make_model(model_name, window_length=args.window_length, task_type=task_type)
+        model_kwargs = _torch_model_kwargs(args, model_name)
+        model = make_model(
+            model_name,
+            window_length=args.window_length,
+            task_type=task_type,
+            model_kwargs=model_kwargs,
+        )
         model.fit(x_train, y_train, val_x=x_val, val_y=y_val)
         for split_name, meta, x_eval, y_eval, rows in (
             ("train", train_meta, x_train, y_train, train_rows),
@@ -628,6 +674,8 @@ def _train_task_walk_forward(
     )
     if not folds:
         raise SystemExit("No walk-forward folds available. Reduce min-train/val/oos settings or add more history.")
+    if args.walk_forward_max_folds and args.walk_forward_max_folds > 0:
+        folds = folds[-args.walk_forward_max_folds :]
     dataset.metadata.to_csv(output_dir / "episode_metadata.csv", index=False)
     write_json(output_dir / "folds.json", {"folds": [_fold_summary(fold, dataset.metadata) for fold in folds]})
     sequence_stores = {
@@ -671,7 +719,13 @@ def _train_task_walk_forward(
                 _, x_train, _ = _prepare_flat_inputs(dataset, feature_set, train_rows, task_type=task_type)
                 _, x_val, _ = _prepare_flat_inputs(dataset, feature_set, val_rows, task_type=task_type)
                 _, x_oos, _ = _prepare_flat_inputs(dataset, feature_set, oos_rows, task_type=task_type)
-            model = make_model(model_name, window_length=args.window_length, task_type=task_type)
+            model_kwargs = _torch_model_kwargs(args, model_name)
+            model = make_model(
+                model_name,
+                window_length=args.window_length,
+                task_type=task_type,
+                model_kwargs=model_kwargs,
+            )
             model.fit(x_train, y_train, val_x=x_val, val_y=y_val)
             for split_name, meta, x_eval, y_eval, rows in (("val", val_meta, x_val, y_val, val_rows), ("oos", oos_meta, x_oos, y_oos, oos_rows)):
                 pred = model.predict(x_eval)
@@ -759,6 +813,7 @@ def _train_task_walk_forward(
             final_stop_block_size=args.final_stop_block_size,
             sequence_store=sequence_stores.get(feature_set),
             window_length=args.window_length,
+            model_kwargs=_torch_model_kwargs(args, model_name),
         )
         model_path = models_dir / f"{feature_set}__{model_name}.pkl"
         model_metadata = _build_model_metadata(
@@ -890,9 +945,19 @@ def main() -> None:
             "min_train_dates": args.walk_forward_min_train_dates,
             "val_block_size": args.walk_forward_val_block_size,
             "oos_block_size": args.walk_forward_oos_block_size,
+            "max_folds": args.walk_forward_max_folds or None,
             "purge_gap": args.walk_forward_purge_gap or max(horizons),
             "final_stop_block_size": args.final_stop_block_size,
         }
+    torch_training_overrides = {
+        "max_epochs": args.torch_max_epochs or None,
+        "patience": args.torch_patience or None,
+        "batch_size": args.torch_batch_size or None,
+        "hidden_units": args.torch_hidden_units or None,
+        "hidden_dim": args.torch_hidden_dim or None,
+    }
+    if any(value is not None for value in torch_training_overrides.values()):
+        dataset_manifest["torch_training_overrides"] = torch_training_overrides
     save_dataset_manifest(output_dir / "dataset_manifest.json", dataset_manifest)
 
     combined_records: list[dict[str, object]] = []

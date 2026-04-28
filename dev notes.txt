@@ -1,6 +1,12 @@
+is everything running on GPU like before?
+
+
+
 explain the training scheme and data (different variants of the data)
 
 add fundamental data and sentiment. these are new in EODHD.
+
+Run both regression and classification models
 
 more data
 

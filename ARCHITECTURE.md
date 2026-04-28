@@ -83,7 +83,7 @@ Current implementation snapshot:
 - Compact sequence feature profiles are available for lower-variance ablations, including `stock_relative_market_sector_compact_sequence`.
 - Sequence inputs have shape `[batch_size, window_length, features_per_day]`. The default `window_length` is 60 trading days, but training can override it with `--window-length`.
 - Tabular inputs have shape `[episode_count, flattened_feature_count]` and use rolling-window summary columns such as `__last`, `__mean60`, and `__std60`.
-- `torch`, `xgboost`, and `lightgbm` now prefer GPU execution when available and fall back to CPU otherwise; saved model metadata records the resolved device and any GPU fallback error.
+- `torch`, `xgboost`, and `lightgbm` now prefer GPU execution when available and fall back to CPU otherwise; torch models require the local PyTorch build to report `torch.cuda.is_available()`, while XGBoost/LightGBM may attempt vendor GPU paths and record any fallback error.
 - Latest inference uses final deployment bundles saved after the walk-forward run completes.
 
 ## Input organization

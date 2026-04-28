@@ -59,7 +59,7 @@ Use this file as the shared handoff note when switching between computers or Cod
 - Decision: Add `torch_seq_static` as the first true sequence-plus-static model.
   Reason: It matches the architecture roadmap better than the older flattened-only baselines.
 - Decision: Prefer GPU execution automatically for `torch`, `xgboost`, and `lightgbm`, with CPU fallback and persisted fallback metadata.
-  Reason: Full walk-forward benchmarking is expensive enough that automatic acceleration is worth using wherever the stack supports it, and benchmark artifacts need to show whether a model really used an accelerator.
+  Reason: Full walk-forward benchmarking is expensive enough that automatic acceleration is worth using wherever the stack supports it, and benchmark artifacts need to show whether a model really used an accelerator. Torch models only resolve to CUDA when the local PyTorch build reports `torch.cuda.is_available()`, so CPU-only PyTorch installs on other machines remain safe.
 - Decision: Serialize torch-based model bundles in a CPU-safe way, then move them back onto the best available device after load.
   Reason: GPU-trained artifacts should stay portable across sessions and machines.
 - Decision: Add a binary classification task alongside regression instead of replacing regression.

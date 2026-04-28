@@ -1,24 +1,26 @@
-"If you want, I can next show you one concrete row schema for stock_relative_market_sector, with example column names grouped by these four buckets."
-Do this
-Explain in detail. I don't mind seeing them all. 
+explain the training scheme and data (different variants of the data)
 
-You mentioned "torch_seq_static has to learn those summaries from noisier sequential inputs.
-Its sequence input is only daily tokens from build_sequence_feature_store(...) in src/data/v1_dataset.py (line 285). In the saved model metadata, torch_seq_static sees 22 per-day features for stock_only and 86 for stock_relative, while the tabular feature sets are 66 / 258 / 307 / 356 columns in dataset_manifest.json. So the tabular baselines are being handed compressed, denoised summaries; the sequence model has to discover them itself."
-How many days does the seq model take as input?
-What's the input to the seq model like? And which models are the tabular baselines, is MLP one of them?
+add fundamental data and sentiment. these are new in EODHD.
 
-"The current sequence architecture is a pretty weak baseline.
-_SequenceStaticNet in src/models/v1_baselines.py (line 809) does: linear projection, transformer, then encoded.mean(dim=1) pooling, then concatenate with a tiny static MLP, then predict. That mean pooling at src/models/v1_baselines.py (line 919) can wash out recency, and there is no explicit market/sector fusion, no retrieval head, no ranking-aware loss, and no special handling for horizon structure.
-" Explain which are the seq models and how do they work? What's their input like, how are they processed through transformer, what's the output?
+more data
+
+
+down the road: combine seq model and tabular model.
 
 
 
-how many features are there in each of these four? stock_relative_market_sector? I fear there might be too many features, and many of it redundant. You mentioned, "More information” here also means a lot more correlated columns.
-The feature count jumps from 66 to 258 to 307 to 356. For weak, noisy return targets, extra context can easily add variance faster than signal. Also the target is already market-adjusted, so explicit market inputs may be partly redundant unless they really help with regime detection.
-" Let's work together to narrow down them
 
 
 
-run a real-data walk-forward classification benchmark on the refreshed 2026-04-24 dataset. I want to see a 
+
 
 "If you want, I can next give you a concrete upgrade plan for torch_seq_static that has the best chance of beating the current stock_only baselines."
+
+
+"One caveat: for final experiments, this should be ablated. Good comparisons would be:
+
+stock_only
+stock_relative
+stock_relative_market
+stock_relative_market_sector
+That tells us whether the relative versions actually improve out-of-sample performance or are just adding noise."

@@ -1,0 +1,66 @@
+{
+  "benchmark_ticker": "SPY",
+  "classification_event_type": "anytime_pathwise_outperform",
+  "classification_horizon_days": 20,
+  "classification_target_columns": [
+    "market_outperform_any_20d_gt_5pct"
+  ],
+  "classification_threshold": 0.05,
+  "dataset_root": "D:\\QuantWithNNkNN\\data\\eodhd_30y_150_common_v2_20260428",
+  "eval_mode": "walk_forward",
+  "feature_sets": {
+    "stock_only": 87,
+    "stock_relative_market_sector": 389,
+    "stock_relative_market_sector_compact": 188
+  },
+  "generated_utc": "2026-04-28T20:05:21Z",
+  "horizons": [
+    5,
+    10,
+    20
+  ],
+  "models": {
+    "classification": [
+      "logistic_regression",
+      "lightgbm_classifier"
+    ],
+    "regression": [
+      "ridge",
+      "lightgbm"
+    ]
+  },
+  "notes": [
+    "Current default data source is EODHD daily EOD OHLCV.",
+    "Regression targets are market-adjusted using the benchmark context table.",
+    "Classification target is positive when pathwise market-adjusted excess return exceeds the threshold within the next horizon window.",
+    "Feature summaries are rolling-window last/mean/std values computed from dates <= anchor_date.",
+    "Walk-forward mode evaluates on aggregated out-of-sample folds and excludes 1-day regression targets from leaderboard ranking.",
+    "EODHD sector/industry metadata is not treated as point-in-time fundamentals."
+  ],
+  "row_count": 554000,
+  "runtime_environment": {
+    "cuda_device_count": 1,
+    "cuda_device_name": "NVIDIA GeForce RTX 3080",
+    "gpu_available": true,
+    "gpu_visible_from_env": false,
+    "torch_cuda_available": true
+  },
+  "target_columns": [
+    "market_adjusted_return_5d",
+    "market_adjusted_return_10d",
+    "market_adjusted_return_20d"
+  ],
+  "task_types": [
+    "regression",
+    "classification"
+  ],
+  "walk_forward": {
+    "final_stop_block_size": 252,
+    "max_folds": 6,
+    "min_train_dates": 2520,
+    "oos_block_size": 252,
+    "purge_gap": 20,
+    "val_block_size": 252
+  },
+  "window_length": 60
+}

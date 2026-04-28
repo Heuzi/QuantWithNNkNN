@@ -1,0 +1,151 @@
+symbol,ticker,eodhd_symbol,name,country,exchange,currency,type,isin,sector,industry,gics_sector,gics_sub_industry,is_delisted,delisted_date,metadata_source
+AAPL,AAPL,AAPL.US,Apple Inc,USA,NASDAQ,USD,Common Stock,US0378331005,Technology,Consumer Electronics,Information Technology,Consumer Electronics,False,NA,eodhd_fundamentals_general
+MSFT,MSFT,MSFT.US,Microsoft Corporation,USA,NASDAQ,USD,Common Stock,US5949181045,Technology,Software - Infrastructure,Information Technology,Software - Infrastructure,False,NA,eodhd_fundamentals_general
+NVDA,NVDA,NVDA.US,NVIDIA Corporation,USA,NASDAQ,USD,Common Stock,US67066G1040,Technology,Semiconductors,Information Technology,Semiconductors,False,NA,eodhd_fundamentals_general
+AMZN,AMZN,AMZN.US,Amazon.com Inc,USA,NASDAQ,USD,Common Stock,US0231351067,Consumer Cyclical,Internet Retail,Consumer Discretionary,Internet Retail,False,NA,eodhd_fundamentals_general
+GOOGL,GOOGL,GOOGL.US,Alphabet Inc Class A,USA,NASDAQ,USD,Common Stock,US02079K3059,Communication Services,Internet Content & Information,Communication Services,Internet Content & Information,False,NA,eodhd_fundamentals_general
+META,META,META.US,Meta Platforms Inc.,USA,NASDAQ,USD,Common Stock,US30303M1027,Communication Services,Internet Content & Information,Communication Services,Internet Content & Information,False,NA,eodhd_fundamentals_general
+JPM,JPM,JPM.US,JPMorgan Chase & Co,USA,NYSE,USD,Common Stock,US46625H1005,Financial Services,Banks - Diversified,Financials,Banks - Diversified,False,NA,eodhd_fundamentals_general
+XOM,XOM,XOM.US,Exxon Mobil Corp,USA,NYSE,USD,Common Stock,US30231G1022,Energy,Oil & Gas Integrated,Energy,Oil & Gas Integrated,False,NA,eodhd_fundamentals_general
+WMT,WMT,WMT.US,Walmart Inc.,USA,NASDAQ,USD,Common Stock,US9311421039,Consumer Defensive,Discount Stores,Consumer Staples,Discount Stores,False,NA,eodhd_fundamentals_general
+A,A,A.US,Agilent Technologies Inc,USA,NYSE,USD,Common Stock,US00846U1016,Healthcare,Diagnostics & Research,Health Care,Diagnostics & Research,False,NA,eodhd_fundamentals_general
+AA,AA,AA.US,Alcoa Corp,USA,NYSE,USD,Common Stock,US0138721065,Basic Materials,Aluminum,Materials,Aluminum,False,NA,eodhd_fundamentals_general
+AACB,AACB,AACB.US,Artius II Acquisition Inc. Class A Ordinary Shares,USA,NASDAQ,USD,Common Stock,KYG0509J1159,Financial Services,Shell Companies,Financials,Shell Companies,False,NA,eodhd_fundamentals_general
+AACG,AACG,AACG.US,ATA Creativity Global,USA,NASDAQ,USD,Common Stock,US00211V1061,Consumer Defensive,Education & Training Services,Consumer Discretionary,Education & Training Services,False,NA,eodhd_fundamentals_general
+AACO,AACO,AACO.US,Abony Acquisition Corp. I Class A Ordinary Share,USA,NASDAQ,USD,Common Stock,NA,Financial Services,Shell Companies,NA,Shell Companies,False,NA,eodhd_fundamentals_general
+AAL,AAL,AAL.US,American Airlines Group,USA,NASDAQ,USD,Common Stock,US02376R1023,Industrials,Airlines,Industrials,Airlines,False,NA,eodhd_fundamentals_general
+AAM,AAM,AAM.US,AA Mission Acquisition Corp.,USA,NYSE,USD,Common Stock,KYG1000R1011,Financial Services,Shell Companies,Financials,Shell Companies,False,NA,eodhd_fundamentals_general
+AAME,AAME,AAME.US,Atlantic American Corporation,USA,NASDAQ,USD,Common Stock,US0482091008,Financial Services,Insurance - Life,Financials,Insurance - Life,False,NA,eodhd_fundamentals_general
+AAMI,AAMI,AAMI.US,Acadian Asset Management Inc,USA,NYSE,USD,Common Stock,US10948W1036,Financial Services,Asset Management,Financials,Asset Management,False,NA,eodhd_fundamentals_general
+AAOI,AAOI,AAOI.US,Applied Opt,USA,NASDAQ,USD,Common Stock,US03823U1025,Technology,Communication Equipment,Information Technology,Communication Equipment,False,NA,eodhd_fundamentals_general
+AAON,AAON,AAON.US,AAON Inc,USA,NASDAQ,USD,Common Stock,US0003602069,Industrials,Building Products & Equipment,Industrials,Building Products & Equipment,False,NA,eodhd_fundamentals_general
+AAP,AAP,AAP.US,Advance Auto Parts Inc,USA,NYSE,USD,Common Stock,US00751Y1064,Consumer Cyclical,Auto Parts,Consumer Discretionary,Auto Parts,False,NA,eodhd_fundamentals_general
+AAPG,AAPG,AAPG.US,Ascentage Pharma Group International,USA,NASDAQ,USD,Common Stock,KYG0519B1023,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+AARD,AARD,AARD.US,"Aardvark Therapeutics, Inc. Common Stock",USA,NASDAQ,USD,Common Stock,US0029421007,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+AAT,AAT,AAT.US,American Assets Trust Inc,USA,NYSE,USD,Common Stock,US0240131047,Real Estate,REIT - Diversified,Real Estate,REIT - Diversified,False,NA,eodhd_fundamentals_general
+AAUC,AAUC,AAUC.US,Allied Gold Corporation,USA,NYSE,USD,Common Stock,CA01921D2041,Basic Materials,Gold,Materials,Gold,False,NA,eodhd_fundamentals_general
+AB,AB,AB.US,AllianceBernstein Holding L.P. ,USA,NYSE,USD,Common Stock,US01881G1067,Financial Services,Asset Management,Financials,Asset Management,False,NA,eodhd_fundamentals_general
+ABAT,ABAT,ABAT.US,American Battery Technology Company Common Stock,USA,NASDAQ,USD,Common Stock,US02451V3096,Industrials,Waste Management,Materials,Waste Management,False,NA,eodhd_fundamentals_general
+ABBV,ABBV,ABBV.US,AbbVie Inc,USA,NYSE,USD,Common Stock,US00287Y1091,Healthcare,Drug Manufacturers - General,Health Care,Drug Manufacturers - General,False,NA,eodhd_fundamentals_general
+ABCB,ABCB,ABCB.US,Ameris Bancorp,USA,NYSE,USD,Common Stock,US03076K1088,Financial Services,Banks - Regional,Financials,Banks - Regional,False,NA,eodhd_fundamentals_general
+ABCL,ABCL,ABCL.US,Abcellera Biologics Inc,USA,NASDAQ,USD,Common Stock,CA00288U1066,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ABEO,ABEO,ABEO.US,Abeona Therapeutics Inc,USA,NASDAQ,USD,Common Stock,US00289Y2063,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ABEV,ABEV,ABEV.US,Ambev SA ADR,USA,NYSE,USD,Common Stock,US02319V1035,Consumer Defensive,Beverages - Brewers,Consumer Staples,Beverages - Brewers,False,NA,eodhd_fundamentals_general
+ABG,ABG,ABG.US,Asbury Automotive Group Inc,USA,NYSE,USD,Common Stock,US0434361046,Consumer Cyclical,Auto & Truck Dealerships,Consumer Discretionary,Auto & Truck Dealerships,False,NA,eodhd_fundamentals_general
+ABLV,ABLV,ABLV.US,Able View Global Inc. Class B Ordinary Shares,USA,NASDAQ,USD,Common Stock,KYG1149B1086,Consumer Cyclical,Specialty Retail,Communication Services,Specialty Retail,False,NA,eodhd_fundamentals_general
+ABM,ABM,ABM.US,ABM Industries Incorporated,USA,NYSE,USD,Common Stock,US0009571003,Industrials,Specialty Business Services,Industrials,Specialty Business Services,False,NA,eodhd_fundamentals_general
+ABNB,ABNB,ABNB.US,Airbnb Inc,USA,NASDAQ,USD,Common Stock,US0090661010,Consumer Cyclical,Travel Services,Consumer Discretionary,Travel Services,False,NA,eodhd_fundamentals_general
+ABOS,ABOS,ABOS.US,Acumen Pharmaceuticals Inc,USA,NASDAQ,USD,Common Stock,US00509G2093,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ABOT,ABOT,ABOT.US,ABOT,USA,BATS,USD,Common Stock,US89628W5004,Other,Other,NA,Other,False,NA,eodhd_fundamentals_general
+ABP,ABP,ABP.US,"Abpro Holdings, Inc.",USA,NYSE,USD,Common Stock,US0008471031,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ABR,ABR,ABR.US,Arbor Realty Trust,USA,NYSE,USD,Common Stock,US0389231087,Real Estate,REIT - Mortgage,Financials,REIT - Mortgage,False,NA,eodhd_fundamentals_general
+ABSI,ABSI,ABSI.US,Absci Corp,USA,NASDAQ,USD,Common Stock,US00091E1091,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ABT,ABT,ABT.US,Abbott Laboratories,USA,NYSE,USD,Common Stock,US0028241000,Healthcare,Medical Devices,Health Care,Medical Devices,False,NA,eodhd_fundamentals_general
+ABTC,ABTC,ABTC.US,American Bitcoin Corp,USA,NASDAQ,USD,Common Stock,US02462A1043,Financial Services,Capital Markets,Information Technology,Capital Markets,False,NA,eodhd_fundamentals_general
+ABTS,ABTS,ABTS.US,Abits Group Inc.,USA,NASDAQ,USD,Common Stock,VGG6S34K1136,Financial Services,Capital Markets,Communication Services,Capital Markets,False,NA,eodhd_fundamentals_general
+ABUS,ABUS,ABUS.US,Arbutus Biopharma Corp,USA,NASDAQ,USD,Common Stock,CA03879J1003,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ABVC,ABVC,ABVC.US,ABVC Biopharma Inc,USA,NASDAQ,USD,Common Stock,US00091F1066,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ABVE,ABVE,ABVE.US,Above Food Ingredients Inc. Common Stock,USA,NASDAQ,USD,Common Stock,CA00373V1004,Consumer Defensive,Packaged Foods,Consumer Staples,Packaged Foods,False,NA,eodhd_fundamentals_general
+ABVX,ABVX,ABVX.US,Abivax SA American Depositary Shares,USA,NASDAQ,USD,Common Stock,US00370M1036,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ABX,ABX,ABX.US,"Abacus Global Management, Inc.",USA,NASDAQ,USD,Common Stock,US00258Y1047,Financial Services,Insurance - Life,Financials,Insurance - Life,False,NA,eodhd_fundamentals_general
+ABXL,ABXL,ABXL.US,ABXL,USA,NYSE,USD,Common Stock,NA,NA,NA,NA,NA,False,NA,eodhd_fundamentals_general
+ACA,ACA,ACA.US,Arcosa Inc,USA,NYSE,USD,Common Stock,US0396531008,Industrials,Engineering & Construction,Industrials,Engineering & Construction,False,NA,eodhd_fundamentals_general
+ACAA,ACAA,ACAA.US,Averin Capital Acquisition Corp. Class A Ordinary Shares,USA,NASDAQ,USD,Common Stock,NA,Financial Services,Shell Companies,NA,Shell Companies,False,NA,eodhd_fundamentals_general
+ACAD,ACAD,ACAD.US,ACADIA Pharmaceuticals Inc,USA,NASDAQ,USD,Common Stock,US0042251084,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ACB,ACB,ACB.US,Aurora Cannabis Inc,USA,NASDAQ,USD,Common Stock,CA05156X8504,Healthcare,Drug Manufacturers - Specialty & Generic,Health Care,Drug Manufacturers - Specialty & Generic,False,NA,eodhd_fundamentals_general
+ACCL,ACCL,ACCL.US,Acco Group Holdings Limited Ordinary Shares,USA,NASDAQ,USD,Common Stock,KYG0069D1108,Industrials,Consulting Services,NA,Consulting Services,False,NA,eodhd_fundamentals_general
+ACCO,ACCO,ACCO.US,Acco Brands Corporation,USA,NYSE,USD,Common Stock,US00081T1088,Industrials,Business Equipment & Supplies,Industrials,Business Equipment & Supplies,False,NA,eodhd_fundamentals_general
+ACCS,ACCS,ACCS.US,ACCESS Newswire Inc.,USA,NYSE MKT,USD,Common Stock,US46520M2044,Communication Services,Advertising Agencies,Information Technology,Advertising Agencies,False,NA,eodhd_fundamentals_general
+ACDC,ACDC,ACDC.US,ProFrac Holding Corp.,USA,NASDAQ,USD,Common Stock,US74319N1000,Energy,Oil & Gas Equipment & Services,Energy,Oil & Gas Equipment & Services,False,NA,eodhd_fundamentals_general
+ACEL,ACEL,ACEL.US,Accel Entertainment Inc,USA,NYSE,USD,Common Stock,US00436Q1067,Consumer Cyclical,Gambling,Consumer Discretionary,Gambling,False,NA,eodhd_fundamentals_general
+ACET,ACET,ACET.US,Adicet Bio Inc,USA,NASDAQ,USD,Common Stock,US0070021086,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ACGL,ACGL,ACGL.US,Arch Capital Group Ltd,USA,NASDAQ,USD,Common Stock,BMG0450A1053,Financial Services,Insurance - Diversified,Financials,Insurance - Diversified,False,NA,eodhd_fundamentals_general
+ACH,ACH,ACH.US,Accendra Health Inc,USA,NYSE,USD,Common Stock,US6907321029,Healthcare,Medical Distribution,NA,Medical Distribution,False,NA,eodhd_fundamentals_general
+ACHC,ACHC,ACHC.US,Acadia Healthcare Company Inc,USA,NASDAQ,USD,Common Stock,US00404A1097,Healthcare,Medical Care Facilities,Health Care,Medical Care Facilities,False,NA,eodhd_fundamentals_general
+ACHR,ACHR,ACHR.US,Archer Aviation Inc,USA,NYSE,USD,Common Stock,US03945R1023,Industrials,Aerospace & Defense,Industrials,Aerospace & Defense,False,NA,eodhd_fundamentals_general
+ACHV,ACHV,ACHV.US,Achieve Life Sciences Inc,USA,NASDAQ,USD,Common Stock,US0044685008,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ACI,ACI,ACI.US,Albertsons Companies,USA,NYSE,USD,Common Stock,US0130911037,Consumer Defensive,Grocery Stores,Consumer Staples,Grocery Stores,False,NA,eodhd_fundamentals_general
+ACIC,ACIC,ACIC.US,American Coastal Insurance Corp,USA,NASDAQ,USD,Common Stock,US9107101027,Financial Services,Insurance - Property & Casualty,Financials,Insurance - Property & Casualty,False,NA,eodhd_fundamentals_general
+ACIU,ACIU,ACIU.US,AC Immune Ltd,USA,NASDAQ,USD,Common Stock,CH0329023102,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ACIW,ACIW,ACIW.US,ACI Worldwide Inc,USA,NASDAQ,USD,Common Stock,US0044981019,Technology,Software - Infrastructure,Information Technology,Software - Infrastructure,False,NA,eodhd_fundamentals_general
+ACLS,ACLS,ACLS.US,Axcelis Technologies Inc,USA,NASDAQ,USD,Common Stock,US0545402085,Technology,Semiconductor Equipment & Materials,Information Technology,Semiconductor Equipment & Materials,False,NA,eodhd_fundamentals_general
+ACLX,ACLX,ACLX.US,Arcellx Inc,USA,NASDAQ,USD,Common Stock,US03940C1009,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ACM,ACM,ACM.US,Aecom Technology Corporation,USA,NYSE,USD,Common Stock,US00766T1007,Industrials,Engineering & Construction,Industrials,Engineering & Construction,False,NA,eodhd_fundamentals_general
+ACMR,ACMR,ACMR.US,Acm Research Inc,USA,NASDAQ,USD,Common Stock,US00108J1097,Technology,Semiconductor Equipment & Materials,Information Technology,Semiconductor Equipment & Materials,False,NA,eodhd_fundamentals_general
+ACN,ACN,ACN.US,Accenture plc,USA,NYSE,USD,Common Stock,IE00B4BNMY34,Technology,Information Technology Services,Information Technology,Information Technology Services,False,NA,eodhd_fundamentals_general
+ACNB,ACNB,ACNB.US,ACNB Corporation,USA,NASDAQ,USD,Common Stock,US0008681092,Financial Services,Banks - Regional,Financials,Banks - Regional,False,NA,eodhd_fundamentals_general
+ACNT,ACNT,ACNT.US,Synalloy Corporation,USA,NASDAQ,USD,Common Stock,US8715651076,Basic Materials,Chemicals,Materials,Chemicals,False,NA,eodhd_fundamentals_general
+ACOG,ACOG,ACOG.US,Alpha Cognition Inc,USA,NASDAQ,USD,Common Stock,CA02074J5017,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ACON,ACON,ACON.US,Aclarion Inc,USA,NASDAQ,USD,Common Stock,US6551871022,Healthcare,Health Information Services,Health Care,Health Information Services,False,NA,eodhd_fundamentals_general
+ACR,ACR,ACR.US,Acres Commercial Realty Corp,USA,NYSE,USD,Common Stock,US00489Q1022,Real Estate,REIT - Mortgage,Financials,REIT - Mortgage,False,NA,eodhd_fundamentals_general
+ACRE,ACRE,ACRE.US,Ares Commercial Real Estate,USA,NYSE,USD,Common Stock,US04013V1089,Real Estate,REIT - Mortgage,Financials,REIT - Mortgage,False,NA,eodhd_fundamentals_general
+ACRS,ACRS,ACRS.US,Aclaris Therapeutics Inc,USA,NASDAQ,USD,Common Stock,US00461U1051,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ACRV,ACRV,ACRV.US,"Acrivon Therapeutics, Inc. Common Stock",USA,NASDAQ,USD,Common Stock,US0048901096,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ACT,ACT,ACT.US,Enact Holdings Inc,USA,NASDAQ,USD,Common Stock,US29249E1091,Financial Services,Insurance - Specialty,Financials,Insurance - Specialty,False,NA,eodhd_fundamentals_general
+ACTG,ACTG,ACTG.US,Acacia Research Corporation,USA,NASDAQ,USD,Common Stock,US0038813079,Industrials,Business Equipment & Supplies,Industrials,Business Equipment & Supplies,False,NA,eodhd_fundamentals_general
+ACTU,ACTU,ACTU.US,"Actuate Therapeutics, Inc. Common stock",USA,NASDAQ,USD,Common Stock,US0050831009,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ACVA,ACVA,ACVA.US,ACV Auctions Inc.,USA,NYSE,USD,Common Stock,US00091G1040,Consumer Cyclical,Auto & Truck Dealerships,Industrials,Auto & Truck Dealerships,False,NA,eodhd_fundamentals_general
+ACXP,ACXP,ACXP.US,Acurx Pharmaceuticals LLC,USA,NASDAQ,USD,Common Stock,US00510M1045,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ACYN,ACYN,ACYN.US,First Trust Exchange-Traded Fund,USA,NYSE ARCA,USD,Common Stock,NA,Unknown,Unknown,NA,Unknown,False,NA,eodhd_fundamentals_general
+ACYS,ACYS,ACYS.US,ACYS,USA,NYSE ARCA,USD,Common Stock,NA,NA,NA,NA,NA,False,NA,eodhd_fundamentals_general
+AD,AD,AD.US,"Array Digital Infrastructure, Inc.",USA,NYSE,USD,Common Stock,US9116841084,Communication Services,Telecom Services,Communication Services,Telecom Services,False,NA,eodhd_fundamentals_general
+ADAG,ADAG,ADAG.US,Adagene Inc,USA,NASDAQ,USD,Common Stock,US0053291078,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ADAM,ADAM,ADAM.US,"New York Mortgage Trust, Inc.",USA,NASDAQ,USD,Common Stock,NA,Real Estate,REIT - Mortgage,Financials,REIT - Mortgage,False,NA,eodhd_fundamentals_general
+ADAMG,ADAMG,ADAMG.US,"Adamas Trust, Inc.",USA,NASDAQ,USD,Common Stock,NA,Unknown,Unknown,NA,Unknown,False,NA,eodhd_fundamentals_general
+ADAMH,ADAMH,ADAMH.US,"Adamas Trust, Inc.",USA,NASDAQ,USD,Common Stock,NA,Unknown,Unknown,NA,Unknown,False,NA,eodhd_fundamentals_general
+ADAMI,ADAMI,ADAMI.US,"New York Mortgage Trust, Inc. 9.125% Senior Notes Due 2029",USA,NASDAQ,USD,Common Stock,NA,NA,NA,NA,NA,False,NA,eodhd_fundamentals_general
+ADAMM,ADAMM,ADAMM.US,"New York Mortgage Trust, Inc.",USA,NASDAQ,USD,Common Stock,NA,Real Estate,REIT - Mortgage,NA,REIT - Mortgage,False,NA,eodhd_fundamentals_general
+ADAMN,ADAMN,ADAMN.US,"Adamas Trust, Inc",USA,NASDAQ,USD,Common Stock,NA,Real Estate,REIT - Mortgage,NA,REIT - Mortgage,False,NA,eodhd_fundamentals_general
+ADAMO,ADAMO,ADAMO.US,"Adamas Trust, Inc. 9.250% Senior Notes Due 2031",USA,NASDAQ,USD,Common Stock,NA,NA,NA,NA,NA,False,NA,eodhd_fundamentals_general
+ADAMZ,ADAMZ,ADAMZ.US,"Adamas Trust, Inc",USA,NASDAQ,USD,Common Stock,NA,Real Estate,REIT - Mortgage,NA,REIT - Mortgage,False,NA,eodhd_fundamentals_general
+ADBE,ADBE,ADBE.US,Adobe Systems Incorporated,USA,NASDAQ,USD,Common Stock,US00724F1012,Technology,Software - Application,Information Technology,Software - Application,False,NA,eodhd_fundamentals_general
+ADC,ADC,ADC.US,Agree Realty Corporation,USA,NYSE,USD,Common Stock,US0084921008,Real Estate,REIT - Retail,Real Estate,REIT - Retail,False,NA,eodhd_fundamentals_general
+ADCT,ADCT,ADCT.US,ADC Therapeutics SA,USA,NYSE,USD,Common Stock,CH0499880968,Healthcare,Biotechnology,Information Technology,Biotechnology,False,NA,eodhd_fundamentals_general
+ADEA,ADEA,ADEA.US,ADEIA CORP,USA,NASDAQ,USD,Common Stock,US98390M1036,Technology,Software - Application,Information Technology,Software - Application,False,NA,eodhd_fundamentals_general
+ADGM,ADGM,ADGM.US,"Adagio Medical Holdings, Inc Common Stock",USA,NASDAQ,USD,Common Stock,US00534B1008,Healthcare,Medical Devices,Health Care,Medical Devices,False,NA,eodhd_fundamentals_general
+ADI,ADI,ADI.US,Analog Devices Inc,USA,NASDAQ,USD,Common Stock,US0326541051,Technology,Semiconductors,Information Technology,Semiconductors,False,NA,eodhd_fundamentals_general
+ADIL,ADIL,ADIL.US,Adial Pharmaceuticals Inc,USA,NASDAQ,USD,Common Stock,US00688A1060,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ADM,ADM,ADM.US,Archer-Daniels-Midland Company,USA,NYSE,USD,Common Stock,US0394831020,Consumer Defensive,Farm Products,Consumer Staples,Farm Products,False,NA,eodhd_fundamentals_general
+ADMA,ADMA,ADMA.US,ADMA Biologics Inc,USA,NASDAQ,USD,Common Stock,US0008991046,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ADNT,ADNT,ADNT.US,Adient PLC,USA,NYSE,USD,Common Stock,IE00BD845X29,Consumer Cyclical,Auto Parts,Consumer Discretionary,Auto Parts,False,NA,eodhd_fundamentals_general
+ADP,ADP,ADP.US,Automatic Data Processing Inc,USA,NASDAQ,USD,Common Stock,US0530151036,Technology,Software - Application,Industrials,Software - Application,False,NA,eodhd_fundamentals_general
+ADPT,ADPT,ADPT.US,Adaptive Biotechnologies Corp,USA,NASDAQ,USD,Common Stock,US00650F1093,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ADSE,ADSE,ADSE.US,Ads Tec Energy PLC,USA,NASDAQ,USD,Common Stock,IE000DU292E6,Industrials,Electrical Equipment & Parts,Industrials,Electrical Equipment & Parts,False,NA,eodhd_fundamentals_general
+ADSK,ADSK,ADSK.US,Autodesk Inc,USA,NASDAQ,USD,Common Stock,US0527691069,Technology,Software - Application,Information Technology,Software - Application,False,NA,eodhd_fundamentals_general
+ADT,ADT,ADT.US,ADT Inc,USA,NYSE,USD,Common Stock,US00090Q1031,Industrials,Security & Protection Services,Consumer Discretionary,Security & Protection Services,False,NA,eodhd_fundamentals_general
+ADTN,ADTN,ADTN.US,ADTRAN Inc,USA,NASDAQ,USD,Common Stock,US00486H1059,Technology,Communication Equipment,Information Technology,Communication Equipment,False,NA,eodhd_fundamentals_general
+ADTX,ADTX,ADTX.US,Aditxt Inc. ,USA,NASDAQ,USD,Common Stock,US0070251097,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+ADUS,ADUS,ADUS.US,Addus HomeCare Corporation,USA,NASDAQ,USD,Common Stock,US0067391062,Healthcare,Medical Care Facilities,Health Care,Medical Care Facilities,False,NA,eodhd_fundamentals_general
+ADV,ADV,ADV.US,Advantage Solutions Inc,USA,NASDAQ,USD,Common Stock,US00791N1028,Communication Services,Advertising Agencies,Communication Services,Advertising Agencies,False,NA,eodhd_fundamentals_general
+ADVB,ADVB,ADVB.US,Advanced Biomed Inc. Common Stock,USA,NASDAQ,USD,Common Stock,US00752P1049,Healthcare,Diagnostics & Research,Health Care,Diagnostics & Research,False,NA,eodhd_fundamentals_general
+ADXN,ADXN,ADXN.US,Addex Therapeutics Ltd,USA,NASDAQ,USD,Common Stock,US00654J2069,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+AEAE,AEAE,AEAE.US,Altenergy Acquisition Corp,USA,NASDAQ,USD,Common Stock,US02157M1080,Financial Services,Shell Companies,Financials,Shell Companies,False,NA,eodhd_fundamentals_general
+AEAQ,AEAQ,AEAQ.US,Activate Energy Acquisition Corp. Class A Ordinary Share,USA,NASDAQ,USD,Common Stock,NA,Financial Services,Shell Companies,NA,Shell Companies,False,NA,eodhd_fundamentals_general
+AEBI,AEBI,AEBI.US,Aebi Schmidt Holding AG - Common Stock,USA,NASDAQ,USD,Common Stock,CH0027352993,Industrials,Farm & Heavy Construction Machinery,Industrials,Farm & Heavy Construction Machinery,False,NA,eodhd_fundamentals_general
+AEC,AEC,AEC.US,Anfield Energy Inc.,USA,NASDAQ,USD,Common Stock,NA,Energy,Uranium,NA,Uranium,False,NA,eodhd_fundamentals_general
+AEE,AEE,AEE.US,Ameren Corp,USA,NYSE,USD,Common Stock,US0236081024,Utilities,Utilities - Regulated Electric,Utilities,Utilities - Regulated Electric,False,NA,eodhd_fundamentals_general
+AEG,AEG,AEG.US,Aegon NV ADR,USA,NYSE,USD,Common Stock,US0076CA1045,Financial Services,Insurance - Diversified,Financials,Insurance - Diversified,False,NA,eodhd_fundamentals_general
+AEHL,AEHL,AEHL.US,Antelope Enterprise Holdings Ltd,USA,NASDAQ,USD,Common Stock,VGG041JN1065,Industrials,Building Products & Equipment,Industrials,Building Products & Equipment,False,NA,eodhd_fundamentals_general
+AEHR,AEHR,AEHR.US,Aehr Test Systems,USA,NASDAQ,USD,Common Stock,US00760J1088,Technology,Semiconductor Equipment & Materials,Information Technology,Semiconductor Equipment & Materials,False,NA,eodhd_fundamentals_general
+AEI,AEI,AEI.US,Alset Ehome International Inc,USA,NASDAQ,USD,Common Stock,US02116A1043,Real Estate,Real Estate - Development,Real Estate,Real Estate - Development,False,NA,eodhd_fundamentals_general
+AEIS,AEIS,AEIS.US,Advanced Energy Industries Inc,USA,NASDAQ,USD,Common Stock,US0079731008,Industrials,Electrical Equipment & Parts,Information Technology,Electrical Equipment & Parts,False,NA,eodhd_fundamentals_general
+AEM,AEM,AEM.US,Agnico Eagle Mines Limited,USA,NYSE,USD,Common Stock,CA0084741085,Basic Materials,Gold,Materials,Gold,False,NA,eodhd_fundamentals_general
+AEMD,AEMD,AEMD.US,Aethlon Medical Inc,USA,NASDAQ,USD,Common Stock,US00808Y3071,Healthcare,Medical Devices,Health Care,Medical Devices,False,NA,eodhd_fundamentals_general
+AENT,AENT,AENT.US,Alliance Entertainment Holding Corporation Class A Common Stock,USA,NASDAQ,USD,Common Stock,US01861F1021,Communication Services,Entertainment,Consumer Discretionary,Entertainment,False,NA,eodhd_fundamentals_general
+AEO,AEO,AEO.US,American Eagle Outfitters Inc,USA,NYSE,USD,Common Stock,US02553E1064,Consumer Cyclical,Apparel Retail,Consumer Discretionary,Apparel Retail,False,NA,eodhd_fundamentals_general
+AEON,AEON,AEON.US,"AEON Biopharma, Inc.",USA,NYSE MKT,USD,Common Stock,US00775E1029,Healthcare,Biotechnology,Health Care,Biotechnology,False,NA,eodhd_fundamentals_general
+AEP,AEP,AEP.US,American Electric Power Co Inc,USA,NASDAQ,USD,Common Stock,US0255371017,Utilities,Utilities - Regulated Electric,Utilities,Utilities - Regulated Electric,False,NA,eodhd_fundamentals_general
+AER,AER,AER.US,AerCap Holdings NV,USA,NYSE,USD,Common Stock,NL0000687663,Industrials,Rental & Leasing Services,Industrials,Rental & Leasing Services,False,NA,eodhd_fundamentals_general
+AERO,AERO,AERO.US,"Grupo AeromÃ©xico, S.A.B. de C.V.",USA,NYSE,USD,Common Stock,NA,Industrials,Airlines,NA,Airlines,False,NA,eodhd_fundamentals_general
+AERT,AERT,AERT.US,Aeries Technology Inc.,USA,NASDAQ,USD,Common Stock,KYG0136H1020,Industrials,Consulting Services,Industrials,Consulting Services,False,NA,eodhd_fundamentals_general
+AES,AES,AES.US,The AES Corporation,USA,NYSE,USD,Common Stock,US00130H1059,Utilities,Utilities - Diversified,Utilities,Utilities - Diversified,False,NA,eodhd_fundamentals_general
+AESI,AESI,AESI.US,Atlas Energy Solutions Inc.,USA,NYSE,USD,Common Stock,US6420451089,Energy,Oil & Gas Equipment & Services,Energy,Oil & Gas Equipment & Services,False,NA,eodhd_fundamentals_general
+AEVA,AEVA,AEVA.US,"Aeva Technologies, Inc. Common Stock",USA,NASDAQ,USD,Common Stock,US00835Q1031,Technology,Software - Infrastructure,Consumer Discretionary,Software - Infrastructure,False,NA,eodhd_fundamentals_general
+AEXA,AEXA,AEXA.US,American Exceptionalism Acquisition Corp. A,USA,NYSE,USD,Common Stock,KYG0273J1013,Financial Services,Shell Companies,Financials,Shell Companies,False,NA,eodhd_fundamentals_general
+AEYE,AEYE,AEYE.US,AudioEye Inc,USA,NASDAQ,USD,Common Stock,US0507342014,Technology,Software - Application,Information Technology,Software - Application,False,NA,eodhd_fundamentals_general
+AFBI,AFBI,AFBI.US,Affinity Bancshares Inc,USA,NASDAQ,USD,Common Stock,US00832E1038,Financial Services,Banks - Regional,Financials,Banks - Regional,False,NA,eodhd_fundamentals_general
+AFCG,AFCG,AFCG.US,AFC Gamma Inc,USA,NASDAQ,USD,Common Stock,US00109K1051,Financial Services,Asset Management,Financials,Asset Management,False,NA,eodhd_fundamentals_general
+AFG,AFG,AFG.US,American Financial Group Inc,USA,NYSE,USD,Common Stock,US0259321042,Financial Services,Insurance - Property & Casualty,Financials,Insurance - Property & Casualty,False,NA,eodhd_fundamentals_general
+AFGE,AFGE,AFGE.US,"American Financial Group, Inc.",USA,NYSE,USD,Common Stock,US0259328641,Financials,Insurance,Financials,Insurance,False,NA,eodhd_fundamentals_general
+AFJK,AFJK,AFJK.US,"Aimei Health Technology Co., Ltd Ordinary Share",USA,NASDAQ,USD,Common Stock,KYG013411171,Financial Services,Shell Companies,Health Care,Shell Companies,False,NA,eodhd_fundamentals_general
+AFL,AFL,AFL.US,Aflac Incorporated,USA,NYSE,USD,Common Stock,US0010551028,Financial Services,Insurance - Life,Financials,Insurance - Life,False,NA,eodhd_fundamentals_general

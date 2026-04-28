@@ -1,0 +1,151 @@
+symbol,ticker,eodhd_symbol,name,country,exchange,currency,type,isin,is_delisted
+AAPL,AAPL,AAPL.US,Apple Inc,USA,NASDAQ,USD,Common Stock,US0378331005,False
+MSFT,MSFT,MSFT.US,Microsoft Corporation,USA,NASDAQ,USD,Common Stock,US5949181045,False
+NVDA,NVDA,NVDA.US,NVIDIA Corporation,USA,NASDAQ,USD,Common Stock,US67066G1040,False
+AMZN,AMZN,AMZN.US,Amazon.com Inc,USA,NASDAQ,USD,Common Stock,US0231351067,False
+GOOGL,GOOGL,GOOGL.US,Alphabet Inc Class A,USA,NASDAQ,USD,Common Stock,US02079K3059,False
+META,META,META.US,Meta Platforms Inc.,USA,NASDAQ,USD,Common Stock,US30303M1027,False
+JPM,JPM,JPM.US,JPMorgan Chase & Co,USA,NYSE,USD,Common Stock,US46625H1005,False
+XOM,XOM,XOM.US,Exxon Mobil Corp,USA,NYSE,USD,Common Stock,US30231G1022,False
+WMT,WMT,WMT.US,Walmart Inc.,USA,NASDAQ,USD,Common Stock,US9311421039,False
+A,A,A.US,Agilent Technologies Inc,USA,NYSE,USD,Common Stock,US00846U1016,False
+AA,AA,AA.US,Alcoa Corp,USA,NYSE,USD,Common Stock,US0138721065,False
+AACB,AACB,AACB.US,Artius II Acquisition Inc. Class A Ordinary Shares,USA,NASDAQ,USD,Common Stock,KYG0509J1159,False
+AACG,AACG,AACG.US,ATA Creativity Global,USA,NASDAQ,USD,Common Stock,US00211V1061,False
+AACO,AACO,AACO.US,Abony Acquisition Corp. I Class A Ordinary Share,USA,NASDAQ,USD,Common Stock,,False
+AAL,AAL,AAL.US,American Airlines Group,USA,NASDAQ,USD,Common Stock,US02376R1023,False
+AAM,AAM,AAM.US,AA Mission Acquisition Corp.,USA,NYSE,USD,Common Stock,KYG1000R1011,False
+AAME,AAME,AAME.US,Atlantic American Corporation,USA,NASDAQ,USD,Common Stock,US0482091008,False
+AAMI,AAMI,AAMI.US,Acadian Asset Management Inc,USA,NYSE,USD,Common Stock,US10948W1036,False
+AAOI,AAOI,AAOI.US,Applied Opt,USA,NASDAQ,USD,Common Stock,US03823U1025,False
+AAON,AAON,AAON.US,AAON Inc,USA,NASDAQ,USD,Common Stock,US0003602069,False
+AAP,AAP,AAP.US,Advance Auto Parts Inc,USA,NYSE,USD,Common Stock,US00751Y1064,False
+AAPG,AAPG,AAPG.US,Ascentage Pharma Group International,USA,NASDAQ,USD,Common Stock,KYG0519B1023,False
+AARD,AARD,AARD.US,"Aardvark Therapeutics, Inc. Common Stock",USA,NASDAQ,USD,Common Stock,US0029421007,False
+AAT,AAT,AAT.US,American Assets Trust Inc,USA,NYSE,USD,Common Stock,US0240131047,False
+AAUC,AAUC,AAUC.US,Allied Gold Corporation,USA,NYSE,USD,Common Stock,CA01921D2041,False
+AB,AB,AB.US,AllianceBernstein Holding L.P. ,USA,NYSE,USD,Common Stock,US01881G1067,False
+ABAT,ABAT,ABAT.US,American Battery Technology Company Common Stock,USA,NASDAQ,USD,Common Stock,US02451V3096,False
+ABBV,ABBV,ABBV.US,AbbVie Inc,USA,NYSE,USD,Common Stock,US00287Y1091,False
+ABCB,ABCB,ABCB.US,Ameris Bancorp,USA,NYSE,USD,Common Stock,US03076K1088,False
+ABCL,ABCL,ABCL.US,Abcellera Biologics Inc,USA,NASDAQ,USD,Common Stock,CA00288U1066,False
+ABEO,ABEO,ABEO.US,Abeona Therapeutics Inc,USA,NASDAQ,USD,Common Stock,US00289Y2063,False
+ABEV,ABEV,ABEV.US,Ambev SA ADR,USA,NYSE,USD,Common Stock,US02319V1035,False
+ABG,ABG,ABG.US,Asbury Automotive Group Inc,USA,NYSE,USD,Common Stock,US0434361046,False
+ABLV,ABLV,ABLV.US,Able View Global Inc. Class B Ordinary Shares,USA,NASDAQ,USD,Common Stock,KYG1149B1086,False
+ABM,ABM,ABM.US,ABM Industries Incorporated,USA,NYSE,USD,Common Stock,US0009571003,False
+ABNB,ABNB,ABNB.US,Airbnb Inc,USA,NASDAQ,USD,Common Stock,US0090661010,False
+ABOS,ABOS,ABOS.US,Acumen Pharmaceuticals Inc,USA,NASDAQ,USD,Common Stock,US00509G2093,False
+ABOT,ABOT,ABOT.US,ABOT,USA,BATS,USD,Common Stock,US89628W5004,False
+ABP,ABP,ABP.US,"Abpro Holdings, Inc.",USA,NYSE,USD,Common Stock,US0008471031,False
+ABR,ABR,ABR.US,Arbor Realty Trust,USA,NYSE,USD,Common Stock,US0389231087,False
+ABSI,ABSI,ABSI.US,Absci Corp,USA,NASDAQ,USD,Common Stock,US00091E1091,False
+ABT,ABT,ABT.US,Abbott Laboratories,USA,NYSE,USD,Common Stock,US0028241000,False
+ABTC,ABTC,ABTC.US,American Bitcoin Corp,USA,NASDAQ,USD,Common Stock,US02462A1043,False
+ABTS,ABTS,ABTS.US,Abits Group Inc.,USA,NASDAQ,USD,Common Stock,VGG6S34K1136,False
+ABUS,ABUS,ABUS.US,Arbutus Biopharma Corp,USA,NASDAQ,USD,Common Stock,CA03879J1003,False
+ABVC,ABVC,ABVC.US,ABVC Biopharma Inc,USA,NASDAQ,USD,Common Stock,US00091F1066,False
+ABVE,ABVE,ABVE.US,Above Food Ingredients Inc. Common Stock,USA,NASDAQ,USD,Common Stock,CA00373V1004,False
+ABVX,ABVX,ABVX.US,Abivax SA American Depositary Shares,USA,NASDAQ,USD,Common Stock,US00370M1036,False
+ABX,ABX,ABX.US,"Abacus Global Management, Inc.",USA,NASDAQ,USD,Common Stock,US00258Y1047,False
+ABXL,ABXL,ABXL.US,ABXL,USA,NYSE,USD,Common Stock,,False
+ACA,ACA,ACA.US,Arcosa Inc,USA,NYSE,USD,Common Stock,US0396531008,False
+ACAA,ACAA,ACAA.US,Averin Capital Acquisition Corp. Class A Ordinary Shares,USA,NASDAQ,USD,Common Stock,,False
+ACAD,ACAD,ACAD.US,ACADIA Pharmaceuticals Inc,USA,NASDAQ,USD,Common Stock,US0042251084,False
+ACB,ACB,ACB.US,Aurora Cannabis Inc,USA,NASDAQ,USD,Common Stock,CA05156X8504,False
+ACCL,ACCL,ACCL.US,Acco Group Holdings Limited Ordinary Shares,USA,NASDAQ,USD,Common Stock,KYG0069D1108,False
+ACCO,ACCO,ACCO.US,Acco Brands Corporation,USA,NYSE,USD,Common Stock,US00081T1088,False
+ACCS,ACCS,ACCS.US,ACCESS Newswire Inc.,USA,NYSE MKT,USD,Common Stock,US46520M2044,False
+ACDC,ACDC,ACDC.US,ProFrac Holding Corp.,USA,NASDAQ,USD,Common Stock,US74319N1000,False
+ACEL,ACEL,ACEL.US,Accel Entertainment Inc,USA,NYSE,USD,Common Stock,US00436Q1067,False
+ACET,ACET,ACET.US,Adicet Bio Inc,USA,NASDAQ,USD,Common Stock,US0070021086,False
+ACGL,ACGL,ACGL.US,Arch Capital Group Ltd,USA,NASDAQ,USD,Common Stock,BMG0450A1053,False
+ACH,ACH,ACH.US,Accendra Health Inc,USA,NYSE,USD,Common Stock,US6907321029,False
+ACHC,ACHC,ACHC.US,Acadia Healthcare Company Inc,USA,NASDAQ,USD,Common Stock,US00404A1097,False
+ACHR,ACHR,ACHR.US,Archer Aviation Inc,USA,NYSE,USD,Common Stock,US03945R1023,False
+ACHV,ACHV,ACHV.US,Achieve Life Sciences Inc,USA,NASDAQ,USD,Common Stock,US0044685008,False
+ACI,ACI,ACI.US,Albertsons Companies,USA,NYSE,USD,Common Stock,US0130911037,False
+ACIC,ACIC,ACIC.US,American Coastal Insurance Corp,USA,NASDAQ,USD,Common Stock,US9107101027,False
+ACIU,ACIU,ACIU.US,AC Immune Ltd,USA,NASDAQ,USD,Common Stock,CH0329023102,False
+ACIW,ACIW,ACIW.US,ACI Worldwide Inc,USA,NASDAQ,USD,Common Stock,US0044981019,False
+ACLS,ACLS,ACLS.US,Axcelis Technologies Inc,USA,NASDAQ,USD,Common Stock,US0545402085,False
+ACLX,ACLX,ACLX.US,Arcellx Inc,USA,NASDAQ,USD,Common Stock,US03940C1009,False
+ACM,ACM,ACM.US,Aecom Technology Corporation,USA,NYSE,USD,Common Stock,US00766T1007,False
+ACMR,ACMR,ACMR.US,Acm Research Inc,USA,NASDAQ,USD,Common Stock,US00108J1097,False
+ACN,ACN,ACN.US,Accenture plc,USA,NYSE,USD,Common Stock,IE00B4BNMY34,False
+ACNB,ACNB,ACNB.US,ACNB Corporation,USA,NASDAQ,USD,Common Stock,US0008681092,False
+ACNT,ACNT,ACNT.US,Synalloy Corporation,USA,NASDAQ,USD,Common Stock,US8715651076,False
+ACOG,ACOG,ACOG.US,Alpha Cognition Inc,USA,NASDAQ,USD,Common Stock,CA02074J5017,False
+ACON,ACON,ACON.US,Aclarion Inc,USA,NASDAQ,USD,Common Stock,US6551871022,False
+ACR,ACR,ACR.US,Acres Commercial Realty Corp,USA,NYSE,USD,Common Stock,US00489Q1022,False
+ACRE,ACRE,ACRE.US,Ares Commercial Real Estate,USA,NYSE,USD,Common Stock,US04013V1089,False
+ACRS,ACRS,ACRS.US,Aclaris Therapeutics Inc,USA,NASDAQ,USD,Common Stock,US00461U1051,False
+ACRV,ACRV,ACRV.US,"Acrivon Therapeutics, Inc. Common Stock",USA,NASDAQ,USD,Common Stock,US0048901096,False
+ACT,ACT,ACT.US,Enact Holdings Inc,USA,NASDAQ,USD,Common Stock,US29249E1091,False
+ACTG,ACTG,ACTG.US,Acacia Research Corporation,USA,NASDAQ,USD,Common Stock,US0038813079,False
+ACTU,ACTU,ACTU.US,"Actuate Therapeutics, Inc. Common stock",USA,NASDAQ,USD,Common Stock,US0050831009,False
+ACVA,ACVA,ACVA.US,ACV Auctions Inc.,USA,NYSE,USD,Common Stock,US00091G1040,False
+ACXP,ACXP,ACXP.US,Acurx Pharmaceuticals LLC,USA,NASDAQ,USD,Common Stock,US00510M1045,False
+ACYN,ACYN,ACYN.US,First Trust Exchange-Traded Fund,USA,NYSE ARCA,USD,Common Stock,,False
+ACYS,ACYS,ACYS.US,ACYS,USA,NYSE ARCA,USD,Common Stock,,False
+AD,AD,AD.US,"Array Digital Infrastructure, Inc.",USA,NYSE,USD,Common Stock,US9116841084,False
+ADAG,ADAG,ADAG.US,Adagene Inc,USA,NASDAQ,USD,Common Stock,US0053291078,False
+ADAM,ADAM,ADAM.US,"New York Mortgage Trust, Inc.",USA,NASDAQ,USD,Common Stock,,False
+ADAMG,ADAMG,ADAMG.US,"Adamas Trust, Inc.",USA,NASDAQ,USD,Common Stock,,False
+ADAMH,ADAMH,ADAMH.US,"Adamas Trust, Inc.",USA,NASDAQ,USD,Common Stock,,False
+ADAMI,ADAMI,ADAMI.US,"New York Mortgage Trust, Inc. 9.125% Senior Notes Due 2029",USA,NASDAQ,USD,Common Stock,,False
+ADAMM,ADAMM,ADAMM.US,"New York Mortgage Trust, Inc.",USA,NASDAQ,USD,Common Stock,,False
+ADAMN,ADAMN,ADAMN.US,"Adamas Trust, Inc",USA,NASDAQ,USD,Common Stock,,False
+ADAMO,ADAMO,ADAMO.US,"Adamas Trust, Inc. 9.250% Senior Notes Due 2031",USA,NASDAQ,USD,Common Stock,,False
+ADAMZ,ADAMZ,ADAMZ.US,"Adamas Trust, Inc",USA,NASDAQ,USD,Common Stock,,False
+ADBE,ADBE,ADBE.US,Adobe Systems Incorporated,USA,NASDAQ,USD,Common Stock,US00724F1012,False
+ADC,ADC,ADC.US,Agree Realty Corporation,USA,NYSE,USD,Common Stock,US0084921008,False
+ADCT,ADCT,ADCT.US,ADC Therapeutics SA,USA,NYSE,USD,Common Stock,CH0499880968,False
+ADEA,ADEA,ADEA.US,ADEIA CORP,USA,NASDAQ,USD,Common Stock,US98390M1036,False
+ADGM,ADGM,ADGM.US,"Adagio Medical Holdings, Inc Common Stock",USA,NASDAQ,USD,Common Stock,US00534B1008,False
+ADI,ADI,ADI.US,Analog Devices Inc,USA,NASDAQ,USD,Common Stock,US0326541051,False
+ADIL,ADIL,ADIL.US,Adial Pharmaceuticals Inc,USA,NASDAQ,USD,Common Stock,US00688A1060,False
+ADM,ADM,ADM.US,Archer-Daniels-Midland Company,USA,NYSE,USD,Common Stock,US0394831020,False
+ADMA,ADMA,ADMA.US,ADMA Biologics Inc,USA,NASDAQ,USD,Common Stock,US0008991046,False
+ADNT,ADNT,ADNT.US,Adient PLC,USA,NYSE,USD,Common Stock,IE00BD845X29,False
+ADP,ADP,ADP.US,Automatic Data Processing Inc,USA,NASDAQ,USD,Common Stock,US0530151036,False
+ADPT,ADPT,ADPT.US,Adaptive Biotechnologies Corp,USA,NASDAQ,USD,Common Stock,US00650F1093,False
+ADSE,ADSE,ADSE.US,Ads Tec Energy PLC,USA,NASDAQ,USD,Common Stock,IE000DU292E6,False
+ADSK,ADSK,ADSK.US,Autodesk Inc,USA,NASDAQ,USD,Common Stock,US0527691069,False
+ADT,ADT,ADT.US,ADT Inc,USA,NYSE,USD,Common Stock,US00090Q1031,False
+ADTN,ADTN,ADTN.US,ADTRAN Inc,USA,NASDAQ,USD,Common Stock,US00486H1059,False
+ADTX,ADTX,ADTX.US,Aditxt Inc. ,USA,NASDAQ,USD,Common Stock,US0070251097,False
+ADUS,ADUS,ADUS.US,Addus HomeCare Corporation,USA,NASDAQ,USD,Common Stock,US0067391062,False
+ADV,ADV,ADV.US,Advantage Solutions Inc,USA,NASDAQ,USD,Common Stock,US00791N1028,False
+ADVB,ADVB,ADVB.US,Advanced Biomed Inc. Common Stock,USA,NASDAQ,USD,Common Stock,US00752P1049,False
+ADXN,ADXN,ADXN.US,Addex Therapeutics Ltd,USA,NASDAQ,USD,Common Stock,US00654J2069,False
+AEAE,AEAE,AEAE.US,Altenergy Acquisition Corp,USA,NASDAQ,USD,Common Stock,US02157M1080,False
+AEAQ,AEAQ,AEAQ.US,Activate Energy Acquisition Corp. Class A Ordinary Share,USA,NASDAQ,USD,Common Stock,,False
+AEBI,AEBI,AEBI.US,Aebi Schmidt Holding AG - Common Stock,USA,NASDAQ,USD,Common Stock,CH0027352993,False
+AEC,AEC,AEC.US,Anfield Energy Inc.,USA,NASDAQ,USD,Common Stock,,False
+AEE,AEE,AEE.US,Ameren Corp,USA,NYSE,USD,Common Stock,US0236081024,False
+AEG,AEG,AEG.US,Aegon NV ADR,USA,NYSE,USD,Common Stock,US0076CA1045,False
+AEHL,AEHL,AEHL.US,Antelope Enterprise Holdings Ltd,USA,NASDAQ,USD,Common Stock,VGG041JN1065,False
+AEHR,AEHR,AEHR.US,Aehr Test Systems,USA,NASDAQ,USD,Common Stock,US00760J1088,False
+AEI,AEI,AEI.US,Alset Ehome International Inc,USA,NASDAQ,USD,Common Stock,US02116A1043,False
+AEIS,AEIS,AEIS.US,Advanced Energy Industries Inc,USA,NASDAQ,USD,Common Stock,US0079731008,False
+AEM,AEM,AEM.US,Agnico Eagle Mines Limited,USA,NYSE,USD,Common Stock,CA0084741085,False
+AEMD,AEMD,AEMD.US,Aethlon Medical Inc,USA,NASDAQ,USD,Common Stock,US00808Y3071,False
+AENT,AENT,AENT.US,Alliance Entertainment Holding Corporation Class A Common Stock,USA,NASDAQ,USD,Common Stock,US01861F1021,False
+AEO,AEO,AEO.US,American Eagle Outfitters Inc,USA,NYSE,USD,Common Stock,US02553E1064,False
+AEON,AEON,AEON.US,"AEON Biopharma, Inc.",USA,NYSE MKT,USD,Common Stock,US00775E1029,False
+AEP,AEP,AEP.US,American Electric Power Co Inc,USA,NASDAQ,USD,Common Stock,US0255371017,False
+AER,AER,AER.US,AerCap Holdings NV,USA,NYSE,USD,Common Stock,NL0000687663,False
+AERO,AERO,AERO.US,"Grupo AeromÃ©xico, S.A.B. de C.V.",USA,NYSE,USD,Common Stock,,False
+AERT,AERT,AERT.US,Aeries Technology Inc.,USA,NASDAQ,USD,Common Stock,KYG0136H1020,False
+AES,AES,AES.US,The AES Corporation,USA,NYSE,USD,Common Stock,US00130H1059,False
+AESI,AESI,AESI.US,Atlas Energy Solutions Inc.,USA,NYSE,USD,Common Stock,US6420451089,False
+AEVA,AEVA,AEVA.US,"Aeva Technologies, Inc. Common Stock",USA,NASDAQ,USD,Common Stock,US00835Q1031,False
+AEXA,AEXA,AEXA.US,American Exceptionalism Acquisition Corp. A,USA,NYSE,USD,Common Stock,KYG0273J1013,False
+AEYE,AEYE,AEYE.US,AudioEye Inc,USA,NASDAQ,USD,Common Stock,US0507342014,False
+AFBI,AFBI,AFBI.US,Affinity Bancshares Inc,USA,NASDAQ,USD,Common Stock,US00832E1038,False
+AFCG,AFCG,AFCG.US,AFC Gamma Inc,USA,NASDAQ,USD,Common Stock,US00109K1051,False
+AFG,AFG,AFG.US,American Financial Group Inc,USA,NYSE,USD,Common Stock,US0259321042,False
+AFGE,AFGE,AFGE.US,"American Financial Group, Inc.",USA,NYSE,USD,Common Stock,US0259328641,False
+AFJK,AFJK,AFJK.US,"Aimei Health Technology Co., Ltd Ordinary Share",USA,NASDAQ,USD,Common Stock,KYG013411171,False
+AFL,AFL,AFL.US,Aflac Incorporated,USA,NYSE,USD,Common Stock,US0010551028,False

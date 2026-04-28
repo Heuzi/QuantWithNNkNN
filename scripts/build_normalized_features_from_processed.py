@@ -12,8 +12,8 @@ from src.data.massive_stage1 import write_csv, write_json  # noqa: E402
 from src.data.normalization import (  # noqa: E402
     build_normalized_manifest,
     compute_normalized_feature_rows,
+    load_equity_metadata,
     load_processed_feature_rows,
-    load_sp500_constituent_metadata,
 )
 
 
@@ -23,8 +23,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--dataset-root",
-        required=True,
-        help="Dataset folder containing processed/daily_features.csv and raw/sp500_constituents_current.csv.",
+        default="data/eodhd_us_equities_30y",
+        help="Dataset folder containing processed/daily_features.csv and raw/eodhd_equity_metadata.csv.",
     )
     return parser.parse_args()
 
@@ -33,7 +33,7 @@ def main() -> None:
     args = parse_args()
     dataset_root = Path(args.dataset_root)
     input_path = dataset_root / "processed" / "daily_features.csv"
-    sector_path = dataset_root / "raw" / "sp500_constituents_current.csv"
+    sector_path = dataset_root / "raw" / "eodhd_equity_metadata.csv"
     output_path = dataset_root / "processed" / "daily_features_normalized.csv"
     manifest_path = dataset_root / "processed" / "daily_features_normalized_manifest.json"
 
@@ -43,7 +43,7 @@ def main() -> None:
         raise SystemExit(f"Sector metadata file not found: {sector_path}")
 
     feature_rows = load_processed_feature_rows(input_path)
-    sector_metadata = load_sp500_constituent_metadata(sector_path)
+    sector_metadata = load_equity_metadata(sector_path)
     normalized_rows = compute_normalized_feature_rows(feature_rows, sector_metadata)
 
     trade_dates = [str(row["date"]) for row in normalized_rows if row.get("date")]

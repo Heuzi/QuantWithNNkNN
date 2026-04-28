@@ -392,7 +392,6 @@ def compute_daily_features(bars: Sequence[dict[str, object]]) -> list[dict[str, 
             open_ = row.get("open")
             high = row.get("high")
             low = row.get("low")
-            vwap = row.get("vwap")
             volume = row.get("volume")
             dollar_volume = row.get("dollar_volume")
 
@@ -402,7 +401,6 @@ def compute_daily_features(bars: Sequence[dict[str, object]]) -> list[dict[str, 
             gap_pct = None
             intraday_return = None
             hl_range_pct = None
-            close_to_vwap_pct = None
             close_location = None
             true_range_pct = None
 
@@ -423,9 +421,6 @@ def compute_daily_features(bars: Sequence[dict[str, object]]) -> list[dict[str, 
                 low_f = float(low)
                 true_range = max(high_f - low_f, abs(high_f - prev_close), abs(low_f - prev_close))
                 true_range_pct = true_range / prev_close
-            if close not in (None, 0) and vwap not in (None, 0):
-                close_to_vwap_pct = (float(close) / float(vwap)) - 1.0
-
             rolling_return_5d = None
             rolling_return_20d = None
             rolling_return_60d = None
@@ -500,7 +495,6 @@ def compute_daily_features(bars: Sequence[dict[str, object]]) -> list[dict[str, 
                     "gap_pct": gap_pct,
                     "intraday_return": intraday_return,
                     "hl_range_pct": hl_range_pct,
-                    "close_to_vwap_pct": close_to_vwap_pct,
                     "close_location": close_location,
                     "true_range_pct": true_range_pct,
                     "rolling_return_5d": rolling_return_5d,

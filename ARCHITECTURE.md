@@ -68,6 +68,8 @@ V1 implementation note:
 - run all saved models for latest prediction windows so users can compare agreement and disagreement
 
 Current implementation snapshot:
+- Default daily market data source is now EODHD, targeting `data/eodhd_us_equities_30y`.
+- Massive-era datasets and model artifacts are legacy and should not be compared directly against EODHD full-universe results.
 - `scripts/train_v1_supervised_baselines.py` now defaults to expanding-window walk-forward evaluation.
 - The current baseline suite now supports both regression and event classification.
 - Regression still uses the multi-horizon market-adjusted return targets.
@@ -96,7 +98,6 @@ Each day in the rolling window may include:
 - volume changes
 - technical indicators
 - price-vs-moving-average features
-- close-vs-VWAP features
 - log-scaled liquidity features
 - same-date cross-sectional normalized features
 - same-date same-sector relative features
@@ -162,7 +163,7 @@ For example:
 These tabular features are compressed and denoised compared with the raw daily token stream.
 
 Raw level guardrail:
-- model inputs must not include raw price, raw volume, raw dollar-volume, raw VWAP, raw previous-close, or raw moving-average level columns
+- model inputs must not include raw price, raw volume, raw dollar-volume, legacy raw VWAP, raw previous-close, or raw moving-average level columns
 - use returns, ratios, same-date normalizations, percentile ranks, and `log1p_*` liquidity fields instead
 - `src.data.v1_dataset.validate_model_feature_columns` enforces this for tabular and sequence feature columns
 
@@ -337,6 +338,23 @@ Use:
 - rolling or walk-forward splits
 - strictly later validation and test windows
 - regime-aware reporting if possible
+
+Current V1 walk-forward protocol:
+- Each fold uses an expanding training window.
+- The validation block is strictly later than the training block and is used for model selection or early stopping when the model supports it.
+- A purge gap separates validation from OOS testing. The default purge gap is the maximum forward target horizon, currently `20` trading days.
+- The OOS test block is strictly later than the purge gap and is used only for scoring, not for training or model selection.
+- After an OOS block is scored, it can join the expanding training history for later folds.
+
+The purge gap exists because targets are forward-looking windows. For example, a 20-day validation target uses future prices after the validation anchor date. Starting OOS immediately after validation would make validation label windows overlap with OOS periods, so the gap keeps OOS scoring more independent.
+
+Current final deploy training:
+- After walk-forward scoring, the trainer fits final deployment bundles for selected model/feature combinations.
+- It reserves the latest resolved `final_stop_block_size` trading dates, default `21`, as a final validation tail.
+- It trains on the earlier resolved dates and uses that final validation tail for early stopping or best-epoch/best-iteration selection.
+- If the model implements `refit_full`, it is then reinitialized and trained again on all resolved dates for the selected number of epochs/iterations.
+- Final deploy performance is not reported from this refit. Reported performance comes from the earlier OOS walk-forward blocks.
+- Sequence-static final deploy models follow the same rule: pick `best_epoch_` from the final train/validation split, then retrain on all resolved sequence episodes for `best_epoch_` epochs.
 
 Report:
 - RMSE

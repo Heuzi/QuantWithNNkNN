@@ -96,6 +96,17 @@ def _as_array(frame: pd.DataFrame | np.ndarray) -> np.ndarray:
     return np.asarray(frame, dtype=np.float64)
 
 
+def _as_2d_prediction_array(values: np.ndarray, *, expected_columns: int) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 1-D or 2-D prediction array, got shape {arr.shape}.")
+    if arr.shape[1] != expected_columns:
+        raise ValueError(f"Expected {expected_columns} prediction columns, got {arr.shape[1]}.")
+    return arr
+
+
 def _hstack_static_arrays(static_categorical: dict[str, np.ndarray], columns: Sequence[str]) -> np.ndarray:
     if not columns:
         return np.empty((len(next(iter(static_categorical.values()), [])), 0), dtype=np.int64)
@@ -2202,6 +2213,7 @@ def evaluate_predictions(
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     true_values = y_true[target_columns].astype(float).to_numpy()
+    y_pred = _as_2d_prediction_array(y_pred, expected_columns=len(target_columns))
     for idx, target in enumerate(target_columns):
         actual = true_values[:, idx]
         pred = y_pred[:, idx]
@@ -2257,6 +2269,7 @@ def evaluate_classification_predictions(
 
     rows: list[dict[str, object]] = []
     true_values = y_true[target_columns].astype(float).to_numpy()
+    y_score = _as_2d_prediction_array(y_score, expected_columns=len(target_columns))
     realized = None
     if realized_returns is not None and realized_return_column and realized_return_column in realized_returns.columns:
         realized = realized_returns[realized_return_column].astype(float).to_numpy()
@@ -2324,6 +2337,7 @@ def prediction_frame(
     task_type: str = "regression",
 ) -> pd.DataFrame:
     metadata_columns = ["ticker", "anchor_date"]
+    y_pred = _as_2d_prediction_array(y_pred, expected_columns=len(target_columns))
     if "anchor_close" in metadata.columns:
         metadata_columns.append("anchor_close")
     out = metadata[metadata_columns].copy()

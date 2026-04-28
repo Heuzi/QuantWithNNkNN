@@ -1,0 +1,2 @@
+# Copy this file to EODHD_api_key or set EODHD_API_KEY in your environment.
+EODHD_API_KEY=replace_with_your_eodhd_api_key

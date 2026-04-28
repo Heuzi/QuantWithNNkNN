@@ -3,7 +3,7 @@
 ## Purpose
 This document defines the backtest-safe dataset schema for the quant return-prediction project.
 
-Current primary vendor: **Massive**
+Current primary vendor: **EODHD**
 
 This schema is intentionally conservative. If a field's historical availability is unclear, treat it as unsafe until verified.
 
@@ -53,7 +53,6 @@ Examples:
 - close
 - adjusted price fields if available and appropriate
 - volume
-- VWAP if available
 - daily returns
 - rolling returns
 - rolling volatility
@@ -61,7 +60,6 @@ Examples:
 - gap features
 - momentum features
 - price-vs-moving-average features
-- close-vs-VWAP features
 - log-scaled liquidity features
 - same-date cross-sectional z-scores
 - same-date cross-sectional percentile ranks
@@ -269,7 +267,7 @@ Compact profile policy:
 - prefer `log_return_1d` over both `return_1d` and `log_return_1d`
 - use `rolling_return_*` and drop current exact `momentum_*` aliases
 - prefer `log1p_dollar_volume` over carrying every overlapping volume and dollar-volume level
-- keep Priority A daily shape/liquidity/regime fields because they are low-cost and available from the current Massive OHLCV/context tables
+- keep Priority A daily shape/liquidity/regime fields because they are low-cost and available from the current EODHD OHLCV/context tables
 - keep z-score relative features and drop percentile-rank counterparts for the first compact ablation
 - keep a smaller context set focused on returns, volatility, trend, and liquidity ratio
 
@@ -278,7 +276,7 @@ Rules:
 - summarize the prior `window_length` trading days ending on `anchor_date`
 - summarize each selected daily feature as `__last`, `__mean60`, and `__std60`
 - do not include target columns or future-derived values
-- do not include raw level fields such as `open`, `high`, `low`, `close`, `volume`, `dollar_volume`, `vwap`, raw moving averages, or raw previous close in model inputs
+- do not include raw level fields such as `open`, `high`, `low`, `close`, `volume`, `dollar_volume`, legacy `vwap`, raw moving averages, or raw previous close in model inputs
 - use transformed alternatives such as returns, ratios, z-scores, percentile ranks, and `log1p_*` liquidity fields
 
 Example columns:
@@ -381,14 +379,24 @@ Do not:
 - use global dataset statistics computed across future periods in a leakage-prone way
 - drop rows in ways that create unintended survivorship bias without documenting it
 
-## Massive-specific cautions
-Use Massive as the primary vendor for now, but assume the following:
-- ticker-history behavior looked promising in early manual checks
-- news timestamps looked usable
-- historical news ticker labels may not always be trustworthy for renamed/reused symbols
-- financial endpoints must be verified for entitlement and time semantics before being treated as fully backtest-safe
-- derived ratios should be audited before use in final experiments
-- current-constituent cross-sectional panels are acceptable for development, but are not the same as a historically point-in-time index membership panel
+## EODHD-specific cautions
+Use EODHD as the primary vendor for current V1 daily-market data.
+
+Current EODHD V1 policy:
+- default dataset root: `data/eodhd_us_equities_30y`
+- first full universe: listed U.S. common stocks plus delisted names
+- exclude ETFs, funds, and OTC/PINK from the target universe for the first rebuild
+- merge current and delisted EODHD symbol-list views; live checks showed `delisted=1` behaves as delisted-only
+- keep `SPY` and sector ETFs only as context instruments
+- use EODHD `adjusted_close` to build adjusted internal OHLC close series when available
+- derive `dollar_volume` locally as adjusted internal `close * volume`
+- do not use EODHD EOD `vwap` or transactions because the daily EOD endpoint does not provide them
+- do not treat EODHD fundamentals metadata as point-in-time fundamentals until filing/public availability logic is added
+
+Known risks:
+- ticker identity and symbol reuse are not fully solved by the daily bar adapter
+- delisted coverage and metadata should be audited before final trading-style evaluation
+- raw volume is not currently corporate-action adjusted by the adapter
 
 ## Suggested feature families
 
@@ -398,7 +406,7 @@ Use Massive as the primary vendor for now, but assume the following:
 - rolling volatility
 - rolling average volume
 - log-scaled volume and dollar-volume features
-- price-vs-SMA and close-vs-VWAP features
+- price-vs-SMA features
 - same-date cross-sectional z-scores or percentile ranks for selected continuous features
 - same-date same-sector relative versions for selected liquidity / momentum / volatility features
 - simple technical indicators
@@ -434,6 +442,24 @@ Use:
 - walk-forward train/validation/test
 - rolling windows
 - regime-aware analysis when possible
+
+V1 supervised split semantics:
+- One supervised row is one stock-window episode: `(ticker, anchor_date, prior window features)`.
+- Training, validation, and OOS test splits are assigned by `anchor_date`, not by randomly shuffling episodes.
+- Current default input window is `60` trading days ending on `anchor_date`.
+- Current regression labels are future market-adjusted returns measured after `anchor_date`, such as 5, 10, and 20 trading days forward.
+- Current classification label is `market_outperform_any_20d_gt_5pct`, positive when pathwise market-adjusted outperformance exceeds `5%` within the next 20 trading days.
+- Walk-forward folds use an expanding training date range, then a later validation block, then a purge gap, then a later OOS test block.
+- The default purge gap is the maximum forward target horizon, currently `20` trading days, to avoid validation target windows bleeding into OOS scoring windows.
+- Later folds have more training episodes because scored history is allowed to join the expanding training range.
+
+Final deploy fit semantics:
+- The final deploy fit is separate from reported OOS performance.
+- The trainer reserves the latest resolved `final_stop_block_size` trading dates, default `21`, as a final validation tail.
+- Validation-aware models use that tail to choose early-stopping iteration or best epoch.
+- The deploy model is then refit on all resolved episodes when the model supports `refit_full`.
+- For sequence-static models, this means choosing `best_epoch_` on the final train/validation split, then retraining on all resolved 60-day sequence episodes for that many epochs.
+- Dates whose future target windows are not fully resolved remain target-pending and should not enter supervised train/validation/OOS scoring.
 
 ## Auditability requirements
 Every feature family should record:

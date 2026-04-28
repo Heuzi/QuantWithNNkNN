@@ -448,6 +448,8 @@ class V1SupervisedBaselineTests(unittest.TestCase):
                     "4",
                     "--walk-forward-oos-block-size",
                     "4",
+                    "--walk-forward-max-folds",
+                    "2",
                     "--walk-forward-purge-gap",
                     "5",
                     "--final-stop-block-size",
@@ -473,6 +475,8 @@ class V1SupervisedBaselineTests(unittest.TestCase):
 
             comparison_summary = json.loads((walk_run / "comparison_summary.json").read_text(encoding="utf-8"))
             self.assertGreaterEqual(int(comparison_summary["matched_combo_count"]), 1)
+            folds = json.loads((walk_run / "folds.json").read_text(encoding="utf-8"))["folds"]
+            self.assertLessEqual(len(folds), 2)
 
             subprocess.run(
                 [

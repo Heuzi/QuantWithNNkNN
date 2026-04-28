@@ -32,6 +32,17 @@ OTC_EXCHANGES = {
     "PINK",
 }
 
+NON_COMMON_SECURITY_NAME_MARKERS = (
+    "warrant",
+    "warrants",
+    "unit",
+    "units",
+    "right",
+    "rights",
+    "preferred",
+    "preference",
+)
+
 EODHD_DAILY_BAR_HEADERS = [
     "date",
     "ticker",
@@ -312,6 +323,20 @@ def _as_bool(value: object) -> bool | None:
     return None
 
 
+def _looks_like_non_common_equity(code: str, name: str) -> bool:
+    normalized_code = str(code).strip().upper()
+    normalized_name = str(name or "").strip().lower()
+    if any(marker in normalized_name for marker in NON_COMMON_SECURITY_NAME_MARKERS):
+        return True
+    if "-" in normalized_code:
+        suffix = normalized_code.rsplit("-", 1)[-1]
+        if suffix in {"W", "WS", "WT", "R", "RT", "U", "UN", "P", "PR", "PRA", "PRB", "PRC", "PRD"}:
+            return True
+    if "-" not in normalized_code and len(normalized_code) >= 5 and normalized_code[-1] in {"D", "W", "R", "U", "P"}:
+        return True
+    return False
+
+
 def normalize_eodhd_eod_rows(
     rows: Sequence[dict[str, object]],
     *,
@@ -369,6 +394,9 @@ def normalize_exchange_symbol_rows(
         code = str(row.get("Code") or row.get("code") or "").strip().upper()
         if not code:
             continue
+        name = str(row.get("Name") or row.get("name") or "")
+        if _looks_like_non_common_equity(code, name):
+            continue
         row_exchange = str(row.get("Exchange") or exchange or "").strip().upper()
         if not include_otc and row_exchange in OTC_EXCHANGES:
             continue
@@ -388,7 +416,7 @@ def normalize_exchange_symbol_rows(
                 "symbol": code,
                 "ticker": internal_ticker_from_eodhd_symbol(eodhd_symbol),
                 "eodhd_symbol": eodhd_symbol,
-                "name": row.get("Name") or row.get("name"),
+                "name": name or None,
                 "country": row.get("Country") or row.get("country"),
                 "exchange": row_exchange,
                 "currency": currency or None,

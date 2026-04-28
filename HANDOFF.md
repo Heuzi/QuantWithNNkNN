@@ -15,6 +15,7 @@ Use this file as the shared handoff note when switching between computers or Cod
 - Goal: Build a 30-year EODHD U.S. listed common-stock dataset, include delisted names, drop VWAP/transaction-derived features, and treat all Massive-era artifacts as legacy.
 - Current default dataset root: `data/eodhd_us_equities_30y`.
 - Current target universe policy: listed U.S. common stocks plus delisted names; exclude ETFs, funds, and OTC/PINK from target assets.
+- Universe filtering also excludes units, warrants, rights, and preferred/preference shares when EODHD labels those rows as common stock.
 - Context instruments remain `SPY` plus sector ETFs and are stored in the separate market-context table.
 
 ## Current Branch And State

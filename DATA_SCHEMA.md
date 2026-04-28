@@ -386,6 +386,7 @@ Current EODHD V1 policy:
 - default dataset root: `data/eodhd_us_equities_30y`
 - first full universe: listed U.S. common stocks plus delisted names
 - exclude ETFs, funds, and OTC/PINK from the target universe for the first rebuild
+- exclude listed units, warrants, rights, and preferred/preference shares even if a vendor symbol-list row labels them as common stock
 - merge current and delisted EODHD symbol-list views; live checks showed `delisted=1` behaves as delisted-only
 - keep `SPY` and sector ETFs only as context instruments
 - use EODHD `adjusted_close` to build adjusted internal OHLC close series when available

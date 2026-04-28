@@ -63,6 +63,22 @@ class EODHDStage1Tests(unittest.TestCase):
         self.assertEqual(normalized[0]["ticker"], "OLD")
         self.assertTrue(normalized[0]["is_delisted"])
 
+    def test_symbol_list_filter_excludes_units_warrants_rights_and_preferreds(self) -> None:
+        rows = [
+            {"Code": "A", "Name": "Agilent Technologies Inc", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock"},
+            {"Code": "ACAAU", "Name": "Athena Consumer Acquisition Corp Units", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock"},
+            {"Code": "ACHR-WS", "Name": "Archer Aviation Inc Warrants", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock"},
+            {"Code": "AACBR", "Name": "Artius II Acquisition Inc Rights", "Exchange": "NASDAQ", "Currency": "USD", "Type": "Common Stock"},
+            {"Code": "ACONW", "Name": "Aclarion Inc", "Exchange": "NASDAQ", "Currency": "USD", "Type": "Common Stock"},
+            {"Code": "AAUGD", "Name": "Ault Disruptive Technologies Corp", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock"},
+            {"Code": "ABC-PR", "Name": "ABC Preferred Shares", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock"},
+            {"Code": "SNOW", "Name": "Snowflake Inc", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock"},
+        ]
+
+        normalized = normalize_exchange_symbol_rows(rows, exchange="NYSE", is_delisted=False)
+
+        self.assertEqual([row["ticker"] for row in normalized], ["A", "SNOW"])
+
     def test_eod_rows_use_adjusted_close_and_derive_dollar_volume(self) -> None:
         rows = [
             {

@@ -43,7 +43,7 @@ class MassiveStage1Tests(unittest.TestCase):
         self.assertAlmostEqual(second["return_1d"], 0.10)
         self.assertAlmostEqual(second["gap_pct"], 0.05)
         self.assertAlmostEqual(second["intraday_return"], (11.0 / 10.5) - 1.0)
-        self.assertAlmostEqual(second["close_to_vwap_pct"], (11.0 / 10.7) - 1.0)
+        self.assertNotIn("close_to_vwap_pct", second)
         self.assertAlmostEqual(second["close_location"], 1.0)
         self.assertAlmostEqual(second["true_range_pct"], (11.0 - 10.0) / 10.0)
 

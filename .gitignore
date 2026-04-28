@@ -3,6 +3,10 @@ __pycache__/
 
 # Local credentials
 MassiveApiKey
+EODHD_api_key
 
 # Generated model runs
 artifacts/
+
+# Generated EODHD datasets
+data/eodhd_*/

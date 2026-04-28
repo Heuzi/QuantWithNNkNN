@@ -58,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--dataset-root",
-        default="data/massive_sp500_current_constituents_history",
+        default="data/eodhd_us_equities_30y",
         help="Dataset folder containing processed daily features and market context features.",
     )
     parser.add_argument("--output-root", default="artifacts/v1_baselines", help="Artifact output root.")
@@ -832,7 +832,7 @@ def main() -> None:
     stock_features = load_daily_features(args.dataset_root)
     context_features = load_market_context_features(args.dataset_root, stock_features=stock_features)
     if context_features.empty:
-        raise SystemExit("Market context features are missing. Run scripts/collect_massive_market_context.py first.")
+        raise SystemExit("Market context features are missing. Run scripts/update_eodhd_daily_dataset.py first.")
 
     print("Building V1 supervised dataset...")
     dataset = build_v1_dataset(
@@ -874,11 +874,12 @@ def main() -> None:
         "task_types": task_types,
         "runtime_environment": _runtime_environment(),
         "notes": [
+            "Current default data source is EODHD daily EOD OHLCV.",
             "Regression targets are market-adjusted using the benchmark context table.",
             "Classification target is positive when pathwise market-adjusted excess return exceeds the threshold within the next horizon window.",
             "Feature summaries are rolling-window last/mean/std values computed from dates <= anchor_date.",
             "Walk-forward mode evaluates on aggregated out-of-sample folds and excludes 1-day regression targets from leaderboard ranking.",
-            "Current-constituent survivorship bias still applies until a PIT membership panel is added.",
+            "EODHD sector/industry metadata is not treated as point-in-time fundamentals.",
         ],
     }
     if args.eval_mode == "holdout":

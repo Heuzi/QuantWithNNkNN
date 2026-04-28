@@ -33,6 +33,7 @@ from src.models.v1_baselines import (
     evaluate_predictions,
     load_model_bundle,
     make_model,
+    prediction_frame,
     save_model_bundle,
 )
 
@@ -55,8 +56,6 @@ def _bars(ticker: str, start_price: float, days: int = 90) -> list[dict[str, obj
                 "low": close - 0.3,
                 "close": close,
                 "volume": 1000.0 + idx + (hash(ticker) % 17),
-                "vwap": close,
-                "transactions": 10.0 + idx,
                 "adjusted": True,
                 "dollar_volume": close * (1000.0 + idx),
             }
@@ -111,6 +110,9 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         self.assertIn("stock_relative_market_sector_compact", dataset.feature_sets)
         sector_cols = dataset.feature_columns["stock_relative_market_sector"]
         compact_sector_cols = dataset.feature_columns["stock_relative_market_sector_compact"]
+        self.assertFalse(any("close_to_vwap_pct" in col for col in sector_cols))
+        self.assertFalse(any("vwap" in col for col in sector_cols))
+        self.assertFalse(any("transactions" in col for col in sector_cols))
         self.assertTrue(any(col.startswith("market_context_") for col in sector_cols))
         self.assertTrue(any(col.startswith("sector_context_") for col in sector_cols))
         self.assertTrue(any("stock_vs_market_return_1d" in col for col in sector_cols))
@@ -162,6 +164,38 @@ class V1SupervisedBaselineTests(unittest.TestCase):
             loaded_pred = loaded["model"].predict(x_val)
         self.assertEqual(loaded_pred.shape, pred.shape)
         self.assertGreaterEqual(len(train_meta), 1)
+
+    def test_single_horizon_1d_prediction_arrays_are_accepted(self) -> None:
+        metadata = pd.DataFrame(
+            {
+                "ticker": ["A", "B", "C"],
+                "anchor_date": ["2024-01-02", "2024-01-02", "2024-01-02"],
+                "anchor_close": [10.0, 20.0, 30.0],
+            }
+        )
+        y_true = pd.DataFrame({"market_adjusted_return_5d": [0.01, -0.02, 0.03]})
+        y_pred = np.array([0.02, -0.01, 0.01], dtype=float)
+
+        metrics = evaluate_predictions(
+            metadata,
+            y_true,
+            y_pred,
+            target_columns=["market_adjusted_return_5d"],
+            model_name="ridge",
+            feature_set="stock_only",
+            split_name="val",
+        )
+        frame = prediction_frame(
+            metadata,
+            y_pred,
+            target_columns=["market_adjusted_return_5d"],
+            model_name="ridge",
+            feature_set="stock_only",
+            y_true=y_true,
+        )
+
+        self.assertEqual(len(metrics), 1)
+        self.assertIn("pred_market_adjusted_return_5d", frame.columns)
 
     def test_walk_forward_folds_and_static_vocabularies_are_pit_safe(self) -> None:
         stock_features, context_features = _stock_and_context_frames(days=70)

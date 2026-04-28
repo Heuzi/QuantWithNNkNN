@@ -102,10 +102,15 @@ def _hstack_static_arrays(static_categorical: dict[str, np.ndarray], columns: Se
     return np.column_stack([static_categorical[column] for column in columns]).astype(np.int64)
 
 
-def _default_torch_device() -> str:
+def _torch_cuda_available() -> bool:
+    """True only when this Python's PyTorch build can actually execute CUDA kernels."""
     import torch
 
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    return bool(torch.cuda.is_available())
+
+
+def _default_torch_device() -> str:
+    return "cuda" if _torch_cuda_available() else "cpu"
 
 
 def _gpu_available() -> bool:
@@ -662,7 +667,7 @@ class TorchMLPRegressor:
     def _resolve_device(self):
         import torch
 
-        requested = self.device if self.device != "cuda" or _gpu_available() else "cpu"
+        requested = self.device if self.device != "cuda" or _torch_cuda_available() else "cpu"
         self.device_ = torch.device(requested)
         if self.device_.type == "cuda":
             torch.backends.cudnn.benchmark = True
@@ -979,7 +984,7 @@ class TorchSequenceStaticRegressor:
     def _resolve_device(self):
         import torch
 
-        requested = self.device if self.device != "cuda" or _gpu_available() else "cpu"
+        requested = self.device if self.device != "cuda" or _torch_cuda_available() else "cpu"
         self.device_ = torch.device(requested)
         if self.device_.type == "cuda":
             torch.backends.cudnn.benchmark = True
@@ -1704,7 +1709,7 @@ class TorchMLPClassifier:
     def _resolve_device(self):
         import torch
 
-        requested = self.device if self.device != "cuda" or _gpu_available() else "cpu"
+        requested = self.device if self.device != "cuda" or _torch_cuda_available() else "cpu"
         self.device_ = torch.device(requested)
         if self.device_.type == "cuda":
             torch.backends.cudnn.benchmark = True
@@ -1871,7 +1876,7 @@ class TorchSequenceStaticClassifier:
     def _resolve_device(self):
         import torch
 
-        requested = self.device if self.device != "cuda" or _gpu_available() else "cpu"
+        requested = self.device if self.device != "cuda" or _torch_cuda_available() else "cpu"
         self.device_ = torch.device(requested)
         if self.device_.type == "cuda":
             torch.backends.cudnn.benchmark = True

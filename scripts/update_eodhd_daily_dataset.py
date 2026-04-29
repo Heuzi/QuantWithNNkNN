@@ -8,10 +8,18 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Sequence
 
+import pandas as pd
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.data.episode_eligibility import (  # noqa: E402
+    EpisodeEligibilityConfig,
+    add_episode_eligibility_columns,
+    episode_eligibility_summary,
+    parse_allowed_exchanges,
+)
 from src.data.eodhd_stage1 import (  # noqa: E402
     DEFAULT_BENCHMARK_TICKER,
     DEFAULT_EXCHANGES,
@@ -156,7 +164,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-refetch", action="store_true", help="Ignore checkpoint status and refetch symbols.")
     parser.add_argument("--rate-limit-calls", type=int, default=200)
     parser.add_argument("--rate-limit-period-seconds", type=float, default=60.0)
+    parser.add_argument(
+        "--disable-episode-eligibility-filter",
+        action="store_true",
+        help="Disable as-of common-stock/history/liquidity/price/exchange filtering for episode and prediction windows.",
+    )
+    parser.add_argument("--eligibility-min-history-days", type=int, default=252)
+    parser.add_argument("--eligibility-valid-ohlcv-lookback", type=int, default=252)
+    parser.add_argument("--eligibility-min-valid-ohlcv-days", type=int, default=252)
+    parser.add_argument("--eligibility-dollar-volume-lookback", type=int, default=60)
+    parser.add_argument("--eligibility-min-avg-dollar-volume", type=float, default=1_000_000.0)
+    parser.add_argument("--eligibility-min-price", type=float, default=5.0)
+    parser.add_argument(
+        "--eligibility-allowed-exchanges",
+        default="NYSE,NASDAQ,AMEX,BATS",
+        help="Comma-separated exchange allowlist. AMEX also matches EODHD NYSE MKT / NYSE American.",
+    )
     return parser.parse_args()
+
+
+def _episode_eligibility_config(args: argparse.Namespace) -> EpisodeEligibilityConfig | None:
+    if args.disable_episode_eligibility_filter:
+        return None
+    return EpisodeEligibilityConfig(
+        min_history_days=args.eligibility_min_history_days,
+        valid_ohlcv_lookback=args.eligibility_valid_ohlcv_lookback,
+        min_valid_ohlcv_days=args.eligibility_min_valid_ohlcv_days,
+        dollar_volume_lookback=args.eligibility_dollar_volume_lookback,
+        min_avg_dollar_volume=args.eligibility_min_avg_dollar_volume,
+        min_price=args.eligibility_min_price,
+        allowed_exchanges=parse_allowed_exchanges(args.eligibility_allowed_exchanges),
+    )
 
 
 def _write_csv_with_headers(path: Path, rows: list[dict[str, object]], headers: Sequence[str]) -> None:
@@ -500,6 +538,29 @@ def main() -> None:
         )
 
     rows_for_windows = normalized_rows if normalized_rows is not None else stock_features
+    eligibility_config = _episode_eligibility_config(args)
+    eligibility_frame = pd.DataFrame(rows_for_windows)
+    eligible_episode_keys: set[tuple[str, str]] | None = None
+    eligibility_counts: dict[str, object] | None = None
+    if eligibility_config is not None:
+        eligibility_frame = add_episode_eligibility_columns(
+            eligibility_frame,
+            eligibility_config,
+            benchmark_ticker=args.benchmark_ticker.upper(),
+        )
+        if eligibility_frame.empty:
+            eligible_episode_keys = set()
+        else:
+            eligible_rows = eligibility_frame[eligibility_frame["episode_eligible"]]
+            eligible_episode_keys = {
+                (str(row["ticker"]).upper(), str(row["date"]))
+                for row in eligible_rows[["ticker", "date"]].to_dict("records")
+            }
+        eligibility_counts = episode_eligibility_summary(
+            pd.DataFrame(rows_for_windows),
+            eligibility_config,
+            benchmark_ticker=args.benchmark_ticker.upper(),
+        )
     benchmark_features = [
         row for row in context_features if str(row.get("ticker")).upper() == args.benchmark_ticker.upper()
     ]
@@ -509,6 +570,12 @@ def main() -> None:
         horizon_days=args.horizon_days,
         benchmark_ticker=args.benchmark_ticker.upper(),
     )
+    if eligible_episode_keys is not None:
+        episodes = [
+            row
+            for row in episodes
+            if (str(row["ticker"]).upper(), str(row["anchor_date"])) in eligible_episode_keys
+        ]
     prediction_windows = compute_latest_prediction_windows(
         rows_for_windows,
         window_length=args.window_length,
@@ -516,6 +583,12 @@ def main() -> None:
         benchmark_ticker=args.benchmark_ticker.upper(),
         anchor_date=args.prediction_anchor_date or None,
     )
+    if eligible_episode_keys is not None:
+        prediction_windows = [
+            row
+            for row in prediction_windows
+            if (str(row["ticker"]).upper(), str(row["anchor_date"])) in eligible_episode_keys
+        ]
     _write_csv_with_headers(processed_dir / "episode_index.csv", episodes, EPISODE_INDEX_HEADERS)
     _write_csv_with_headers(processed_dir / "prediction_windows.csv", prediction_windows, PREDICTION_WINDOW_HEADERS)
 
@@ -541,6 +614,12 @@ def main() -> None:
                 "include_otc": bool(args.include_otc),
                 "skip_fundamentals": bool(args.skip_fundamentals),
             },
+            "episode_eligibility": (
+                eligibility_config.to_dict()
+                if eligibility_config is not None
+                else {"enabled": False}
+            ),
+            "episode_eligibility_counts": eligibility_counts,
             "counts": {
                 "universe_rows": len(universe),
                 "metadata_rows": len(metadata_rows),
@@ -575,6 +654,16 @@ def main() -> None:
                 "context_bar_rows": len(context_bars),
                 "episode_rows": len(episodes),
                 "latest_raw_date": max_date.isoformat() if max_date else None,
+                "eligible_ticker_count": (
+                    eligibility_counts.get("eligible_ticker_count")
+                    if eligibility_counts is not None
+                    else None
+                ),
+                "latest_eligible_ticker_count": (
+                    eligibility_counts.get("latest_eligible_ticker_count")
+                    if eligibility_counts is not None
+                    else None
+                ),
             },
             indent=2,
         )

@@ -12,6 +12,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
+from src.data.episode_eligibility import EpisodeEligibilityConfig
 from src.data.massive_stage1 import compute_daily_features
 from src.data.normalization import compute_normalized_feature_rows
 from src.data.v1_dataset import (
@@ -331,6 +332,34 @@ class V1SupervisedBaselineTests(unittest.TestCase):
             len(feature_columns["stock_relative_market_sector"]),
         )
 
+    def test_episode_eligibility_filter_removes_untradable_windows(self) -> None:
+        stock_features, context_features = _stock_and_context_frames(ticker_count=3, days=45)
+        stock_features["exchange"] = "NASDAQ"
+        stock_features.loc[stock_features["ticker"] == "T01", "dollar_volume"] = 100.0
+        stock_features.loc[stock_features["ticker"] == "T02", "exchange"] = "OTC"
+        config = EpisodeEligibilityConfig(
+            min_history_days=20,
+            valid_ohlcv_lookback=20,
+            min_valid_ohlcv_days=20,
+            dollar_volume_lookback=10,
+            min_avg_dollar_volume=5_000.0,
+            min_price=5.0,
+            allowed_exchanges=("NASDAQ",),
+        )
+
+        dataset = build_v1_dataset(
+            stock_features,
+            context_features,
+            horizons=(1, 5),
+            window_length=10,
+            benchmark_ticker="SPY",
+            eligibility_config=config,
+        )
+
+        self.assertEqual(set(dataset.metadata["ticker"].unique()), {"T00"})
+        self.assertIn("episode_eligible", dataset.metadata.columns)
+        self.assertTrue(dataset.metadata["episode_eligible"].all())
+
     def test_sequence_feature_store_can_include_market_and_sector_context(self) -> None:
         stock_features, context_features = _stock_and_context_frames(days=75)
 
@@ -416,6 +445,7 @@ class V1SupervisedBaselineTests(unittest.TestCase):
                     "0.6",
                     "--val-fraction",
                     "0.2",
+                    "--disable-episode-eligibility-filter",
                 ],
                 check=True,
                 cwd=REPO_ROOT,
@@ -456,6 +486,7 @@ class V1SupervisedBaselineTests(unittest.TestCase):
                     "4",
                     "--compare-against-run",
                     str(legacy_run),
+                    "--disable-episode-eligibility-filter",
                 ],
                 check=True,
                 cwd=REPO_ROOT,

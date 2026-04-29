@@ -37,6 +37,10 @@ from src.data.v1_dataset import (  # noqa: E402
     split_ranges,
     target_column,
 )
+from src.data.episode_eligibility import (  # noqa: E402
+    EpisodeEligibilityConfig,
+    parse_allowed_exchanges,
+)
 from src.models.v1_baselines import (  # noqa: E402
     build_classification_leaderboard,
     build_leaderboard,
@@ -112,6 +116,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--torch-batch-size", type=int, default=0, help="Override batch size for torch models.")
     parser.add_argument("--torch-hidden-units", type=int, default=0, help="Override hidden units for torch MLP models.")
     parser.add_argument("--torch-hidden-dim", type=int, default=0, help="Override hidden dimension for sequence/static torch models.")
+    parser.add_argument(
+        "--disable-episode-eligibility-filter",
+        action="store_true",
+        help="Disable as-of common-stock/history/liquidity/price/exchange episode filtering.",
+    )
+    parser.add_argument("--eligibility-min-history-days", type=int, default=252)
+    parser.add_argument("--eligibility-valid-ohlcv-lookback", type=int, default=252)
+    parser.add_argument("--eligibility-min-valid-ohlcv-days", type=int, default=252)
+    parser.add_argument("--eligibility-dollar-volume-lookback", type=int, default=60)
+    parser.add_argument("--eligibility-min-avg-dollar-volume", type=float, default=1_000_000.0)
+    parser.add_argument("--eligibility-min-price", type=float, default=5.0)
+    parser.add_argument(
+        "--eligibility-allowed-exchanges",
+        default="NYSE,NASDAQ,AMEX,BATS",
+        help="Comma-separated exchange allowlist. AMEX also matches EODHD NYSE MKT / NYSE American.",
+    )
     return parser.parse_args()
 
 
@@ -143,6 +163,20 @@ def _build_combo_iterable(feature_sets: list[str], model_names: list[str]) -> li
     if not combos:
         raise SystemExit("No valid (feature_set, model_name) combinations to train.")
     return combos
+
+
+def _episode_eligibility_config(args: argparse.Namespace) -> EpisodeEligibilityConfig | None:
+    if args.disable_episode_eligibility_filter:
+        return None
+    return EpisodeEligibilityConfig(
+        min_history_days=args.eligibility_min_history_days,
+        valid_ohlcv_lookback=args.eligibility_valid_ohlcv_lookback,
+        min_valid_ohlcv_days=args.eligibility_min_valid_ohlcv_days,
+        dollar_volume_lookback=args.eligibility_dollar_volume_lookback,
+        min_avg_dollar_volume=args.eligibility_min_avg_dollar_volume,
+        min_price=args.eligibility_min_price,
+        allowed_exchanges=parse_allowed_exchanges(args.eligibility_allowed_exchanges),
+    )
 
 
 def _torch_model_kwargs(args: argparse.Namespace, model_name: str) -> dict[str, object]:
@@ -888,6 +922,7 @@ def main() -> None:
     context_features = load_market_context_features(args.dataset_root, stock_features=stock_features)
     if context_features.empty:
         raise SystemExit("Market context features are missing. Run scripts/update_eodhd_daily_dataset.py first.")
+    eligibility_config = _episode_eligibility_config(args)
 
     print("Building V1 supervised dataset...")
     dataset = build_v1_dataset(
@@ -899,6 +934,7 @@ def main() -> None:
         max_episodes=args.max_episodes or None,
         classification_horizon=args.classification_horizon,
         classification_threshold=args.classification_threshold,
+        eligibility_config=eligibility_config,
     )
     dataset.targets.to_csv(output_dir / "episode_targets.csv", index=False)
     generated_utc = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -928,11 +964,17 @@ def main() -> None:
         "eval_mode": args.eval_mode,
         "task_types": task_types,
         "runtime_environment": _runtime_environment(),
+        "episode_eligibility": (
+            eligibility_config.to_dict()
+            if eligibility_config is not None
+            else {"enabled": False}
+        ),
         "notes": [
             "Current default data source is EODHD daily EOD OHLCV.",
             "Regression targets are market-adjusted using the benchmark context table.",
             "Classification target is positive when pathwise market-adjusted excess return exceeds the threshold within the next horizon window.",
             "Feature summaries are rolling-window last/mean/std values computed from dates <= anchor_date.",
+            "Episode eligibility is evaluated as of anchor_date using available history, valid adjusted OHLCV rows, liquidity, price, and exchange filters.",
             "Walk-forward mode evaluates on aggregated out-of-sample folds and excludes 1-day regression targets from leaderboard ranking.",
             "EODHD sector/industry metadata is not treated as point-in-time fundamentals.",
         ],

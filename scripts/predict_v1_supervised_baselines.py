@@ -19,6 +19,7 @@ from src.data.v1_dataset import (  # noqa: E402
     load_daily_features,
     load_market_context_features,
 )
+from src.data.episode_eligibility import EpisodeEligibilityConfig  # noqa: E402
 from src.models.v1_baselines import load_model_bundle, prediction_frame  # noqa: E402
 
 
@@ -112,6 +113,17 @@ def _leaderboard_for_task(run_dir: Path, task_type: str) -> pd.DataFrame:
     return pd.read_csv(path) if path.exists() else pd.DataFrame()
 
 
+def _episode_eligibility_config_from_run(run_dir: Path) -> EpisodeEligibilityConfig | None:
+    manifest_path = run_dir / "dataset_manifest.json"
+    if not manifest_path.exists():
+        return None
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload = manifest.get("episode_eligibility")
+    if not isinstance(payload, dict):
+        return None
+    return EpisodeEligibilityConfig.from_mapping(payload)
+
+
 def main() -> None:
     args = parse_args()
     run_dir = Path(args.run_dir)
@@ -124,6 +136,7 @@ def main() -> None:
     context_features = load_market_context_features(args.dataset_root, stock_features=stock_features)
     if context_features.empty:
         raise SystemExit("Market context features are missing. Run scripts/update_eodhd_daily_dataset.py first.")
+    eligibility_config = _episode_eligibility_config_from_run(run_dir)
 
     regression_records = [record for record in model_index["models"] if record.get("task_type", "regression") == "regression"]
     first_model = model_index["models"][0]
@@ -133,6 +146,7 @@ def main() -> None:
         window_length=int(first_model["window_length"]),
         benchmark_ticker=str(first_model["benchmark_ticker"]),
         anchor_date=args.anchor_date or None,
+        eligibility_config=eligibility_config,
     )
     metadata = _add_anchor_close(metadata, stock_features)
     sequence_stores: dict[tuple[str, tuple[str, ...]], object] = {}

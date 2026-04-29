@@ -8,6 +8,12 @@ from typing import Iterable, Sequence
 import numpy as np
 import pandas as pd
 
+from src.data.episode_eligibility import (
+    EpisodeEligibilityConfig,
+    add_episode_eligibility_columns,
+    eligibility_metadata_columns,
+)
+
 
 DEFAULT_HORIZONS = (1, 5, 10, 20)
 DEFAULT_WINDOW_LENGTH = 60
@@ -776,6 +782,7 @@ def build_multi_horizon_targets(
     benchmark_ticker: str = DEFAULT_BENCHMARK_TICKER,
     classification_horizon: int = DEFAULT_CLASSIFICATION_HORIZON,
     classification_threshold: float = DEFAULT_CLASSIFICATION_THRESHOLD,
+    eligibility_config: EpisodeEligibilityConfig | None = None,
 ) -> pd.DataFrame:
     benchmark = context_features[context_features["ticker"] == benchmark_ticker.upper()].copy()
     if benchmark.empty:
@@ -786,6 +793,12 @@ def build_multi_horizon_targets(
     benchmark_close_by_date = benchmark.set_index("date")["close"].astype(float)
 
     stocks = _filtered_stock_universe(stock_features, benchmark_ticker=benchmark_ticker)
+    if eligibility_config is not None:
+        stocks = add_episode_eligibility_columns(
+            stocks,
+            eligibility_config,
+            benchmark_ticker=benchmark_ticker,
+        )
 
     target_frames: list[pd.DataFrame] = []
     max_horizon = max(horizons)
@@ -828,11 +841,14 @@ def build_multi_horizon_targets(
         "gics_sector",
         "gics_sub_industry",
         "window_row_count",
+        *eligibility_metadata_columns(targets),
         *target_cols,
         classification_col,
     ]
     targets = targets[keep_cols]
     targets = targets[targets["window_row_count"] >= window_length]
+    if eligibility_config is not None and "episode_eligible" in targets.columns:
+        targets = targets[targets["episode_eligible"]]
     targets = targets.dropna(subset=target_cols)
     targets = targets.dropna(subset=[classification_col])
     targets = targets.rename(columns={"date": "anchor_date"})
@@ -883,6 +899,7 @@ def build_v1_dataset(
     max_episodes: int | None = None,
     classification_horizon: int = DEFAULT_CLASSIFICATION_HORIZON,
     classification_threshold: float = DEFAULT_CLASSIFICATION_THRESHOLD,
+    eligibility_config: EpisodeEligibilityConfig | None = None,
 ) -> V1Dataset:
     stock_features = add_context_relative_return_features(
         stock_features,
@@ -903,6 +920,7 @@ def build_v1_dataset(
         benchmark_ticker=benchmark_ticker,
         classification_horizon=classification_horizon,
         classification_threshold=classification_threshold,
+        eligibility_config=eligibility_config,
     )
     if max_episodes is not None and len(targets) > max_episodes:
         targets = targets.sort_values(["anchor_date", "ticker"]).tail(max_episodes).reset_index(drop=True)
@@ -951,9 +969,16 @@ def build_v1_dataset(
         window_length=window_length,
     )
 
-    metadata = targets[
-        ["ticker", "anchor_date", "gics_sector", "gics_sub_industry", "sector_etf", "window_row_count"]
-    ].copy()
+    metadata_columns = [
+        "ticker",
+        "anchor_date",
+        "gics_sector",
+        "gics_sub_industry",
+        "sector_etf",
+        "window_row_count",
+        *eligibility_metadata_columns(targets),
+    ]
+    metadata = targets[metadata_columns].copy()
     stock_only = targets.merge(
         stock_only_summary,
         left_on=["ticker", "anchor_date"],
@@ -1037,6 +1062,7 @@ def build_v1_dataset(
         "gics_sub_industry",
         "sector_etf",
         "window_row_count",
+        *eligibility_metadata_columns(targets),
         *target_cols,
         *classification_cols,
     }
@@ -1068,6 +1094,7 @@ def build_latest_v1_feature_sets(
     window_length: int = DEFAULT_WINDOW_LENGTH,
     benchmark_ticker: str = DEFAULT_BENCHMARK_TICKER,
     anchor_date: str | None = None,
+    eligibility_config: EpisodeEligibilityConfig | None = None,
 ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], dict[str, list[str]]]:
     cutoff = anchor_date
     stocks = stock_features.copy()
@@ -1084,14 +1111,29 @@ def build_latest_v1_feature_sets(
     context = add_priority_a_ohlcv_features(context)
 
     stocks = _filtered_stock_universe(stocks, benchmark_ticker=benchmark_ticker)
+    if eligibility_config is not None:
+        stocks = add_episode_eligibility_columns(
+            stocks,
+            eligibility_config,
+            benchmark_ticker=benchmark_ticker,
+        )
     latest_idx = stocks.groupby("ticker")["date"].idxmax()
     latest = stocks.loc[latest_idx].copy()
     latest = latest[latest["window_row_count"] >= window_length]
+    if eligibility_config is not None and "episode_eligible" in latest.columns:
+        latest = latest[latest["episode_eligible"]]
     latest = latest.rename(columns={"date": "anchor_date"})
     latest["sector_etf"] = latest["gics_sector"].map(SECTOR_ETF_BY_GICS)
-    metadata = latest[
-        ["ticker", "anchor_date", "gics_sector", "gics_sub_industry", "sector_etf", "window_row_count"]
-    ].reset_index(drop=True)
+    metadata_columns = [
+        "ticker",
+        "anchor_date",
+        "gics_sector",
+        "gics_sub_industry",
+        "sector_etf",
+        "window_row_count",
+        *eligibility_metadata_columns(latest),
+    ]
+    metadata = latest[metadata_columns].reset_index(drop=True)
 
     stock_only_cols = select_stock_feature_columns(stocks, include_relative=False)
     stock_relative_cols = select_stock_feature_columns(stocks, include_relative=True)
@@ -1210,7 +1252,15 @@ def build_latest_v1_feature_sets(
             include_sector=True,
         ),
     }
-    non_features = {"ticker", "anchor_date", "gics_sector", "gics_sub_industry", "sector_etf", "window_row_count"}
+    non_features = {
+        "ticker",
+        "anchor_date",
+        "gics_sector",
+        "gics_sub_industry",
+        "sector_etf",
+        "window_row_count",
+        *eligibility_metadata_columns(metadata),
+    }
     feature_sets: dict[str, pd.DataFrame] = {}
     feature_columns: dict[str, list[str]] = {}
     for name, frame in frames.items():

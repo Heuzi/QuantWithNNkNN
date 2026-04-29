@@ -3,7 +3,7 @@
 ## Purpose
 This document defines the backtest-safe dataset schema for the quant return-prediction project.
 
-Current primary vendor: **Massive**
+Current primary vendor: **EODHD**
 
 This schema is intentionally conservative. If a field's historical availability is unclear, treat it as unsafe until verified.
 
@@ -53,7 +53,6 @@ Examples:
 - close
 - adjusted price fields if available and appropriate
 - volume
-- VWAP if available
 - daily returns
 - rolling returns
 - rolling volatility
@@ -61,7 +60,6 @@ Examples:
 - gap features
 - momentum features
 - price-vs-moving-average features
-- close-vs-VWAP features
 - log-scaled liquidity features
 - same-date cross-sectional z-scores
 - same-date cross-sectional percentile ranks
@@ -163,6 +161,13 @@ Suggested columns:
 - `is_val`
 - `is_test`
 
+V1 supervised targets:
+- Regression targets are continuous market-adjusted future returns, named `market_adjusted_return_{horizon}d`.
+- Default regression horizons are `1`, `5`, `10`, and `20` trading days.
+- The current event-classification target is `market_outperform_any_20d_gt_5pct`.
+- `market_outperform_any_20d_gt_5pct` is positive when the pathwise stock excess return over `SPY` exceeds `5%` at any point in the next 20 trading days.
+- Targets are labels only and must not be included in model input feature columns.
+
 ### Prediction window index table
 One row per latest target-pending `(ticker, anchor_date)` used for production-style inference.
 
@@ -198,6 +203,92 @@ Suggested columns:
 - sector / industry metadata used for same-date relative transforms
 - flags for missingness and source availability
 
+V1 sequence-model layout:
+- A sequence sample is keyed by `(ticker, anchor_date)`.
+- It contains the prior `window_length` rows from this daily sequence table, ending on `anchor_date`.
+- Default `window_length` is 60 trading days.
+- Tensor shape is `[batch_size, window_length, features_per_day]`.
+- Each day is one token. The model sees daily values directly rather than precomputed window summaries.
+
+Implemented sequence feature-set components:
+- stock daily features are always included
+- Priority A daily features add OHLCV-derived shape/liquidity fields and same-date context-relative return fields: `close_location`, `true_range_pct`, `dollar_volume_ratio_5d`, `volume_zscore_20d`, `stock_vs_market_return_1d`, `stock_vs_sector_return_1d`, `stock_vs_market_return_5d`, and `stock_vs_sector_return_5d`
+- relative stock features can add same-date full-panel and same-sector fields such as `return_1d__cs_z`, `log1p_volume__cs_pct`, and `rolling_vol_20d__sector_cs_z`
+- market context can add `SPY` fields prefixed with `market_context_`
+- sector context can add mapped sector ETF fields prefixed with `sector_context_`
+- missing context is represented with `market_context_missing` and `sector_context_missing`
+
+Supported sequence feature-set names:
+- `stock_only_sequence`
+- `stock_relative_sequence`
+- `stock_market_sequence`
+- `stock_sector_sequence`
+- `stock_market_sector_sequence`
+- `stock_relative_market_sequence`
+- `stock_relative_sector_sequence`
+- `stock_relative_market_sector_sequence`
+- `stock_compact_sequence`
+- `stock_relative_compact_sequence`
+- `stock_market_compact_sequence`
+- `stock_sector_compact_sequence`
+- `stock_market_sector_compact_sequence`
+- `stock_relative_market_compact_sequence`
+- `stock_relative_sector_compact_sequence`
+- `stock_relative_market_sector_compact_sequence`
+
+The same component combinations are also accepted without the `_sequence` suffix when used by sequence-capable models.
+
+Compact sequence names use the same component joins as their full counterparts, but select a smaller daily feature profile to reduce redundant and highly correlated inputs.
+
+### Flattened episode feature table
+One row per `(ticker, anchor_date)` for tabular baselines.
+
+Implemented tabular feature sets:
+- `stock_only`
+- `stock_relative`
+- `stock_relative_market`
+- `stock_relative_market_sector`
+- `stock_compact`
+- `stock_relative_compact`
+- `stock_relative_market_compact`
+- `stock_relative_market_sector_compact`
+
+Approximate feature counts when all expected columns are present:
+- `stock_only`: about 90
+- `stock_relative`: about 279
+- `stock_relative_market`: about 340
+- `stock_relative_market_sector`: about 401
+- `stock_compact`: about 66
+- `stock_relative_compact`: about 111
+- `stock_relative_market_compact`: about 151
+- `stock_relative_market_sector_compact`: about 191
+
+Compact profile policy:
+- prefer `log_return_1d` over both `return_1d` and `log_return_1d`
+- use `rolling_return_*` and drop current exact `momentum_*` aliases
+- prefer `log1p_dollar_volume` over carrying every overlapping volume and dollar-volume level
+- keep Priority A daily shape/liquidity/regime fields because they are low-cost and available from the current EODHD OHLCV/context tables
+- keep z-score relative features and drop percentile-rank counterparts for the first compact ablation
+- keep a smaller context set focused on returns, volatility, trend, and liquidity ratio
+
+Rules:
+- use only daily rows with `date <= anchor_date`
+- summarize the prior `window_length` trading days ending on `anchor_date`
+- summarize each selected daily feature as `__last`, `__mean60`, and `__std60`
+- do not include target columns or future-derived values
+- do not include raw level fields such as `open`, `high`, `low`, `close`, `volume`, `dollar_volume`, legacy `vwap`, raw moving averages, or raw previous close in model inputs
+- use transformed alternatives such as returns, ratios, z-scores, percentile ranks, and `log1p_*` liquidity fields
+
+Example columns:
+- `stock_return_1d__last`
+- `stock_return_1d__mean60`
+- `stock_return_1d__std60`
+- `stock_log1p_volume__cs_z__last`
+- `market_context_rolling_vol_20d__mean60`
+- `sector_context_momentum_60d__std60`
+
+This table is intentionally different from the sequence-model input. Tabular baselines receive compressed rolling summaries; sequence models receive the raw daily token sequence.
+
 ### Market context table
 One row per `(context_ticker, date)` for benchmark and sector ETF context.
 
@@ -210,6 +301,7 @@ Rules:
 - keep this table separate from the stock cross-sectional normalization universe
 - join SPY features by anchor date
 - join sector ETF features by anchor date and the stock's GICS sector ETF mapping
+- sequence models join context by daily token date; tabular models join context after rolling-window summarization
 - do not forward-fill missing context unless a later implementation explicitly audits that policy
 
 ### As-of fundamentals table
@@ -287,14 +379,25 @@ Do not:
 - use global dataset statistics computed across future periods in a leakage-prone way
 - drop rows in ways that create unintended survivorship bias without documenting it
 
-## Massive-specific cautions
-Use Massive as the primary vendor for now, but assume the following:
-- ticker-history behavior looked promising in early manual checks
-- news timestamps looked usable
-- historical news ticker labels may not always be trustworthy for renamed/reused symbols
-- financial endpoints must be verified for entitlement and time semantics before being treated as fully backtest-safe
-- derived ratios should be audited before use in final experiments
-- current-constituent cross-sectional panels are acceptable for development, but are not the same as a historically point-in-time index membership panel
+## EODHD-specific cautions
+Use EODHD as the primary vendor for current V1 daily-market data.
+
+Current EODHD V1 policy:
+- default dataset root: `data/eodhd_us_equities_30y`
+- first full universe: listed U.S. common stocks plus delisted names
+- exclude ETFs, funds, and OTC/PINK from the target universe for the first rebuild
+- exclude listed units, warrants, rights, and preferred/preference shares even if a vendor symbol-list row labels them as common stock
+- merge current and delisted EODHD symbol-list views; live checks showed `delisted=1` behaves as delisted-only
+- keep `SPY` and sector ETFs only as context instruments
+- use EODHD `adjusted_close` to build adjusted internal OHLC close series when available
+- derive `dollar_volume` locally as adjusted internal `close * volume`
+- do not use EODHD EOD `vwap` or transactions because the daily EOD endpoint does not provide them
+- do not treat EODHD fundamentals metadata as point-in-time fundamentals until filing/public availability logic is added
+
+Known risks:
+- ticker identity and symbol reuse are not fully solved by the daily bar adapter
+- delisted coverage and metadata should be audited before final trading-style evaluation
+- raw volume is not currently corporate-action adjusted by the adapter
 
 ## Suggested feature families
 
@@ -304,7 +407,7 @@ Use Massive as the primary vendor for now, but assume the following:
 - rolling volatility
 - rolling average volume
 - log-scaled volume and dollar-volume features
-- price-vs-SMA and close-vs-VWAP features
+- price-vs-SMA features
 - same-date cross-sectional z-scores or percentile ranks for selected continuous features
 - same-date same-sector relative versions for selected liquidity / momentum / volatility features
 - simple technical indicators
@@ -340,6 +443,24 @@ Use:
 - walk-forward train/validation/test
 - rolling windows
 - regime-aware analysis when possible
+
+V1 supervised split semantics:
+- One supervised row is one stock-window episode: `(ticker, anchor_date, prior window features)`.
+- Training, validation, and OOS test splits are assigned by `anchor_date`, not by randomly shuffling episodes.
+- Current default input window is `60` trading days ending on `anchor_date`.
+- Current regression labels are future market-adjusted returns measured after `anchor_date`, such as 5, 10, and 20 trading days forward.
+- Current classification label is `market_outperform_any_20d_gt_5pct`, positive when pathwise market-adjusted outperformance exceeds `5%` within the next 20 trading days.
+- Walk-forward folds use an expanding training date range, then a later validation block, then a purge gap, then a later OOS test block.
+- The default purge gap is the maximum forward target horizon, currently `20` trading days, to avoid validation target windows bleeding into OOS scoring windows.
+- Later folds have more training episodes because scored history is allowed to join the expanding training range.
+
+Final deploy fit semantics:
+- The final deploy fit is separate from reported OOS performance.
+- The trainer reserves the latest resolved `final_stop_block_size` trading dates, default `21`, as a final validation tail.
+- Validation-aware models use that tail to choose early-stopping iteration or best epoch.
+- The deploy model is then refit on all resolved episodes when the model supports `refit_full`.
+- For sequence-static models, this means choosing `best_epoch_` on the final train/validation split, then retraining on all resolved 60-day sequence episodes for that many epochs.
+- Dates whose future target windows are not fully resolved remain target-pending and should not enter supervised train/validation/OOS scoring.
 
 ## Auditability requirements
 Every feature family should record:

@@ -19,7 +19,6 @@ def _base_row(ticker: str, trade_date: str, sector: str, value: float) -> dict[s
         "gap_pct": value / 200.0,
         "intraday_return": value / 300.0,
         "hl_range_pct": value / 400.0,
-        "close_to_vwap_pct": value / 500.0,
         "rolling_return_5d": value / 100.0,
         "rolling_return_20d": value / 100.0,
         "rolling_return_60d": value / 100.0,

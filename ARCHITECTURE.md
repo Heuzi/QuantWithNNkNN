@@ -68,6 +68,8 @@ V1 implementation note:
 - run all saved models for latest prediction windows so users can compare agreement and disagreement
 
 Current implementation snapshot:
+- Default daily market data source is now EODHD, targeting `data/eodhd_us_equities_30y`.
+- Massive-era datasets and model artifacts are legacy and should not be compared directly against EODHD full-universe results.
 - `scripts/train_v1_supervised_baselines.py` now defaults to expanding-window walk-forward evaluation.
 - The current baseline suite now supports both regression and event classification.
 - Regression still uses the multi-horizon market-adjusted return targets.
@@ -75,9 +77,15 @@ Current implementation snapshot:
 - The trainer can run `regression`, `classification`, or `both` in one pass.
 - Regression and classification leaderboards and deploy bundles are written separately so downstream analysis can choose one or both tasks.
 - The current baseline suite includes tabular baselines plus `torch_seq_static`.
+- Regression tabular baselines include `zero`, `mean`, `momentum_heuristic`, `ridge`, `elastic_net`, `lightgbm`, `xgboost`, `sklearn_hist_gb`, `sklearn_mlp`, and `torch_mlp`.
+- Classification tabular baselines include `logistic_regression`, `elastic_net_classifier`, `lightgbm_classifier`, `xgboost_classifier`, `sklearn_mlp_classifier`, and `torch_mlp_classifier`.
 - `torch_seq_static` uses a real 60-day sequence branch plus static categorical embeddings for `gics_sector` and `gics_sub_industry`.
+- Sequence-static torch baselines use a bounded CPU-feasible default training budget (`max_epochs=20`, `patience=4`, batch size `512`) so full walk-forward ablations can complete without a GPU.
 - The sequence-static model supports component ablations over stock-only, relative stock, market context, and sector ETF context sequence tokens, including `stock_relative_market_sector_sequence`.
-- `torch`, `xgboost`, and `lightgbm` now prefer GPU execution when available and fall back to CPU otherwise.
+- Compact sequence feature profiles are available for lower-variance ablations, including `stock_relative_market_sector_compact_sequence`.
+- Sequence inputs have shape `[batch_size, window_length, features_per_day]`. The default `window_length` is 60 trading days, but training can override it with `--window-length`.
+- Tabular inputs have shape `[episode_count, flattened_feature_count]` and use rolling-window summary columns such as `__last`, `__mean60`, and `__std60`.
+- `torch`, `xgboost`, and `lightgbm` now prefer GPU execution when available and fall back to CPU otherwise; torch models require the local PyTorch build to report `torch.cuda.is_available()`, while XGBoost/LightGBM may attempt vendor GPU paths and record any fallback error.
 - Latest inference uses final deployment bundles saved after the walk-forward run completes.
 
 ## Input organization
@@ -90,12 +98,74 @@ Each day in the rolling window may include:
 - volume changes
 - technical indicators
 - price-vs-moving-average features
-- close-vs-VWAP features
 - log-scaled liquidity features
 - same-date cross-sectional normalized features
 - same-date same-sector relative features
 - daily sentiment/news aggregates
 - fundamentals carried forward only if already public by that date
+
+Implemented V1 sequence feature sets:
+- `stock_only_sequence`: stock daily features only.
+- `stock_relative_sequence`: stock daily features plus same-date full-panel and same-sector relative stock features.
+- `stock_market_sequence`: stock daily features plus `SPY` context features.
+- `stock_sector_sequence`: stock daily features plus mapped sector ETF context features.
+- `stock_market_sector_sequence`: stock daily features plus `SPY` and mapped sector ETF context features.
+- `stock_relative_market_sequence`: stock daily features plus relative stock features and `SPY` context.
+- `stock_relative_sector_sequence`: stock daily features plus relative stock features and mapped sector ETF context.
+- `stock_relative_market_sector_sequence`: stock daily features plus relative stock features, `SPY` context, and mapped sector ETF context.
+
+Each sequence set also has a compact counterpart, for example `stock_relative_market_sector_compact_sequence`. Compact sequence profiles keep the same component structure but use a smaller feature list, dropping obvious duplicate or highly correlated fields such as exact momentum aliases, percentile-rank counterparts, and some overlapping liquidity columns.
+
+For compatibility, the non-`_sequence` names can also be used by sequence models when the name is listed in `SEQUENCE_FEATURE_SET_NAMES`. Tabular models use the flattened feature sets described below.
+
+Typical daily sequence token contents:
+- stock features such as `return_1d`, `log_return_1d`, `rolling_return_20d`, `rolling_vol_20d`, and `log1p_volume`
+- Priority A daily shape/liquidity/regime features such as `close_location`, `true_range_pct`, `dollar_volume_ratio_5d`, `volume_zscore_20d`, `stock_vs_market_return_1d`, and `stock_vs_sector_return_5d`
+- relative features such as `return_1d__cs_z`, `log1p_volume__cs_pct`, and `rolling_vol_20d__sector_cs_z`
+- market context features such as `market_context_return_1d`, `market_context_rolling_vol_20d`, and `market_context_missing`
+- sector context features such as `sector_context_return_1d`, `sector_context_rolling_vol_20d`, and `sector_context_missing`
+
+The sequence model receives raw daily tokens and must learn useful temporal summaries itself. This is intentionally different from tabular baselines, which receive precomputed rolling summaries.
+
+### Flattened tabular episode features
+Tabular baselines receive one row per `(ticker, anchor_date)` episode.
+
+Implemented V1 tabular feature sets:
+- `stock_only`
+- `stock_relative`
+- `stock_relative_market`
+- `stock_relative_market_sector`
+- `stock_compact`
+- `stock_relative_compact`
+- `stock_relative_market_compact`
+- `stock_relative_market_sector_compact`
+
+Approximate full vs compact feature counts when all expected columns are present:
+- `stock_only`: about 90
+- `stock_relative`: about 279
+- `stock_relative_market`: about 340
+- `stock_relative_market_sector`: about 401
+- `stock_compact`: about 66
+- `stock_relative_compact`: about 111
+- `stock_relative_market_compact`: about 151
+- `stock_relative_market_sector_compact`: about 191
+
+Each selected daily feature is summarized over the prior `window_length` trading days ending on `anchor_date`:
+- `<feature>__last`
+- `<feature>__mean60`
+- `<feature>__std60`
+
+For example:
+- `stock_return_1d__last`
+- `stock_return_1d__mean60`
+- `stock_return_1d__std60`
+
+These tabular features are compressed and denoised compared with the raw daily token stream.
+
+Raw level guardrail:
+- model inputs must not include raw price, raw volume, raw dollar-volume, legacy raw VWAP, raw previous-close, or raw moving-average level columns
+- use returns, ratios, same-date normalizations, percentile ranks, and `log1p_*` liquidity fields instead
+- `src.data.v1_dataset.validate_model_feature_columns` enforces this for tabular and sequence feature columns
 
 ### Explicit market and sector context
 V1 includes a separate daily context table, not mixed into the stock cross-sectional universe.
@@ -268,6 +338,23 @@ Use:
 - rolling or walk-forward splits
 - strictly later validation and test windows
 - regime-aware reporting if possible
+
+Current V1 walk-forward protocol:
+- Each fold uses an expanding training window.
+- The validation block is strictly later than the training block and is used for model selection or early stopping when the model supports it.
+- A purge gap separates validation from OOS testing. The default purge gap is the maximum forward target horizon, currently `20` trading days.
+- The OOS test block is strictly later than the purge gap and is used only for scoring, not for training or model selection.
+- After an OOS block is scored, it can join the expanding training history for later folds.
+
+The purge gap exists because targets are forward-looking windows. For example, a 20-day validation target uses future prices after the validation anchor date. Starting OOS immediately after validation would make validation label windows overlap with OOS periods, so the gap keeps OOS scoring more independent.
+
+Current final deploy training:
+- After walk-forward scoring, the trainer fits final deployment bundles for selected model/feature combinations.
+- It reserves the latest resolved `final_stop_block_size` trading dates, default `21`, as a final validation tail.
+- It trains on the earlier resolved dates and uses that final validation tail for early stopping or best-epoch/best-iteration selection.
+- If the model implements `refit_full`, it is then reinitialized and trained again on all resolved dates for the selected number of epochs/iterations.
+- Final deploy performance is not reported from this refit. Reported performance comes from the earlier OOS walk-forward blocks.
+- Sequence-static final deploy models follow the same rule: pick `best_epoch_` from the final train/validation split, then retrain on all resolved sequence episodes for `best_epoch_` epochs.
 
 Report:
 - RMSE

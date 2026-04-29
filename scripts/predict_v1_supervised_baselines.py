@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-dir", required=True, help="Training run directory containing final_models.json.")
     parser.add_argument(
         "--dataset-root",
-        default="data/massive_sp500_current_constituents_history",
+        default="data/eodhd_us_equities_30y",
         help="Dataset folder containing latest stock and context features.",
     )
     parser.add_argument("--anchor-date", default="", help="Optional prediction cutoff date.")
@@ -123,7 +123,7 @@ def main() -> None:
     stock_features = load_daily_features(args.dataset_root)
     context_features = load_market_context_features(args.dataset_root, stock_features=stock_features)
     if context_features.empty:
-        raise SystemExit("Market context features are missing. Run scripts/collect_massive_market_context.py first.")
+        raise SystemExit("Market context features are missing. Run scripts/update_eodhd_daily_dataset.py first.")
 
     regression_records = [record for record in model_index["models"] if record.get("task_type", "regression") == "regression"]
     first_model = model_index["models"][0]

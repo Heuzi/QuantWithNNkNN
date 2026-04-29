@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,7 @@ BASELINE_MODEL_NAMES = [
 SEQUENCE_STATIC_MODEL_NAME = "torch_seq_static"
 CLASSIFICATION_MODEL_NAMES = [
     "logistic_regression",
+    "elastic_net_classifier",
     "lightgbm_classifier",
     "xgboost_classifier",
     "sklearn_mlp_classifier",
@@ -94,23 +96,45 @@ def _as_array(frame: pd.DataFrame | np.ndarray) -> np.ndarray:
     return np.asarray(frame, dtype=np.float64)
 
 
+def _as_2d_prediction_array(values: np.ndarray, *, expected_columns: int) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 1-D or 2-D prediction array, got shape {arr.shape}.")
+    if arr.shape[1] != expected_columns:
+        raise ValueError(f"Expected {expected_columns} prediction columns, got {arr.shape[1]}.")
+    return arr
+
+
 def _hstack_static_arrays(static_categorical: dict[str, np.ndarray], columns: Sequence[str]) -> np.ndarray:
     if not columns:
         return np.empty((len(next(iter(static_categorical.values()), [])), 0), dtype=np.int64)
     return np.column_stack([static_categorical[column] for column in columns]).astype(np.int64)
 
 
-def _default_torch_device() -> str:
+def _torch_cuda_available() -> bool:
+    """True only when this Python's PyTorch build can actually execute CUDA kernels."""
     import torch
 
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    return bool(torch.cuda.is_available())
+
+
+def _default_torch_device() -> str:
+    return "cuda" if _torch_cuda_available() else "cpu"
 
 
 def _gpu_available() -> bool:
     try:
-        return _default_torch_device() == "cuda"
+        if _default_torch_device() == "cuda":
+            return True
     except Exception:
-        return False
+        pass
+    for env_name in ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"):
+        visible_devices = os.environ.get(env_name)
+        if visible_devices is not None and visible_devices.strip().lower() not in {"", "-1", "none", "void"}:
+            return True
+    return False
 
 
 def _torch_loader_kwargs(*, device: str, shuffle: bool, batch_size: int) -> dict[str, object]:
@@ -242,7 +266,14 @@ class SklearnRegressor:
                 estimator,
             )
         if self.estimator_name == "sklearn_elastic_net":
-            estimator = ElasticNet(alpha=0.0005, l1_ratio=0.2, max_iter=3000, random_state=13)
+            estimator = ElasticNet(
+                alpha=0.005,
+                l1_ratio=0.2,
+                max_iter=1000,
+                tol=1e-3,
+                selection="random",
+                random_state=13,
+            )
             return make_pipeline(
                 SimpleImputer(strategy="constant", fill_value=0.0, keep_empty_features=True),
                 StandardScaler(),
@@ -414,6 +445,7 @@ class LightGBMRegressor:
         y_val_arr = _as_array(val_y) if val_y is not None else None
         self.models_: list[object] = []
         self.best_iterations_: list[int] = []
+        self.gpu_fallback_error_ = ""
         self.device_type_ = "gpu" if self.prefer_gpu and _gpu_available() else "cpu"
         for target_idx in range(y_train.shape[1]):
             estimator_kwargs = {
@@ -439,9 +471,10 @@ class LightGBMRegressor:
                     )
                 else:
                     estimator.fit(x_train, y_train[:, target_idx])
-            except Exception:
+            except Exception as exc:
                 if self.device_type_ != "gpu":
                     raise
+                self.gpu_fallback_error_ = f"{type(exc).__name__}: {exc}"
                 self.device_type_ = "cpu"
                 estimator = LGBMRegressor(**{**estimator_kwargs, "device_type": self.device_type_})
                 if x_val is not None and y_val_arr is not None:
@@ -466,30 +499,33 @@ class LightGBMRegressor:
         y_full = _as_array(y)
         self.models_ = []
         for target_idx in range(y_full.shape[1]):
-            estimator = LGBMRegressor(
-                n_estimators=int(self.best_iterations_[target_idx]),
-                learning_rate=0.03,
-                num_leaves=31,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                objective="regression",
-                random_state=self.random_state + target_idx,
-                verbosity=-1,
-                device_type=getattr(self, "device_type_", "cpu"),
-            )
-            estimator.fit(x_full, y_full[:, target_idx])
+            estimator_kwargs = {
+                "n_estimators": int(self.best_iterations_[target_idx]),
+                "learning_rate": 0.03,
+                "num_leaves": 31,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "objective": "regression",
+                "random_state": self.random_state + target_idx,
+                "verbosity": -1,
+                "device_type": getattr(self, "device_type_", "cpu"),
+            }
+            estimator = LGBMRegressor(**estimator_kwargs)
+            try:
+                estimator.fit(x_full, y_full[:, target_idx])
+            except Exception as exc:
+                if estimator_kwargs["device_type"] != "gpu":
+                    raise
+                self.gpu_fallback_error_ = f"{type(exc).__name__}: {exc}"
+                self.device_type_ = "cpu"
+                estimator = LGBMRegressor(**{**estimator_kwargs, "device_type": self.device_type_})
+                estimator.fit(x_full, y_full[:, target_idx])
             self.models_.append(estimator)
         return self
 
     def predict(self, x: pd.DataFrame) -> np.ndarray:
         x_values = self._preprocess(x, fit=False)
-        if getattr(self, "device_", "cpu") == "cuda":
-            from xgboost import DMatrix
-
-            dmatrix = DMatrix(x_values)
-            preds = [np.asarray(model.get_booster().predict(dmatrix), dtype=np.float64) for model in self.models_]
-        else:
-            preds = [np.asarray(model.predict(x_values), dtype=np.float64) for model in self.models_]
+        preds = [np.asarray(model.predict(x_values), dtype=np.float64) for model in self.models_]
         return np.column_stack(preds)
 
 
@@ -531,6 +567,7 @@ class XGBoostRegressor:
         y_val_arr = _as_array(val_y) if val_y is not None else None
         self.models_: list[object] = []
         self.best_iterations_: list[int] = []
+        self.gpu_fallback_error_ = ""
         self.device_ = "cuda" if self.prefer_gpu and _gpu_available() else "cpu"
         for target_idx in range(y_train.shape[1]):
             estimator_kwargs = {
@@ -557,9 +594,10 @@ class XGBoostRegressor:
                     )
                 else:
                     estimator.fit(x_train, y_train[:, target_idx], verbose=False)
-            except Exception:
+            except Exception as exc:
                 if self.device_ != "cuda":
                     raise
+                self.gpu_fallback_error_ = f"{type(exc).__name__}: {exc}"
                 self.device_ = "cpu"
                 estimator = XGBRegressor(**{**estimator_kwargs, "device": self.device_})
                 if x_val is not None and y_val_arr is not None:
@@ -585,19 +623,28 @@ class XGBoostRegressor:
         y_full = _as_array(y)
         self.models_ = []
         for target_idx in range(y_full.shape[1]):
-            estimator = XGBRegressor(
-                n_estimators=int(self.best_iterations_[target_idx]),
-                learning_rate=0.03,
-                max_depth=4,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                objective="reg:squarederror",
-                random_state=self.random_state + target_idx,
-                n_jobs=1,
-                tree_method="hist",
-                device=getattr(self, "device_", "cpu"),
-            )
-            estimator.fit(x_full, y_full[:, target_idx], verbose=False)
+            estimator_kwargs = {
+                "n_estimators": int(self.best_iterations_[target_idx]),
+                "learning_rate": 0.03,
+                "max_depth": 4,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "objective": "reg:squarederror",
+                "random_state": self.random_state + target_idx,
+                "n_jobs": 1,
+                "tree_method": "hist",
+                "device": getattr(self, "device_", "cpu"),
+            }
+            estimator = XGBRegressor(**estimator_kwargs)
+            try:
+                estimator.fit(x_full, y_full[:, target_idx], verbose=False)
+            except Exception as exc:
+                if estimator_kwargs["device"] != "cuda":
+                    raise
+                self.gpu_fallback_error_ = f"{type(exc).__name__}: {exc}"
+                self.device_ = "cpu"
+                estimator = XGBRegressor(**{**estimator_kwargs, "device": self.device_})
+                estimator.fit(x_full, y_full[:, target_idx], verbose=False)
             self.models_.append(estimator)
         return self
 
@@ -631,7 +678,7 @@ class TorchMLPRegressor:
     def _resolve_device(self):
         import torch
 
-        requested = self.device if self.device != "cuda" or _gpu_available() else "cpu"
+        requested = self.device if self.device != "cuda" or _torch_cuda_available() else "cpu"
         self.device_ = torch.device(requested)
         if self.device_.type == "cuda":
             torch.backends.cudnn.benchmark = True
@@ -929,9 +976,9 @@ class TorchSequenceStaticRegressor:
         window_length: int = 60,
         hidden_dim: int = 128,
         learning_rate: float = 0.001,
-        max_epochs: int = 60,
-        patience: int = 10,
-        batch_size: int = 256,
+        max_epochs: int = 20,
+        patience: int = 4,
+        batch_size: int = 512,
         random_state: int = 37,
     ) -> None:
         self.window_length = window_length
@@ -948,7 +995,7 @@ class TorchSequenceStaticRegressor:
     def _resolve_device(self):
         import torch
 
-        requested = self.device if self.device != "cuda" or _gpu_available() else "cpu"
+        requested = self.device if self.device != "cuda" or _torch_cuda_available() else "cpu"
         self.device_ = torch.device(requested)
         if self.device_.type == "cuda":
             torch.backends.cudnn.benchmark = True
@@ -1185,6 +1232,21 @@ class TorchSequenceStaticRegressor:
 
 
 class LogisticClassifier:
+    def __init__(
+        self,
+        *,
+        penalty: str = "l2",
+        solver: str = "lbfgs",
+        l1_ratio: float | None = None,
+        c: float = 1.0,
+        random_state: int = 41,
+    ) -> None:
+        self.penalty = penalty
+        self.solver = solver
+        self.l1_ratio = l1_ratio
+        self.c = c
+        self.random_state = random_state
+
     def _prepare(self, x: pd.DataFrame, *, fit: bool) -> np.ndarray:
         from sklearn.impute import SimpleImputer
         from sklearn.preprocessing import StandardScaler
@@ -1212,13 +1274,67 @@ class LogisticClassifier:
         if np.unique(target).size < 2:
             self.model_ = _ConstantProbabilityClassifier(float(target[0]) if len(target) else 0.0)
             return self
-        self.model_ = LogisticRegression(max_iter=2000, C=1.0, class_weight="balanced", random_state=41)
+        kwargs: dict[str, object] = {
+            "max_iter": 3000,
+            "C": self.c,
+            "class_weight": "balanced",
+            "random_state": self.random_state,
+            "solver": self.solver,
+        }
+        if self.penalty != "l2":
+            kwargs["penalty"] = self.penalty
+        if self.l1_ratio is not None:
+            kwargs["l1_ratio"] = self.l1_ratio
+        self.model_ = LogisticRegression(**kwargs)
         self.model_.fit(x_train, target)
         return self
 
     def predict(self, x: pd.DataFrame) -> np.ndarray:
         x_values = self._prepare(x, fit=False)
         return self.model_.predict_proba(x_values)[:, 1:2].astype(np.float64)
+
+
+class ElasticNetLogisticClassifier(LogisticClassifier):
+    def _prepare(self, x: pd.DataFrame, *, fit: bool) -> np.ndarray:
+        from sklearn.impute import SimpleImputer
+        from sklearn.preprocessing import StandardScaler
+
+        if fit:
+            self.imputer_ = SimpleImputer(strategy="constant", fill_value=0.0, keep_empty_features=True)
+            self.scaler_ = StandardScaler()
+            values = self.imputer_.fit_transform(x)
+            return self.scaler_.fit_transform(values)
+        values = self.imputer_.transform(x)
+        return self.scaler_.transform(values)
+
+    def fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        *,
+        val_x: pd.DataFrame | None = None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "ElasticNetLogisticClassifier":
+        from sklearn.linear_model import SGDClassifier
+
+        x_train = self._prepare(x, fit=True)
+        target = _as_array(y).reshape(-1)
+        if np.unique(target).size < 2:
+            self.model_ = _ConstantProbabilityClassifier(float(target[0]) if len(target) else 0.0)
+            return self
+        self.model_ = SGDClassifier(
+            loss="log_loss",
+            penalty="elasticnet",
+            alpha=0.0005,
+            l1_ratio=0.15,
+            max_iter=1000,
+            tol=1e-3,
+            class_weight="balanced",
+            average=True,
+            random_state=42,
+        )
+        self.model_.fit(x_train, target)
+        return self
 
 
 class LightGBMClassifier:
@@ -1260,8 +1376,10 @@ class LightGBMClassifier:
             self.model_ = _ConstantProbabilityClassifier(float(y_train[0]) if len(y_train) else 0.0)
             self.best_iteration_ = 1
             self.device_type_ = "cpu"
+            self.gpu_fallback_error_ = ""
             return self
         y_val_arr = _as_array(val_y).reshape(-1) if val_y is not None else None
+        self.gpu_fallback_error_ = ""
         self.device_type_ = "gpu" if self.prefer_gpu and _gpu_available() else "cpu"
         estimator_kwargs = {
             "n_estimators": self.n_estimators,
@@ -1287,9 +1405,10 @@ class LightGBMClassifier:
                 )
             else:
                 estimator.fit(x_train, y_train)
-        except Exception:
+        except Exception as exc:
             if self.device_type_ != "gpu":
                 raise
+            self.gpu_fallback_error_ = f"{type(exc).__name__}: {exc}"
             self.device_type_ = "cpu"
             estimator = LGBMClassifier(**{**estimator_kwargs, "device_type": self.device_type_})
             if x_val is not None and y_val_arr is not None:
@@ -1314,19 +1433,28 @@ class LightGBMClassifier:
         if np.unique(y_full).size < 2:
             self.model_ = _ConstantProbabilityClassifier(float(y_full[0]) if len(y_full) else 0.0)
             return self
-        self.model_ = LGBMClassifier(
-            n_estimators=int(getattr(self, "best_iteration_", self.n_estimators)),
-            learning_rate=0.03,
-            num_leaves=31,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            objective="binary",
-            random_state=self.random_state,
-            verbosity=-1,
-            device_type=getattr(self, "device_type_", "cpu"),
-            class_weight="balanced",
-        )
-        self.model_.fit(x_full, y_full)
+        estimator_kwargs = {
+            "n_estimators": int(getattr(self, "best_iteration_", self.n_estimators)),
+            "learning_rate": 0.03,
+            "num_leaves": 31,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "objective": "binary",
+            "random_state": self.random_state,
+            "verbosity": -1,
+            "device_type": getattr(self, "device_type_", "cpu"),
+            "class_weight": "balanced",
+        }
+        self.model_ = LGBMClassifier(**estimator_kwargs)
+        try:
+            self.model_.fit(x_full, y_full)
+        except Exception as exc:
+            if estimator_kwargs["device_type"] != "gpu":
+                raise
+            self.gpu_fallback_error_ = f"{type(exc).__name__}: {exc}"
+            self.device_type_ = "cpu"
+            self.model_ = LGBMClassifier(**{**estimator_kwargs, "device_type": self.device_type_})
+            self.model_.fit(x_full, y_full)
         return self
 
     def predict(self, x: pd.DataFrame) -> np.ndarray:
@@ -1373,9 +1501,11 @@ class XGBoostClassifier:
             self.model_ = _ConstantProbabilityClassifier(float(y_train[0]) if len(y_train) else 0.0)
             self.best_iteration_ = 1
             self.device_ = "cpu"
+            self.gpu_fallback_error_ = ""
             return self
         y_val_arr = _as_array(val_y).reshape(-1) if val_y is not None else None
         scale_pos_weight = float((len(y_train) - y_train.sum()) / max(y_train.sum(), 1.0))
+        self.gpu_fallback_error_ = ""
         self.device_ = "cuda" if self.prefer_gpu and _gpu_available() else "cpu"
         estimator_kwargs = {
             "n_estimators": self.n_estimators,
@@ -1398,9 +1528,10 @@ class XGBoostClassifier:
                 estimator.fit(x_train, y_train, eval_set=[(x_val, y_val_arr)], verbose=False)
             else:
                 estimator.fit(x_train, y_train, verbose=False)
-        except Exception:
+        except Exception as exc:
             if self.device_ != "cuda":
                 raise
+            self.gpu_fallback_error_ = f"{type(exc).__name__}: {exc}"
             self.device_ = "cpu"
             estimator = XGBClassifier(**{**estimator_kwargs, "device": self.device_})
             if x_val is not None and y_val_arr is not None:
@@ -1423,21 +1554,30 @@ class XGBoostClassifier:
             self.model_ = _ConstantProbabilityClassifier(float(y_full[0]) if len(y_full) else 0.0)
             return self
         scale_pos_weight = float((len(y_full) - y_full.sum()) / max(y_full.sum(), 1.0))
-        self.model_ = XGBClassifier(
-            n_estimators=int(getattr(self, "best_iteration_", self.n_estimators)),
-            learning_rate=0.03,
-            max_depth=4,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            objective="binary:logistic",
-            random_state=self.random_state,
-            n_jobs=1,
-            tree_method="hist",
-            device=getattr(self, "device_", "cpu"),
-            eval_metric="logloss",
-            scale_pos_weight=max(scale_pos_weight, 1.0),
-        )
-        self.model_.fit(x_full, y_full, verbose=False)
+        estimator_kwargs = {
+            "n_estimators": int(getattr(self, "best_iteration_", self.n_estimators)),
+            "learning_rate": 0.03,
+            "max_depth": 4,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "objective": "binary:logistic",
+            "random_state": self.random_state,
+            "n_jobs": 1,
+            "tree_method": "hist",
+            "device": getattr(self, "device_", "cpu"),
+            "eval_metric": "logloss",
+            "scale_pos_weight": max(scale_pos_weight, 1.0),
+        }
+        self.model_ = XGBClassifier(**estimator_kwargs)
+        try:
+            self.model_.fit(x_full, y_full, verbose=False)
+        except Exception as exc:
+            if estimator_kwargs["device"] != "cuda":
+                raise
+            self.gpu_fallback_error_ = f"{type(exc).__name__}: {exc}"
+            self.device_ = "cpu"
+            self.model_ = XGBClassifier(**{**estimator_kwargs, "device": self.device_})
+            self.model_.fit(x_full, y_full, verbose=False)
         return self
 
     def predict(self, x: pd.DataFrame) -> np.ndarray:
@@ -1580,7 +1720,7 @@ class TorchMLPClassifier:
     def _resolve_device(self):
         import torch
 
-        requested = self.device if self.device != "cuda" or _gpu_available() else "cpu"
+        requested = self.device if self.device != "cuda" or _torch_cuda_available() else "cpu"
         self.device_ = torch.device(requested)
         if self.device_.type == "cuda":
             torch.backends.cudnn.benchmark = True
@@ -1729,9 +1869,9 @@ class TorchSequenceStaticClassifier:
         window_length: int = 60,
         hidden_dim: int = 128,
         learning_rate: float = 0.001,
-        max_epochs: int = 60,
-        patience: int = 10,
-        batch_size: int = 256,
+        max_epochs: int = 20,
+        patience: int = 4,
+        batch_size: int = 512,
         random_state: int = 61,
     ) -> None:
         self.window_length = window_length
@@ -1747,7 +1887,7 @@ class TorchSequenceStaticClassifier:
     def _resolve_device(self):
         import torch
 
-        requested = self.device if self.device != "cuda" or _gpu_available() else "cpu"
+        requested = self.device if self.device != "cuda" or _torch_cuda_available() else "cpu"
         self.device_ = torch.device(requested)
         if self.device_.type == "cuda":
             torch.backends.cudnn.benchmark = True
@@ -1995,10 +2135,19 @@ def available_model_names() -> list[str]:
     )
 
 
-def make_model(model_name: str, *, window_length: int = 60, task_type: str = "regression") -> Predictor:
+def make_model(
+    model_name: str,
+    *,
+    window_length: int = 60,
+    task_type: str = "regression",
+    model_kwargs: dict[str, object] | None = None,
+) -> Predictor:
+    kwargs = dict(model_kwargs or {})
     if task_type == "classification":
         if model_name == "logistic_regression":
             return LogisticClassifier()
+        if model_name == "elastic_net_classifier":
+            return ElasticNetLogisticClassifier()
         if model_name == "lightgbm_classifier":
             return LightGBMClassifier()
         if model_name == "xgboost_classifier":
@@ -2006,9 +2155,9 @@ def make_model(model_name: str, *, window_length: int = 60, task_type: str = "re
         if model_name == "sklearn_mlp_classifier":
             return SklearnMLPClassifier()
         if model_name == "torch_mlp_classifier":
-            return TorchMLPClassifier()
+            return TorchMLPClassifier(**kwargs)
         if model_name == SEQUENCE_STATIC_CLASSIFICATION_MODEL_NAME:
-            return TorchSequenceStaticClassifier(window_length=window_length)
+            return TorchSequenceStaticClassifier(window_length=window_length, **kwargs)
         raise ValueError(f"Unknown classification model: {model_name}")
     if model_name == "zero":
         return ZeroPredictor()
@@ -2035,9 +2184,9 @@ def make_model(model_name: str, *, window_length: int = 60, task_type: str = "re
     if model_name == "sklearn_mlp":
         return SklearnMLPPredictor()
     if model_name == "torch_mlp":
-        return TorchMLPRegressor()
+        return TorchMLPRegressor(**kwargs)
     if model_name == SEQUENCE_STATIC_MODEL_NAME:
-        return TorchSequenceStaticRegressor(window_length=window_length)
+        return TorchSequenceStaticRegressor(window_length=window_length, **kwargs)
     raise ValueError(f"Unknown model: {model_name}")
 
 
@@ -2071,6 +2220,7 @@ def evaluate_predictions(
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     true_values = y_true[target_columns].astype(float).to_numpy()
+    y_pred = _as_2d_prediction_array(y_pred, expected_columns=len(target_columns))
     for idx, target in enumerate(target_columns):
         actual = true_values[:, idx]
         pred = y_pred[:, idx]
@@ -2126,6 +2276,7 @@ def evaluate_classification_predictions(
 
     rows: list[dict[str, object]] = []
     true_values = y_true[target_columns].astype(float).to_numpy()
+    y_score = _as_2d_prediction_array(y_score, expected_columns=len(target_columns))
     realized = None
     if realized_returns is not None and realized_return_column and realized_return_column in realized_returns.columns:
         realized = realized_returns[realized_return_column].astype(float).to_numpy()
@@ -2193,6 +2344,7 @@ def prediction_frame(
     task_type: str = "regression",
 ) -> pd.DataFrame:
     metadata_columns = ["ticker", "anchor_date"]
+    y_pred = _as_2d_prediction_array(y_pred, expected_columns=len(target_columns))
     if "anchor_close" in metadata.columns:
         metadata_columns.append("anchor_close")
     out = metadata[metadata_columns].copy()

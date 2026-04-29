@@ -28,7 +28,6 @@ FULL_PANEL_NORMALIZATION_FEATURES = [
     "gap_pct",
     "intraday_return",
     "hl_range_pct",
-    "close_to_vwap_pct",
     "rolling_return_5d",
     "rolling_return_20d",
     "rolling_return_60d",
@@ -85,18 +84,24 @@ def load_processed_feature_rows(path: str | Path) -> list[dict[str, object]]:
     return rows
 
 
-def load_sp500_constituent_metadata(path: str | Path) -> dict[str, dict[str, str]]:
+def load_equity_metadata(path: str | Path) -> dict[str, dict[str, str]]:
     metadata: dict[str, dict[str, str]] = {}
     path = Path(path)
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
-            ticker = row["symbol"].upper()
+            ticker = (row.get("symbol") or row.get("ticker") or row.get("code") or "").upper()
+            if not ticker:
+                continue
             metadata[ticker] = {
-                "gics_sector": row.get("gics_sector", ""),
-                "gics_sub_industry": row.get("gics_sub_industry", ""),
+                "gics_sector": row.get("gics_sector") or row.get("sector") or "Unknown",
+                "gics_sub_industry": row.get("gics_sub_industry") or row.get("industry") or "Unknown",
             }
     return metadata
+
+
+def load_sp500_constituent_metadata(path: str | Path) -> dict[str, dict[str, str]]:
+    return load_equity_metadata(path)
 
 
 def _safe_log1p(value: object) -> float | None:
@@ -264,13 +269,13 @@ def build_normalized_manifest(
         "input_file": str(Path(input_file).resolve()),
         "sector_source_file": str(Path(sector_source_file).resolve()),
         "row_count": row_count,
-        "universe_definition": "Current S&P 500 panel present in the processed daily feature input on each date.",
+        "universe_definition": "Equity panel present in the processed daily feature input on each date.",
         "universe_count": universe_count,
         "date_range": {
             "min_date": min_date,
             "max_date": max_date,
         },
-        "timing_assumption": "End-of-day only. Same-date close/volume/VWAP-based normalization is allowed because values are assumed known by the date close.",
+        "timing_assumption": "End-of-day only. Same-date close/volume-based normalization is allowed because values are assumed known by the date close.",
         "same_date_only": True,
         "same_sector_only": True,
         "log1p_base_features": LOG1P_BASE_FEATURES,
@@ -293,7 +298,7 @@ def build_normalized_manifest(
         },
         "known_caveats": [
             "Normalization is point-in-time safe with respect to time because only same-date values are used.",
-            "Sector metadata comes from the current constituent snapshot, not a verified historical sector panel.",
-            "The universe is the current S&P 500 panel collected for development, not the full U.S. market universe.",
+            "Sector metadata may be current vendor metadata, not a verified historical sector panel.",
+            "Universe membership and ticker identity must be interpreted using the dataset manifest for the selected vendor.",
         ],
     }

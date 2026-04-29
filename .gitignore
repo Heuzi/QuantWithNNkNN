@@ -7,6 +7,7 @@ EODHD_api_key
 
 # Generated model runs
 artifacts/
+logs/
 
 # Generated EODHD datasets
 data/eodhd_*/

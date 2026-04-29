@@ -13,6 +13,7 @@ from src.data.episode_eligibility import (
     add_episode_eligibility_columns,
     eligibility_metadata_columns,
 )
+from src.data.eodhd_enrichment import FUNDAMENTAL_FEATURE_COLUMNS, SENTIMENT_FEATURE_COLUMNS
 
 
 DEFAULT_HORIZONS = (1, 5, 10, 20)
@@ -65,6 +66,17 @@ RAW_LEVEL_COLUMNS = {
     "rolling_avg_dollar_volume_60d",
 }
 MODEL_INPUT_RAW_LEVEL_COLUMNS = set(RAW_LEVEL_COLUMNS)
+MODEL_INPUT_IDENTIFIER_COLUMNS = {
+    "ticker",
+    "symbol",
+    "eodhd_symbol",
+    "isin",
+    "cusip",
+    "cik",
+    "figi",
+    "primary_ticker",
+    "name",
+}
 MODEL_INPUT_SUMMARY_SUFFIXES = ("__last", "__mean60", "__std60")
 MODEL_INPUT_PREFIXES = ("stock_", "market_context_", "sector_context_", "context_")
 
@@ -192,6 +204,12 @@ FEATURE_SET_NAMES = (
     "stock_relative_compact",
     "stock_relative_market_compact",
     "stock_relative_market_sector_compact",
+    "stock_only_sentiment",
+    "stock_relative_market_sector_sentiment",
+    "stock_only_fundamentals",
+    "stock_relative_market_sector_fundamentals",
+    "stock_only_fundamentals_sentiment",
+    "stock_relative_market_sector_fundamentals_sentiment",
 )
 FULL_SEQUENCE_BASE_FEATURE_SET_NAMES = (
     "stock_only",
@@ -202,6 +220,8 @@ FULL_SEQUENCE_BASE_FEATURE_SET_NAMES = (
     "stock_relative_market",
     "stock_relative_sector",
     "stock_relative_market_sector",
+    "stock_sentiment",
+    "stock_relative_market_sector_sentiment",
 )
 COMPACT_SEQUENCE_BASE_FEATURE_SET_NAMES = (
     "stock_compact",
@@ -303,6 +323,7 @@ class SequenceFeatureConfig:
     include_relative: bool
     include_market_context: bool
     include_sector_context: bool
+    include_sentiment: bool
     compact: bool
 
     def to_dict(self) -> dict[str, bool]:
@@ -311,6 +332,7 @@ class SequenceFeatureConfig:
             "relative_stock_features": self.include_relative,
             "market_context_features": self.include_market_context,
             "sector_context_features": self.include_sector_context,
+            "sentiment_features": self.include_sentiment,
             "compact_feature_profile": self.compact,
         }
 
@@ -324,6 +346,7 @@ def sequence_feature_config(feature_set: str) -> SequenceFeatureConfig:
         include_relative="relative" in parts,
         include_market_context="market" in parts,
         include_sector_context="sector" in parts,
+        include_sentiment="sentiment" in parts,
         compact="compact" in parts,
     )
 
@@ -402,6 +425,14 @@ def raw_level_model_input_columns(columns: Sequence[str]) -> list[str]:
     ]
 
 
+def identifier_model_input_columns(columns: Sequence[str]) -> list[str]:
+    return [
+        str(column)
+        for column in columns
+        if _canonical_model_feature_name(str(column)) in MODEL_INPUT_IDENTIFIER_COLUMNS
+    ]
+
+
 def validate_model_feature_columns(columns: Sequence[str], *, feature_set: str) -> None:
     raw_columns = raw_level_model_input_columns(columns)
     if raw_columns:
@@ -410,6 +441,14 @@ def validate_model_feature_columns(columns: Sequence[str], *, feature_set: str) 
         raise ValueError(
             f"Raw level columns are not allowed in model inputs for {feature_set}: {preview}{extra}. "
             "Use log-scaled, ratio, return, z-score, or percentile features instead."
+        )
+    identifier_columns = identifier_model_input_columns(columns)
+    if identifier_columns:
+        preview = ", ".join(identifier_columns[:10])
+        extra = "" if len(identifier_columns) <= 10 else f", ... ({len(identifier_columns)} total)"
+        raise ValueError(
+            f"Identifier columns are not allowed in model inputs for {feature_set}: {preview}{extra}. "
+            "Keep identifiers in metadata only so models can score unseen future tickers."
         )
 
 
@@ -547,6 +586,22 @@ def select_stock_feature_columns(df: pd.DataFrame, include_relative: bool, *, co
     return list(dict.fromkeys(cols))
 
 
+def select_augmented_stock_feature_columns(
+    df: pd.DataFrame,
+    include_relative: bool,
+    *,
+    compact: bool = False,
+    include_sentiment: bool = False,
+    include_fundamentals: bool = False,
+) -> list[str]:
+    cols = select_stock_feature_columns(df, include_relative=include_relative, compact=compact)
+    if include_sentiment:
+        cols.extend(_available_numeric_columns(df, SENTIMENT_FEATURE_COLUMNS))
+    if include_fundamentals:
+        cols.extend(_available_numeric_columns(df, FUNDAMENTAL_FEATURE_COLUMNS))
+    return list(dict.fromkeys(cols))
+
+
 def select_context_feature_columns(df: pd.DataFrame, *, compact: bool = False) -> list[str]:
     return _available_numeric_columns(df, COMPACT_CONTEXT_FEATURES if compact else CONTEXT_FEATURES)
 
@@ -557,10 +612,11 @@ def select_sequence_feature_columns(
     context_features: pd.DataFrame | None = None,
 ) -> list[str]:
     config = sequence_feature_config(feature_set)
-    cols = select_stock_feature_columns(
+    cols = select_augmented_stock_feature_columns(
         stock_features,
         include_relative=config.include_relative,
         compact=config.compact,
+        include_sentiment=config.include_sentiment,
     )
     if config.include_market_context or config.include_sector_context:
         if context_features is None:
@@ -608,10 +664,11 @@ def build_sequence_feature_store(
     else:
         stock_features = add_priority_a_ohlcv_features(stock_features)
     stocks = _filtered_stock_universe(stock_features, benchmark_ticker=benchmark_ticker)
-    stock_cols = select_stock_feature_columns(
+    stock_cols = select_augmented_stock_feature_columns(
         stocks,
         include_relative=config.include_relative,
         compact=config.compact,
+        include_sentiment=config.include_sentiment,
     )
     frame = stocks[["ticker", "date", "gics_sector", *stock_cols]].copy()
     frame["sector_etf"] = frame["gics_sector"].map(SECTOR_ETF_BY_GICS)
@@ -929,6 +986,38 @@ def build_v1_dataset(
     stock_relative_cols = select_stock_feature_columns(stock_features, include_relative=True)
     stock_compact_cols = select_stock_feature_columns(stock_features, include_relative=False, compact=True)
     stock_relative_compact_cols = select_stock_feature_columns(stock_features, include_relative=True, compact=True)
+    stock_sentiment_cols = select_augmented_stock_feature_columns(
+        stock_features,
+        include_relative=False,
+        include_sentiment=True,
+    )
+    stock_relative_sentiment_cols = select_augmented_stock_feature_columns(
+        stock_features,
+        include_relative=True,
+        include_sentiment=True,
+    )
+    stock_fundamental_cols = select_augmented_stock_feature_columns(
+        stock_features,
+        include_relative=False,
+        include_fundamentals=True,
+    )
+    stock_relative_fundamental_cols = select_augmented_stock_feature_columns(
+        stock_features,
+        include_relative=True,
+        include_fundamentals=True,
+    )
+    stock_fundamental_sentiment_cols = select_augmented_stock_feature_columns(
+        stock_features,
+        include_relative=False,
+        include_sentiment=True,
+        include_fundamentals=True,
+    )
+    stock_relative_fundamental_sentiment_cols = select_augmented_stock_feature_columns(
+        stock_features,
+        include_relative=True,
+        include_sentiment=True,
+        include_fundamentals=True,
+    )
     context_cols = select_context_feature_columns(context_features)
     compact_context_cols = select_context_feature_columns(context_features, compact=True)
 
@@ -953,6 +1042,42 @@ def build_v1_dataset(
     stock_relative_compact_summary = add_window_summaries(
         stock_features,
         feature_cols=stock_relative_compact_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_sentiment_summary = add_window_summaries(
+        stock_features,
+        feature_cols=stock_sentiment_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_relative_sentiment_summary = add_window_summaries(
+        stock_features,
+        feature_cols=stock_relative_sentiment_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_fundamental_summary = add_window_summaries(
+        stock_features,
+        feature_cols=stock_fundamental_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_relative_fundamental_summary = add_window_summaries(
+        stock_features,
+        feature_cols=stock_relative_fundamental_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_fundamental_sentiment_summary = add_window_summaries(
+        stock_features,
+        feature_cols=stock_fundamental_sentiment_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_relative_fundamental_sentiment_summary = add_window_summaries(
+        stock_features,
+        feature_cols=stock_relative_fundamental_sentiment_cols,
         prefix="stock_",
         window_length=window_length,
     )
@@ -1003,6 +1128,42 @@ def build_v1_dataset(
         right_on=["ticker", "date"],
         how="left",
     ).drop(columns=["date"], errors="ignore")
+    stock_sentiment = targets.merge(
+        stock_sentiment_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+    stock_relative_sentiment = targets.merge(
+        stock_relative_sentiment_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+    stock_fundamental = targets.merge(
+        stock_fundamental_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+    stock_relative_fundamental = targets.merge(
+        stock_relative_fundamental_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+    stock_fundamental_sentiment = targets.merge(
+        stock_fundamental_sentiment_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+    stock_relative_fundamental_sentiment = targets.merge(
+        stock_relative_fundamental_sentiment_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
 
     def feature_frame(
         base: pd.DataFrame,
@@ -1048,6 +1209,27 @@ def build_v1_dataset(
         "stock_relative_market_sector_compact": feature_frame(
             stock_relative_compact,
             context_summary_frame=compact_context_summary,
+            include_market=True,
+            include_sector=True,
+        ),
+        "stock_only_sentiment": stock_sentiment,
+        "stock_relative_market_sector_sentiment": feature_frame(
+            stock_relative_sentiment,
+            context_summary_frame=context_summary,
+            include_market=True,
+            include_sector=True,
+        ),
+        "stock_only_fundamentals": stock_fundamental,
+        "stock_relative_market_sector_fundamentals": feature_frame(
+            stock_relative_fundamental,
+            context_summary_frame=context_summary,
+            include_market=True,
+            include_sector=True,
+        ),
+        "stock_only_fundamentals_sentiment": stock_fundamental_sentiment,
+        "stock_relative_market_sector_fundamentals_sentiment": feature_frame(
+            stock_relative_fundamental_sentiment,
+            context_summary_frame=context_summary,
             include_market=True,
             include_sector=True,
         ),
@@ -1139,6 +1321,22 @@ def build_latest_v1_feature_sets(
     stock_relative_cols = select_stock_feature_columns(stocks, include_relative=True)
     stock_compact_cols = select_stock_feature_columns(stocks, include_relative=False, compact=True)
     stock_relative_compact_cols = select_stock_feature_columns(stocks, include_relative=True, compact=True)
+    stock_sentiment_cols = select_augmented_stock_feature_columns(stocks, include_relative=False, include_sentiment=True)
+    stock_relative_sentiment_cols = select_augmented_stock_feature_columns(stocks, include_relative=True, include_sentiment=True)
+    stock_fundamental_cols = select_augmented_stock_feature_columns(stocks, include_relative=False, include_fundamentals=True)
+    stock_relative_fundamental_cols = select_augmented_stock_feature_columns(stocks, include_relative=True, include_fundamentals=True)
+    stock_fundamental_sentiment_cols = select_augmented_stock_feature_columns(
+        stocks,
+        include_relative=False,
+        include_sentiment=True,
+        include_fundamentals=True,
+    )
+    stock_relative_fundamental_sentiment_cols = select_augmented_stock_feature_columns(
+        stocks,
+        include_relative=True,
+        include_sentiment=True,
+        include_fundamentals=True,
+    )
     context_cols = select_context_feature_columns(context)
     compact_context_cols = select_context_feature_columns(context, compact=True)
     stock_only_summary = add_window_summaries(
@@ -1162,6 +1360,42 @@ def build_latest_v1_feature_sets(
     stock_relative_compact_summary = add_window_summaries(
         stocks,
         feature_cols=stock_relative_compact_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_sentiment_summary = add_window_summaries(
+        stocks,
+        feature_cols=stock_sentiment_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_relative_sentiment_summary = add_window_summaries(
+        stocks,
+        feature_cols=stock_relative_sentiment_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_fundamental_summary = add_window_summaries(
+        stocks,
+        feature_cols=stock_fundamental_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_relative_fundamental_summary = add_window_summaries(
+        stocks,
+        feature_cols=stock_relative_fundamental_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_fundamental_sentiment_summary = add_window_summaries(
+        stocks,
+        feature_cols=stock_fundamental_sentiment_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_relative_fundamental_sentiment_summary = add_window_summaries(
+        stocks,
+        feature_cols=stock_relative_fundamental_sentiment_cols,
         prefix="stock_",
         window_length=window_length,
     )
@@ -1199,6 +1433,42 @@ def build_latest_v1_feature_sets(
     ).drop(columns=["date"], errors="ignore")
     stock_relative_compact = base.merge(
         stock_relative_compact_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+    stock_sentiment = base.merge(
+        stock_sentiment_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+    stock_relative_sentiment = base.merge(
+        stock_relative_sentiment_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+    stock_fundamental = base.merge(
+        stock_fundamental_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+    stock_relative_fundamental = base.merge(
+        stock_relative_fundamental_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+    stock_fundamental_sentiment = base.merge(
+        stock_fundamental_sentiment_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+    stock_relative_fundamental_sentiment = base.merge(
+        stock_relative_fundamental_sentiment_summary,
         left_on=["ticker", "anchor_date"],
         right_on=["ticker", "date"],
         how="left",
@@ -1248,6 +1518,27 @@ def build_latest_v1_feature_sets(
         "stock_relative_market_sector_compact": feature_frame(
             stock_relative_compact,
             context_summary_frame=compact_context_summary,
+            include_market=True,
+            include_sector=True,
+        ),
+        "stock_only_sentiment": stock_sentiment,
+        "stock_relative_market_sector_sentiment": feature_frame(
+            stock_relative_sentiment,
+            context_summary_frame=context_summary,
+            include_market=True,
+            include_sector=True,
+        ),
+        "stock_only_fundamentals": stock_fundamental,
+        "stock_relative_market_sector_fundamentals": feature_frame(
+            stock_relative_fundamental,
+            context_summary_frame=context_summary,
+            include_market=True,
+            include_sector=True,
+        ),
+        "stock_only_fundamentals_sentiment": stock_fundamental_sentiment,
+        "stock_relative_market_sector_fundamentals_sentiment": feature_frame(
+            stock_relative_fundamental_sentiment,
+            context_summary_frame=context_summary,
             include_market=True,
             include_sector=True,
         ),

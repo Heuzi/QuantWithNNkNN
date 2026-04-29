@@ -34,6 +34,15 @@ def _rows(ticker: str, *, exchange: str, close: float, dollar_volume: float, day
 
 
 class EpisodeEligibilityTests(unittest.TestCase):
+    def test_default_filter_is_broad_sixty_day_standard(self) -> None:
+        config = EpisodeEligibilityConfig()
+
+        self.assertEqual(config.min_history_days, 60)
+        self.assertEqual(config.valid_ohlcv_lookback, 60)
+        self.assertEqual(config.min_valid_ohlcv_days, 55)
+        self.assertEqual(config.min_avg_dollar_volume, 100_000.0)
+        self.assertEqual(config.min_price, 1.0)
+
     def test_filter_enforces_history_liquidity_price_exchange_and_type(self) -> None:
         frame = pd.DataFrame(
             [

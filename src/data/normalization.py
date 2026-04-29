@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import math
-import statistics
 from collections import defaultdict
 from pathlib import Path
 from typing import Sequence
@@ -189,9 +188,13 @@ def _apply_group_transforms(
     if group_count < min_group_size:
         return
 
-    values = [value for _, value in valid_items]
-    mean_value = statistics.mean(values)
-    std_value = statistics.pstdev(values) if group_count >= 2 else None
+    values = [float(value) for _, value in valid_items]
+    mean_value = math.fsum(values) / group_count
+    if group_count >= 2:
+        variance = math.fsum((value - mean_value) ** 2 for value in values) / group_count
+        std_value = math.sqrt(variance)
+    else:
+        std_value = None
     percentiles = _percentile_ranks(values)
 
     for (idx, value), pct in zip(valid_items, percentiles):

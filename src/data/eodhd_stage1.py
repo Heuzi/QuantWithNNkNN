@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -10,6 +11,7 @@ import urllib.request
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock
 from typing import Iterable, Sequence
 
 
@@ -32,15 +34,59 @@ OTC_EXCHANGES = {
     "PINK",
 }
 
-NON_COMMON_SECURITY_NAME_MARKERS = (
-    "warrant",
-    "warrants",
-    "unit",
-    "units",
-    "right",
-    "rights",
-    "preferred",
-    "preference",
+LISTED_EXCHANGE_ALIASES = {
+    "NYSE": {"NYSE"},
+    "NASDAQ": {"NASDAQ"},
+    "AMEX": {"AMEX", "NYSE MKT", "NYSE AMERICAN"},
+    "BATS": {"BATS"},
+}
+
+NON_COMMON_SECURITY_SUFFIXES = {
+    "P",
+    "PR",
+    "PRA",
+    "PRB",
+    "PRC",
+    "PRD",
+    "PRE",
+    "PRF",
+    "PRG",
+    "PRH",
+    "PRI",
+    "PRJ",
+    "PRK",
+    "PRL",
+    "PRM",
+    "PRN",
+    "PRO",
+    "PRP",
+    "PRQ",
+    "PRR",
+    "PRS",
+    "PRT",
+    "PRU",
+    "PRV",
+    "PRW",
+    "PRX",
+    "PRY",
+    "PRZ",
+    "R",
+    "RT",
+    "RW",
+    "U",
+    "UN",
+    "UNIT",
+    "W",
+    "WS",
+    "WT",
+    "WTA",
+    "WTB",
+    "WTC",
+}
+
+NON_COMMON_NAME_PATTERN = re.compile(
+    r"\b(warrant|warrants|unit|units|right|rights|preferred|preference)\b",
+    flags=re.IGNORECASE,
 )
 
 EODHD_DAILY_BAR_HEADERS = [
@@ -105,6 +151,10 @@ class EODHDAPIError(EODHDError):
     """Raised when an EODHD API call fails."""
 
 
+class EODHDRateLimitError(EODHDAPIError):
+    """Raised when EODHD reports a daily or hard request limit."""
+
+
 @dataclass(frozen=True)
 class EODHDCredentials:
     api_key: str | None
@@ -138,21 +188,23 @@ class RateLimiter:
     max_calls: int = DEFAULT_RATE_LIMIT_CALLS
     period_seconds: float = DEFAULT_RATE_LIMIT_PERIOD_SECONDS
     _call_times: deque[float] = field(default_factory=deque, init=False, repr=False)
+    _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def wait(self) -> None:
         if self.max_calls <= 0:
             return
-        now = time.monotonic()
-        while self._call_times and now - self._call_times[0] >= self.period_seconds:
-            self._call_times.popleft()
-        if len(self._call_times) >= self.max_calls:
-            sleep_for = self.period_seconds - (now - self._call_times[0])
-            if sleep_for > 0:
-                time.sleep(sleep_for)
+        with self._lock:
             now = time.monotonic()
             while self._call_times and now - self._call_times[0] >= self.period_seconds:
                 self._call_times.popleft()
-        self._call_times.append(time.monotonic())
+            if len(self._call_times) >= self.max_calls:
+                sleep_for = self.period_seconds - (now - self._call_times[0])
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                now = time.monotonic()
+                while self._call_times and now - self._call_times[0] >= self.period_seconds:
+                    self._call_times.popleft()
+            self._call_times.append(time.monotonic())
 
 
 @dataclass
@@ -203,6 +255,8 @@ class EODHDRESTClient:
                 body = exc.read().decode("utf-8", errors="replace")
                 if exc.code in {401, 403}:
                     raise EODHDAuthError(f"EODHD authorization failed with HTTP {exc.code}: {body}") from exc
+                if exc.code == 402 and "daily api requests limit" in body.lower():
+                    raise EODHDRateLimitError(f"EODHD daily API request limit reached: {body}") from exc
                 if exc.code == 429 and attempt < self.max_retries:
                     time.sleep(max(self.rate_limiter.period_seconds, 60.0))
                     last_error = exc
@@ -278,6 +332,9 @@ class EODHDRESTClient:
                 "General::PrimaryTicker",
             ]
         )
+        return self.get_fundamentals(symbol, filters=filters)
+
+    def get_fundamentals(self, symbol: str, *, filters: str | None = None) -> dict[str, object]:
         data = self.request_json(
             f"/v1.1/fundamentals/{symbol}",
             params={"filter": filters, "fmt": "json"},
@@ -285,6 +342,24 @@ class EODHDRESTClient:
         if isinstance(data, dict):
             return dict(data)
         raise EODHDAPIError(f"EODHD fundamentals response for {symbol} was not an object.")
+
+    def get_sentiments(
+        self,
+        symbols: Sequence[str],
+        *,
+        from_date: str,
+        to_date: str,
+    ) -> dict[str, object]:
+        requested = [str(symbol).upper() for symbol in symbols if str(symbol).strip()]
+        if not requested:
+            return {}
+        data = self.request_json(
+            "/sentiments",
+            params={"s": ",".join(requested), "from": from_date, "to": to_date, "fmt": "json"},
+        )
+        if isinstance(data, dict):
+            return dict(data)
+        raise EODHDAPIError("EODHD sentiments response was not an object.")
 
 
 def eodhd_symbol_for_code(code: str, default_exchange: str = "US") -> str:
@@ -325,16 +400,31 @@ def _as_bool(value: object) -> bool | None:
 
 def _looks_like_non_common_equity(code: str, name: str) -> bool:
     normalized_code = str(code).strip().upper()
-    normalized_name = str(name or "").strip().lower()
-    if any(marker in normalized_name for marker in NON_COMMON_SECURITY_NAME_MARKERS):
+    normalized_name = str(name or "").strip()
+    if NON_COMMON_NAME_PATTERN.search(normalized_name):
         return True
     if "-" in normalized_code:
-        suffix = normalized_code.rsplit("-", 1)[-1]
-        if suffix in {"W", "WS", "WT", "R", "RT", "U", "UN", "P", "PR", "PRA", "PRB", "PRC", "PRD"}:
+        suffix_parts = [part for part in normalized_code.split("-")[1:] if part]
+        if any(part in NON_COMMON_SECURITY_SUFFIXES or part.startswith(("PR", "WT")) for part in suffix_parts):
             return True
     if "-" not in normalized_code and len(normalized_code) >= 5 and normalized_code[-1] in {"D", "W", "R", "U", "P"}:
         return True
     return False
+
+
+def _canonical_listed_exchange(row_exchange: str, requested_exchange: str, *, include_otc: bool = False) -> str | None:
+    normalized_row_exchange = str(row_exchange or "").strip().upper()
+    normalized_requested_exchange = str(requested_exchange or "").strip().upper()
+    if not include_otc and normalized_row_exchange in OTC_EXCHANGES:
+        return None
+    if normalized_requested_exchange not in LISTED_EXCHANGE_ALIASES:
+        return normalized_row_exchange or normalized_requested_exchange or None
+    if not normalized_row_exchange:
+        return normalized_requested_exchange
+    for canonical, aliases in LISTED_EXCHANGE_ALIASES.items():
+        if normalized_row_exchange in aliases:
+            return canonical if canonical == normalized_requested_exchange else None
+    return None
 
 
 def normalize_eodhd_eod_rows(
@@ -397,8 +487,12 @@ def normalize_exchange_symbol_rows(
         name = str(row.get("Name") or row.get("name") or "")
         if _looks_like_non_common_equity(code, name):
             continue
-        row_exchange = str(row.get("Exchange") or exchange or "").strip().upper()
-        if not include_otc and row_exchange in OTC_EXCHANGES:
+        row_exchange = _canonical_listed_exchange(
+            str(row.get("Exchange") or exchange or ""),
+            exchange,
+            include_otc=include_otc,
+        )
+        if not row_exchange:
             continue
         currency = str(row.get("Currency") or row.get("currency") or "").strip().upper()
         if currency and currency != "USD":

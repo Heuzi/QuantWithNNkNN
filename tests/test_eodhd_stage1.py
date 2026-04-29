@@ -66,18 +66,53 @@ class EODHDStage1Tests(unittest.TestCase):
     def test_symbol_list_filter_excludes_units_warrants_rights_and_preferreds(self) -> None:
         rows = [
             {"Code": "A", "Name": "Agilent Technologies Inc", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock"},
+            {"Code": "UAL", "Name": "United Airlines Holdings Inc", "Exchange": "NASDAQ", "Currency": "USD", "Type": "Common Stock"},
             {"Code": "ACAAU", "Name": "Athena Consumer Acquisition Corp Units", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock"},
             {"Code": "ACHR-WS", "Name": "Archer Aviation Inc Warrants", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock"},
+            {"Code": "ACP-RW", "Name": "Aberdeen Income Credit Strategi", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock"},
+            {"Code": "C-WS-A", "Name": "Citigroup Inc", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock"},
+            {"Code": "LEV-WTA", "Name": "LEV-WTA", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock"},
             {"Code": "AACBR", "Name": "Artius II Acquisition Inc Rights", "Exchange": "NASDAQ", "Currency": "USD", "Type": "Common Stock"},
             {"Code": "ACONW", "Name": "Aclarion Inc", "Exchange": "NASDAQ", "Currency": "USD", "Type": "Common Stock"},
             {"Code": "AAUGD", "Name": "Ault Disruptive Technologies Corp", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock"},
             {"Code": "ABC-PR", "Name": "ABC Preferred Shares", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock"},
+            {"Code": "PNFP-PR-A", "Name": "PINNACLE FINANCIAL PARTNERS NON CU", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock"},
+            {"Code": "AGM-P-H", "Name": "AGM-P-H", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock"},
             {"Code": "SNOW", "Name": "Snowflake Inc", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock"},
         ]
 
         normalized = normalize_exchange_symbol_rows(rows, exchange="NYSE", is_delisted=False)
 
         self.assertEqual([row["ticker"] for row in normalized], ["A", "SNOW"])
+
+        nasdaq_normalized = normalize_exchange_symbol_rows(rows, exchange="NASDAQ", is_delisted=False)
+        self.assertEqual([row["ticker"] for row in nasdaq_normalized], ["UAL"])
+
+    def test_symbol_list_filter_keeps_amex_alias_and_excludes_nyse_arca(self) -> None:
+        amex_rows = [
+            {
+                "Code": "AAA",
+                "Name": "AAA Corp",
+                "Exchange": "NYSE MKT",
+                "Currency": "USD",
+                "Type": "Common Stock",
+            }
+        ]
+        nyse_rows = [
+            {
+                "Code": "BBB",
+                "Name": "BBB Corp",
+                "Exchange": "NYSE ARCA",
+                "Currency": "USD",
+                "Type": "Common Stock",
+            }
+        ]
+
+        amex_normalized = normalize_exchange_symbol_rows(amex_rows, exchange="AMEX", is_delisted=False)
+        nyse_normalized = normalize_exchange_symbol_rows(nyse_rows, exchange="NYSE", is_delisted=False)
+
+        self.assertEqual(amex_normalized[0]["exchange"], "AMEX")
+        self.assertEqual(nyse_normalized, [])
 
     def test_eod_rows_use_adjusted_close_and_derive_dollar_volume(self) -> None:
         rows = [

@@ -25,6 +25,7 @@ from src.data.v1_dataset import (
     classification_target_column,
     chronological_split,
     encode_static_categories,
+    identifier_model_input_columns,
     prepare_xy,
     raw_level_model_input_columns,
     rows_for_dates,
@@ -388,6 +389,22 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         self.assertTrue(any(col.startswith("sector_context_") for col in compact_store.feature_columns))
         self.assertLess(len(compact_store.feature_columns), len(store.feature_columns))
 
+    def test_sequence_feature_store_can_include_sentiment_without_ticker_input(self) -> None:
+        stock_features, context_features = _stock_and_context_frames(days=75)
+        stock_features["sentiment_count"] = 1.0
+        stock_features["sentiment_normalized"] = 0.2
+        stock_features["sentiment_missing"] = 0.0
+
+        store = build_sequence_feature_store(
+            stock_features,
+            "stock_relative_market_sector_sentiment_sequence",
+            context_features=context_features,
+            benchmark_ticker="SPY",
+        )
+
+        self.assertIn("sentiment_count", store.feature_columns)
+        self.assertEqual(identifier_model_input_columns(store.feature_columns), [])
+
     def test_model_feature_columns_reject_raw_level_inputs(self) -> None:
         stock_features, context_features = _stock_and_context_frames(days=75)
 
@@ -408,6 +425,36 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         )
         for feature_set, columns in dataset.feature_columns.items():
             self.assertEqual(raw_level_model_input_columns(columns), [], feature_set)
+            self.assertEqual(identifier_model_input_columns(columns), [], feature_set)
+
+    def test_identifier_columns_are_metadata_only_and_augmented_feature_sets_exist(self) -> None:
+        stock_features, context_features = _stock_and_context_frames(days=75)
+        stock_features["eodhd_symbol"] = stock_features["ticker"] + ".US"
+        stock_features["sentiment_count"] = 1.0
+        stock_features["sentiment_normalized"] = 0.1
+        stock_features["sentiment_missing"] = 0.0
+        stock_features["fundamental_revenue"] = 1000.0
+        stock_features["fundamental_missing"] = 0.0
+        stock_features["fundamental_staleness_days"] = 5.0
+
+        dataset = build_v1_dataset(
+            stock_features,
+            context_features,
+            horizons=(1, 5),
+            window_length=10,
+            benchmark_ticker="SPY",
+        )
+
+        self.assertIn("ticker", dataset.metadata.columns)
+        self.assertIn("stock_only_sentiment", dataset.feature_sets)
+        self.assertIn("stock_only_fundamentals", dataset.feature_sets)
+        self.assertIn("stock_only_fundamentals_sentiment", dataset.feature_sets)
+        for feature_set, columns in dataset.feature_columns.items():
+            self.assertNotIn("ticker", columns)
+            self.assertNotIn("eodhd_symbol", columns)
+            self.assertEqual(identifier_model_input_columns(columns), [], feature_set)
+        self.assertTrue(any("sentiment_count" in col for col in dataset.feature_columns["stock_only_sentiment"]))
+        self.assertTrue(any("fundamental_revenue" in col for col in dataset.feature_columns["stock_only_fundamentals"]))
 
     def test_end_to_end_walk_forward_and_prediction_smoke(self) -> None:
         stock_features, context_features = _stock_and_context_frames(days=55)

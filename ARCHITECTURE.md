@@ -70,6 +70,7 @@ V1 implementation note:
 Current implementation snapshot:
 - Default daily market data source is now EODHD, targeting `data/eodhd_us_equities_30y`.
 - Massive-era datasets and model artifacts are legacy and should not be compared directly against EODHD full-universe results.
+- Full-universe EODHD raw collection uses `scripts/update_eodhd_daily_dataset.py --fetch-only --max-tickers 0`; per-ticker daily features can be generated with `scripts/build_eodhd_daily_features_chunked.py`. The existing in-memory processed rebuild path is reserved for smoke/pilot panels, and full-panel cross-sectional normalization still needs an out-of-core path.
 - `scripts/train_v1_supervised_baselines.py` now defaults to expanding-window walk-forward evaluation.
 - The current baseline suite now supports both regression and event classification.
 - Regression still uses the multi-horizon market-adjusted return targets.
@@ -86,7 +87,9 @@ Current implementation snapshot:
 - Sequence inputs have shape `[batch_size, window_length, features_per_day]`. The default `window_length` is 60 trading days, but training can override it with `--window-length`.
 - Tabular inputs have shape `[episode_count, flattened_feature_count]` and use rolling-window summary columns such as `__last`, `__mean60`, and `__std60`.
 - `torch`, `xgboost`, and `lightgbm` now prefer GPU execution when available and fall back to CPU otherwise; torch models require the local PyTorch build to report `torch.cuda.is_available()`, while XGBoost/LightGBM may attempt vendor GPU paths and record any fallback error.
-- V1 training and latest inference can apply the shared episode eligibility filter: listed common-stock universe upstream, then as-of minimum history, valid adjusted OHLCV coverage, trailing dollar-volume, adjusted close price, and exchange allowlist checks at `anchor_date`.
+- V1 training and latest inference apply the shared broad episode eligibility filter: listed common-stock universe upstream, then as-of 60-day default history, at least 55 valid adjusted OHLCV rows, 60-day average dollar volume, adjusted close price, and exchange allowlist checks at `anchor_date`.
+- EODHD Fundamentals v1.1 and daily sentiment are supported as optional enrichment sources. Fundamentals require explicit availability dates before joining to historical model rows; sentiment is lagged one trading row by default.
+- Raw identifiers such as `ticker`, `eodhd_symbol`, ISIN, CIK/CUSIP/FIGI, and company name are metadata only and are rejected from model feature columns.
 - Latest inference uses final deployment bundles saved after the walk-forward run completes.
 
 ## Input organization
@@ -114,6 +117,8 @@ Implemented V1 sequence feature sets:
 - `stock_relative_market_sequence`: stock daily features plus relative stock features and `SPY` context.
 - `stock_relative_sector_sequence`: stock daily features plus relative stock features and mapped sector ETF context.
 - `stock_relative_market_sector_sequence`: stock daily features plus relative stock features, `SPY` context, and mapped sector ETF context.
+- `stock_sentiment_sequence`: stock daily features plus lagged daily sentiment features.
+- `stock_relative_market_sector_sentiment_sequence`: relative stock features plus `SPY`, sector ETF, and lagged sentiment context.
 
 Each sequence set also has a compact counterpart, for example `stock_relative_market_sector_compact_sequence`. Compact sequence profiles keep the same component structure but use a smaller feature list, dropping obvious duplicate or highly correlated fields such as exact momentum aliases, percentile-rank counterparts, and some overlapping liquidity columns.
 
@@ -140,6 +145,12 @@ Implemented V1 tabular feature sets:
 - `stock_relative_compact`
 - `stock_relative_market_compact`
 - `stock_relative_market_sector_compact`
+- `stock_only_sentiment`
+- `stock_relative_market_sector_sentiment`
+- `stock_only_fundamentals`
+- `stock_relative_market_sector_fundamentals`
+- `stock_only_fundamentals_sentiment`
+- `stock_relative_market_sector_fundamentals_sentiment`
 
 Approximate full vs compact feature counts when all expected columns are present:
 - `stock_only`: about 90

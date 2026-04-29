@@ -42,10 +42,10 @@ A **case** is:
 - Never use global scaling statistics computed over future periods for final evaluation.
 
 ## Vendor assumptions
-- **Massive is the primary vendor for now.**
-- Massive ticker history looked historically aware in early manual checks.
-- Massive news timestamps looked usable, but historical ticker labels in news may not be fully reliable for renamed/reused tickers.
-- Do not assume a Massive endpoint is backtest-safe unless its time semantics are verified.
+- **EODHD is the primary vendor for current V1 daily market data.**
+- Massive code and artifacts are legacy and retained only for reproducibility.
+- EODHD raw OHLCV, fundamentals, and sentiment must still be treated as vendor data requiring explicit time-semantics checks before model use.
+- Do not assume an EODHD endpoint is backtest-safe unless its time semantics are verified.
 - Build vendor adapters so the project can switch data providers later if needed.
 
 ## Default modeling roadmap

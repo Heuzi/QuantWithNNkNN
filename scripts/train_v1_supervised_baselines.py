@@ -121,12 +121,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable as-of common-stock/history/liquidity/price/exchange episode filtering.",
     )
-    parser.add_argument("--eligibility-min-history-days", type=int, default=252)
-    parser.add_argument("--eligibility-valid-ohlcv-lookback", type=int, default=252)
-    parser.add_argument("--eligibility-min-valid-ohlcv-days", type=int, default=252)
+    parser.add_argument("--eligibility-min-history-days", type=int, default=0)
+    parser.add_argument("--eligibility-valid-ohlcv-lookback", type=int, default=60)
+    parser.add_argument("--eligibility-min-valid-ohlcv-days", type=int, default=55)
     parser.add_argument("--eligibility-dollar-volume-lookback", type=int, default=60)
-    parser.add_argument("--eligibility-min-avg-dollar-volume", type=float, default=1_000_000.0)
-    parser.add_argument("--eligibility-min-price", type=float, default=5.0)
+    parser.add_argument("--eligibility-min-avg-dollar-volume", type=float, default=100_000.0)
+    parser.add_argument("--eligibility-min-price", type=float, default=1.0)
     parser.add_argument(
         "--eligibility-allowed-exchanges",
         default="NYSE,NASDAQ,AMEX,BATS",
@@ -169,7 +169,7 @@ def _episode_eligibility_config(args: argparse.Namespace) -> EpisodeEligibilityC
     if args.disable_episode_eligibility_filter:
         return None
     return EpisodeEligibilityConfig(
-        min_history_days=args.eligibility_min_history_days,
+        min_history_days=args.eligibility_min_history_days or args.window_length,
         valid_ohlcv_lookback=args.eligibility_valid_ohlcv_lookback,
         min_valid_ohlcv_days=args.eligibility_min_valid_ohlcv_days,
         dollar_volume_lookback=args.eligibility_dollar_volume_lookback,

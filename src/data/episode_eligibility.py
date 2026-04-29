@@ -70,12 +70,12 @@ def parse_allowed_exchanges(value: str | Sequence[str] | None) -> tuple[str, ...
 @dataclass(frozen=True)
 class EpisodeEligibilityConfig:
     enabled: bool = True
-    min_history_days: int = 252
-    valid_ohlcv_lookback: int = 252
-    min_valid_ohlcv_days: int = 252
+    min_history_days: int = 60
+    valid_ohlcv_lookback: int = 60
+    min_valid_ohlcv_days: int = 55
     dollar_volume_lookback: int = 60
-    min_avg_dollar_volume: float = 1_000_000.0
-    min_price: float = 5.0
+    min_avg_dollar_volume: float = 100_000.0
+    min_price: float = 1.0
     allowed_exchanges: tuple[str, ...] = DEFAULT_ALLOWED_EXCHANGES
 
     def __post_init__(self) -> None:

@@ -392,20 +392,42 @@ Current EODHD V1 policy:
 - use EODHD `adjusted_close` to build adjusted internal OHLC close series when available
 - derive `dollar_volume` locally as adjusted internal `close * volume`
 - do not use EODHD EOD `vwap` or transactions because the daily EOD endpoint does not provide them
-- do not treat EODHD fundamentals metadata as point-in-time fundamentals until filing/public availability logic is added
+- fetch and store EODHD Fundamentals v1.1 raw JSON, but only expose records with an explicit availability date as historical model features
+- fetch EODHD daily sentiment aggregates and lag them by one trading row before model use
+- for the full 30-year all-stock panel, run raw collection with `--fetch-only` first; the pilot in-memory feature rebuild path is intended for smoke/pilot panels, not the complete raw panel
 
 Episode eligibility rule:
 - Each supervised or latest-prediction stock-window episode is eligible only if the rule passes as of `anchor_date`.
 - The upstream EODHD universe filter supplies listed common equity rows and excludes ETFs, funds, units, warrants, rights, and preferred/preference shares before bars are fetched.
 - The per-episode filter then requires enough available trading history, enough valid adjusted OHLCV rows, sufficient trailing average dollar volume, a minimum adjusted close price, and an allowed listed exchange.
-- Default implementation parameters are `min_history_days=252`, `valid_ohlcv_lookback=252`, `min_valid_ohlcv_days=252`, `dollar_volume_lookback=60`, `min_avg_dollar_volume=1000000`, `min_price=5`, and allowed exchanges `NYSE`, `NASDAQ`, `AMEX`, and `BATS`.
+- Default implementation parameters are broad: `min_history_days=window_length` with default `60`, `valid_ohlcv_lookback=60`, `min_valid_ohlcv_days=55`, `dollar_volume_lookback=60`, `min_avg_dollar_volume=100000`, `min_price=1`, and allowed exchanges `NYSE`, `NASDAQ`, `AMEX`, and `BATS`.
 - EODHD `NYSE MKT` / `NYSE American` exchange labels are treated as `AMEX`; OTC/PINK and other exchanges are excluded by default.
 - `min_history_days` counts available daily rows up to and including the anchor date, matching the current feature-window convention.
+- Missing sector, fundamentals, or sentiment must not remove an otherwise eligible stock-window episode. Use `Unknown`, missingness indicators, neutral sentiment defaults, and model-side imputation.
+
+Identifier policy:
+- `ticker`, `eodhd_symbol`, `isin`, CIK/CUSIP/FIGI, company name, and other symbol identifiers are metadata only.
+- Models must not receive raw identifiers as numeric features or learned categorical embeddings.
+- Sequence models may use ticker internally to look up the correct window, but ticker is not part of the sequence token or static embedding input.
+
+EODHD fundamentals and sentiment policy:
+- Raw fundamentals are stored under `raw/eodhd_fundamentals_raw/`.
+- Historical model features use only fundamental records with explicit availability dates such as filing/accepted dates and join them with `availability_date <= anchor_date`.
+- Current `General` metadata may supply sector and industry labels, but it is not treated as point-in-time fundamental history unless historical availability is verified.
+- Raw sentiment rows are stored in `raw/eodhd_sentiment_daily.csv`.
+- Sentiment feature columns use the previous trading row's sentiment values by default because EODHD sentiment dates are daily aggregates without an intraday cutoff.
+
+Full-universe storage policy:
+- `raw/eodhd_stock_bars.csv`, `raw/market_context_bars.csv`, `raw/eodhd_fundamentals_raw/`, `raw/eodhd_sentiment_daily.csv`, and `raw/eodhd_fetch_status.csv` are local generated outputs and are not committed.
+- `raw/eodhd_fetch_manifest.json` records raw fetch status counts and row counts for full runs.
+- A full 30-year all-stock panel can be tens of millions of rows. Use `scripts/build_eodhd_daily_features_chunked.py` for per-ticker daily feature generation from raw bars. Full-panel cross-sectional normalization still requires a chunked or out-of-core implementation. The existing end-to-end rebuild path remains appropriate for small smoke and pilot panels.
 
 Known risks:
 - ticker identity and symbol reuse are not fully solved by the daily bar adapter
 - delisted coverage and metadata should be audited before final trading-style evaluation
 - raw volume is not currently corporate-action adjusted by the adapter
+- EODHD fundamental field coverage is incomplete for some companies; missingness is expected and should be modeled explicitly
+- vendor sentiment ticker mapping may be unsafe for renamed or reused symbols without additional identity validation
 
 ## Suggested feature families
 

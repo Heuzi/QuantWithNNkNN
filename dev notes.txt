@@ -1,10 +1,15 @@
-is everything running on GPU like before?
+I don't want less dates. 
 
+144 usable tickers after target/window availability
+
+add fundamental data and sentiment. these are new in EODHD.
+
+
+make sure the model can run on future tickers, meaning that we don't necessarily require identifiers such as ticker name as input (do we do that right now?) 
 
 
 explain the training scheme and data (different variants of the data)
 
-add fundamental data and sentiment. these are new in EODHD.
 
 Run both regression and classification models
 

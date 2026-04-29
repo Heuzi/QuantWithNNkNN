@@ -394,6 +394,14 @@ Current EODHD V1 policy:
 - do not use EODHD EOD `vwap` or transactions because the daily EOD endpoint does not provide them
 - do not treat EODHD fundamentals metadata as point-in-time fundamentals until filing/public availability logic is added
 
+Episode eligibility rule:
+- Each supervised or latest-prediction stock-window episode is eligible only if the rule passes as of `anchor_date`.
+- The upstream EODHD universe filter supplies listed common equity rows and excludes ETFs, funds, units, warrants, rights, and preferred/preference shares before bars are fetched.
+- The per-episode filter then requires enough available trading history, enough valid adjusted OHLCV rows, sufficient trailing average dollar volume, a minimum adjusted close price, and an allowed listed exchange.
+- Default implementation parameters are `min_history_days=252`, `valid_ohlcv_lookback=252`, `min_valid_ohlcv_days=252`, `dollar_volume_lookback=60`, `min_avg_dollar_volume=1000000`, `min_price=5`, and allowed exchanges `NYSE`, `NASDAQ`, `AMEX`, and `BATS`.
+- EODHD `NYSE MKT` / `NYSE American` exchange labels are treated as `AMEX`; OTC/PINK and other exchanges are excluded by default.
+- `min_history_days` counts available daily rows up to and including the anchor date, matching the current feature-window convention.
+
 Known risks:
 - ticker identity and symbol reuse are not fully solved by the daily bar adapter
 - delisted coverage and metadata should be audited before final trading-style evaluation

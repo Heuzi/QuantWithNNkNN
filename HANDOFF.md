@@ -36,6 +36,7 @@ Use this file as the shared handoff note when switching between computers or Cod
 - EODHD fundamentals/sentiment feature helpers: `src/data/eodhd_enrichment.py`
 - EODHD rebuild script: `scripts/update_eodhd_daily_dataset.py`
 - Chunked EODHD raw-to-feature builder: `scripts/build_eodhd_daily_features_chunked.py`
+- Bulk EODHD fundamentals helper: `scripts/fetch_eodhd_fundamentals_bulk.py`
 - Dataset and feature construction: `src/data/v1_dataset.py`
 - Normalization helpers: `src/data/normalization.py`
 - Baseline trainer: `scripts/train_v1_supervised_baselines.py`
@@ -84,6 +85,9 @@ Before trusting a new EODHD run:
   - `py -3.11 scripts/update_eodhd_daily_dataset.py --tickers AAPL,MSFT,NVDA --start-date 2025-01-01 --end-date 2025-06-30 --dataset-root data/eodhd_smoke --window-length 10 --horizon-days 5 --eligibility-min-history-days 10 --eligibility-valid-ohlcv-lookback 10 --eligibility-min-valid-ohlcv-days 8`
 - Full raw fetch, after smoke validation:
   - `py -3.11 scripts/update_eodhd_daily_dataset.py --dataset-root data/eodhd_us_equities_30y --start-date 1995-01-01 --end-date 2026-04-24 --max-tickers 0 --fetch-only --fetch-workers 8`
+- Finish or estimate missing fundamentals through Bulk Fundamentals, if EODHD enables that entitlement:
+  - dry run: `py -3.11 scripts/fetch_eodhd_fundamentals_bulk.py --dataset-root data/eodhd_us_equities_30y --dry-run --batch-size 500`
+  - fetch: `py -3.11 scripts/fetch_eodhd_fundamentals_bulk.py --dataset-root data/eodhd_us_equities_30y --batch-size 500`
 - Chunked raw-to-feature build after raw fetch:
   - `py -3.11 scripts/build_eodhd_daily_features_chunked.py --dataset-root data/eodhd_us_equities_30y`
 - Universe smoke through EODHD symbol lists:
@@ -99,6 +103,7 @@ Before trusting a new EODHD run:
 - Raw volume is not currently split-adjusted by the adapter.
 - EODHD sector/industry metadata is current vendor metadata, not a PIT sector history.
 - EODHD fundamental field coverage is incomplete for some companies; missingness is expected.
+- Regular per-symbol EODHD fundamentals are expensive at full-universe scale. Prefer Bulk Fundamentals if the account has Extended Fundamentals/Bulk access enabled; current probe returned HTTP 403, so EODHD support may need to enable it.
 - EODHD sentiment ticker mapping may be unsafe for renamed or reused symbols without additional identity validation.
 - Full all-stock rebuild can consume many paid API calls and should be run intentionally after smoke/pilot validation.
 - The full 30-year all-stock panel is too large for the pilot in-memory feature builder. Use `--fetch-only` for raw collection and `scripts/build_eodhd_daily_features_chunked.py` for per-ticker daily features. Full-panel cross-sectional normalization still needs a chunked or out-of-core implementation.

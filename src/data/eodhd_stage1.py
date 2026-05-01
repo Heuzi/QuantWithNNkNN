@@ -343,6 +343,30 @@ class EODHDRESTClient:
             return dict(data)
         raise EODHDAPIError(f"EODHD fundamentals response for {symbol} was not an object.")
 
+    def get_bulk_fundamentals(
+        self,
+        exchange: str,
+        *,
+        symbols: Sequence[str] | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+        version: str | None = "1.2",
+    ) -> object:
+        requested = [str(symbol).upper() for symbol in symbols or [] if str(symbol).strip()]
+        data = self.request_json(
+            f"/bulk-fundamentals/{exchange}",
+            params={
+                "symbols": ",".join(requested) if requested else None,
+                "offset": offset,
+                "limit": limit,
+                "version": version,
+                "fmt": "json",
+            },
+        )
+        if isinstance(data, (dict, list)):
+            return data
+        raise EODHDAPIError(f"EODHD bulk fundamentals response for {exchange} was not JSON object/list.")
+
     def get_sentiments(
         self,
         symbols: Sequence[str],

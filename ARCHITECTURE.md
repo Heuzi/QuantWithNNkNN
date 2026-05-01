@@ -88,7 +88,7 @@ Current implementation snapshot:
 - Tabular inputs have shape `[episode_count, flattened_feature_count]` and use rolling-window summary columns such as `__last`, `__mean60`, and `__std60`.
 - `torch`, `xgboost`, and `lightgbm` now prefer GPU execution when available and fall back to CPU otherwise; torch models require the local PyTorch build to report `torch.cuda.is_available()`, while XGBoost/LightGBM may attempt vendor GPU paths and record any fallback error.
 - V1 training and latest inference apply the shared broad episode eligibility filter: listed common-stock universe upstream, then as-of 60-day default history, at least 55 valid adjusted OHLCV rows, 60-day average dollar volume, adjusted close price, and exchange allowlist checks at `anchor_date`.
-- EODHD Fundamentals v1.1 and daily sentiment are supported as optional enrichment sources. Fundamentals require explicit availability dates before joining to historical model rows; sentiment is lagged one trading row by default.
+- EODHD Fundamentals v1.1 and daily sentiment are supported as optional enrichment sources. For each `anchor_date`, fundamentals use the latest filing/public record with `availability_date <= anchor_date`; fiscal period end alone is not enough. Sentiment is lagged one trading row by default.
 - Raw identifiers such as `ticker`, `eodhd_symbol`, ISIN, CIK/CUSIP/FIGI, and company name are metadata only and are rejected from model feature columns.
 - Latest inference uses final deployment bundles saved after the walk-forward run completes.
 

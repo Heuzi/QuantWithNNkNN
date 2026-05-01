@@ -31,6 +31,7 @@ A **case** is:
 ## Backtest-safety rules
 - Treat **point-in-time correctness** as mandatory.
 - For fundamentals, use **filing/public availability date**, not only fiscal period end.
+- For each stock-window episode, join the latest safe fundamental record with `availability_date <= anchor_date`; never use a filing that became public after the anchor date.
 - Include delisted names when the dataset supports them.
 - Handle ticker changes, symbol reuse, splits, and dividends carefully.
 - News features must be filtered by article timestamp.

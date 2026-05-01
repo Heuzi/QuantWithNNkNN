@@ -54,6 +54,7 @@ Legacy Massive scripts remain in the repo for reproducibility but are no longer 
 - Raw price, raw volume, raw dollar volume, legacy VWAP, previous-close, and moving-average level columns remain forbidden as model inputs.
 - EODHD fundamentals `General` metadata may provide sector/industry labels, but it is not treated as point-in-time fundamentals.
 - Full EODHD Fundamentals v1.1 raw JSON is stored under `raw/eodhd_fundamentals_raw/`; only records with explicit availability dates become historical model features.
+- Fundamental model features are joined as of each episode's `anchor_date`: use the latest filing/public row with `availability_date <= anchor_date`, never a row whose fiscal period ended before `anchor_date` but was filed later.
 - EODHD daily sentiment is stored in `raw/eodhd_sentiment_daily.csv` and lagged by one trading row before model use.
 - Full raw fetch outputs are resumable and local-only: `raw/eodhd_stock_bars.csv`, `raw/market_context_bars.csv`, `raw/eodhd_fundamentals_raw/`, `raw/eodhd_sentiment_daily.csv`, `raw/eodhd_fetch_status.csv`, and `raw/eodhd_fetch_manifest.json`.
 - Missing sector/industry metadata falls back to `Unknown`.

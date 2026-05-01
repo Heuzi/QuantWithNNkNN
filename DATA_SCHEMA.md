@@ -316,6 +316,13 @@ Suggested columns:
 - derived ratio fields
 - vendor record ID if available
 
+Fundamental join rule:
+- For every stock-window episode at `anchor_date`, use the latest fundamental record whose public/filing availability date is `<= anchor_date`.
+- The fiscal period end date is not sufficient. A fiscal period ending before `anchor_date` is still unavailable until the filing/public availability date says it was public.
+- Example: if `anchor_date = 2025-03-15` and the latest public filing is `availability_date = 2025-01-30` for `source_period_end = 2024-12-31`, use that filing. Do not use a later filing with `availability_date > 2025-03-15`.
+- Carry the latest available safe fundamental values forward onto daily model rows, and include `fundamental_missing` and `fundamental_staleness_days`.
+- If a vendor field has no reliable public/filing availability date, store it as raw data but do not expose it as a historical model feature.
+
 ### Metadata table
 One row per entity or one row per `(ticker, as_of_date)` depending on whether metadata varies over time.
 
@@ -412,7 +419,7 @@ Identifier policy:
 
 EODHD fundamentals and sentiment policy:
 - Raw fundamentals are stored under `raw/eodhd_fundamentals_raw/`.
-- Historical model features use only fundamental records with explicit availability dates such as filing/accepted dates and join them with `availability_date <= anchor_date`.
+- Historical model features use only fundamental records with explicit availability dates such as filing/accepted dates. For each `anchor_date`, join the latest available row with `availability_date <= anchor_date`; never join by fiscal period end alone.
 - Current `General` metadata may supply sector and industry labels, but it is not treated as point-in-time fundamental history unless historical availability is verified.
 - Raw sentiment rows are stored in `raw/eodhd_sentiment_daily.csv`.
 - Sentiment feature columns use the previous trading row's sentiment values by default because EODHD sentiment dates are daily aggregates without an intraday cutoff.

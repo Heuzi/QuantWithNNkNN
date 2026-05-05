@@ -70,13 +70,18 @@ V1 implementation note:
 Current implementation snapshot:
 - Default daily market data source is now EODHD, targeting `data/eodhd_us_equities_30y`.
 - Massive-era datasets and model artifacts are legacy and should not be compared directly against EODHD full-universe results.
-- Full-universe EODHD raw collection uses `scripts/update_eodhd_daily_dataset.py --fetch-only --max-tickers 0`; per-ticker daily features can be generated with `scripts/build_eodhd_daily_features_chunked.py`. The existing in-memory processed rebuild path is reserved for smoke/pilot panels, and full-panel cross-sectional normalization still needs an out-of-core path.
+- Full-universe EODHD raw collection uses `scripts/update_eodhd_daily_dataset.py --fetch-only --max-tickers 0`; per-ticker daily features can be generated through the standard profile runner: `py -3.11 scripts/run_v1_pipeline.py --profile eodhd_full_walk_forward --stage build_features`. The existing in-memory processed rebuild path is reserved for smoke/pilot panels, and full-panel cross-sectional normalization still needs an out-of-core path.
+- Standard walk-forward experiments should use JSON profiles under `configs/v1_runs/` through `scripts/run_v1_pipeline.py`, rather than ad hoc long command strings. Profiles can include a `materialize_panel` stage so the trainer consumes a bounded dataset root under `data/eodhd_training_panels/` instead of loading the full 34GB feature CSV.
+- Full and near-full EODHD experiments should also use the `materialize_cache` stage. It creates an episode-level cache with float32 tabular matrices and memmapped sequence arrays so feature engineering runs once and model/fold training reads cached arrays.
 - `scripts/train_v1_supervised_baselines.py` now defaults to expanding-window walk-forward evaluation.
-- The current baseline suite now supports both regression and event classification.
-- Regression still uses the multi-horizon market-adjusted return targets.
-- Classification now adds `market_outperform_any_20d_gt_5pct`, a PIT-safe label that is positive when pathwise benchmark-relative excess return exceeds `5%` at any point in the next 20 trading days.
-- The trainer can run `regression`, `classification`, or `both` in one pass.
-- Regression and classification leaderboards and deploy bundles are written separately so downstream analysis can choose one or both tasks.
+- The code still supports regression and event classification, but the current V1 production direction is classification-only.
+- Regression targets are retained for diagnostics and research ablations, not for the standard full EODHD walk-forward run.
+- The production classification label is `market_outperform_any_20d_gt_5pct`, a PIT-safe label that is positive when pathwise benchmark-relative excess return exceeds `5%` at any point in the next 20 trading days.
+- The standard full profile `configs/v1_runs/eodhd_full_walk_forward.json` trains only the selected classifier candidates from model selection:
+  - `torch_seq_static_classifier` with `stock_relative_market_sector_sentiment_sequence`
+  - `torch_mlp_classifier` with `stock_relative_market_sector_fundamentals_sentiment`
+  - `xgboost_classifier` with `stock_relative_market_sector_fundamentals_sentiment`
+- The trainer can still run `regression`, `classification`, or `both` for experiments, but production runs should use `task_type=classification`.
 - The current baseline suite includes tabular baselines plus `torch_seq_static`.
 - Regression tabular baselines include `zero`, `mean`, `momentum_heuristic`, `ridge`, `elastic_net`, `lightgbm`, `xgboost`, `sklearn_hist_gb`, `sklearn_mlp`, and `torch_mlp`.
 - Classification tabular baselines include `logistic_regression`, `elastic_net_classifier`, `lightgbm_classifier`, `xgboost_classifier`, `sklearn_mlp_classifier`, and `torch_mlp_classifier`.
@@ -90,7 +95,19 @@ Current implementation snapshot:
 - V1 training and latest inference apply the shared broad episode eligibility filter: listed common-stock universe upstream, then as-of 60-day default history, at least 55 valid adjusted OHLCV rows, 60-day average dollar volume, adjusted close price, and exchange allowlist checks at `anchor_date`.
 - EODHD Fundamentals v1.1 and daily sentiment are supported as optional enrichment sources. For each `anchor_date`, fundamentals use the latest filing/public record with `availability_date <= anchor_date`; fiscal period end alone is not enough. Sentiment is lagged one trading row by default.
 - Raw identifiers such as `ticker`, `eodhd_symbol`, ISIN, CIK/CUSIP/FIGI, and company name are metadata only and are rejected from model feature columns.
-- Latest inference uses final deployment bundles saved after the walk-forward run completes.
+- Latest inference uses final deployment bundles saved after the walk-forward run completes. Scoring a new target-pending stock-window episode does not require retraining as long as the required features can be built.
+- Raw identifiers remain metadata at inference time. A novel ticker can be scored if it exists in the prediction dataset root, passes the same episode eligibility filter, and has enough prior window data. Unseen sector or industry categories map to unknown id `0` in static categorical encoders.
+- Cache-backed training path:
+  - `scripts/materialize_v1_episode_cache.py` streams a ticker-contiguous daily feature CSV and writes `episode_metadata.csv`, `targets.csv`, tabular `.npy` matrices, sequence `.npy` row stores, date arrays, and a manifest.
+  - `scripts/train_v1_supervised_baselines.py --episode-cache-dir ...` loads metadata/targets plus memory-mapped arrays instead of loading/rebuilding tabular feature frames from daily CSV.
+  - `torch_seq_static_classifier` gets a store whose `get_window(...)` slices from memmap at batch time.
+  - `torch_mlp_classifier` iterates cached tabular batches directly.
+  - `xgboost_classifier` uses the cached float32 tabular matrix; external-memory `QuantileDMatrix` remains a later optimization if the cached split matrices become too large.
+- Standard run-size taxonomy:
+  - Smoke runs validate code and data plumbing only. They use tiny ticker/date/episode limits, short torch budgets, and are not performance evidence.
+  - `eodhd_full_walk_forward` is the current serious benchmark profile. It uses the full EODHD source root but materializes a bounded high-liquidity panel, currently capped at 1,500 tickers, 2014-01-01 through 2026-04-24, 500,000 most recent eligible episodes, and 6 walk-forward folds. This is the required engineering gate before any multi-day run.
+  - A true full-universe run is the eventual large experiment. It should use `max_tickers=0`, the intended long history, the same cache-backed training path, and no small benchmark episode cap unless a cap is explicitly chosen for compute control. It is not the current default profile.
+  - `eodhd_model_selection_walk_forward` remains an intermediate research profile for comparing more model families before changing the selected top-three classifiers.
 
 ## Input organization
 
@@ -327,8 +344,8 @@ Support two modes:
    - later: optional retrieval-aware aggregation or hybrid head
 
 ## Baseline experiments
-Always include:
-- ridge or linear regression where sensible
+For broad model-search phases, include:
+- linear/logistic baselines where sensible
 - MLP on flattened engineered features
 - ablations comparing engineered raw features vs normalized cross-sectional feature sets
 - XGBoost / LightGBM
@@ -338,6 +355,8 @@ Always include:
 - same model with retrieval branch removed
 - same model with static branch removed
 - same model with context branch removed
+
+For the current full EODHD V1 benchmark, run only the three selected classification candidates listed in the implementation snapshot. Regression is no longer a standard full-run task.
 
 V1 artifact policy:
 - keep every trained model
@@ -369,18 +388,21 @@ Current final deploy training:
 - Sequence-static final deploy models follow the same rule: pick `best_epoch_` from the final train/validation split, then retrain on all resolved sequence episodes for `best_epoch_` epochs.
 
 Report:
-- RMSE
-- MAE
-- rank correlation / IC where useful
-- directional accuracy
-- simple threshold-strategy metrics when relevant
+- PR AUC for the positive event label
+- ROC AUC
+- top-decile precision
+- realized top-bottom spread
+- directional or hit-rate diagnostics when relevant
+- regression metrics such as RMSE/MAE only for explicit research ablations
 
 ## Continual-learning stance
-For domain shift, prefer:
-- rolling retraining
-- periodic supervised refresh
-- replay windows
-- recency weighting
+For domain shift and production maintenance:
+- run data refreshes for prediction more often than model retraining
+- score latest windows with saved deploy bundles after each data refresh
+- retrain monthly or quarterly by default
+- retrain immediately after feature schema, target, vendor semantics, or universe-policy changes
+- retrain sooner if OOS monitoring shows material performance drift
+- prefer rolling retraining, periodic supervised refresh, replay windows, and recency weighting before adding online learning
 
 Do not move to RL unless the task is explicitly redefined as sequential action optimization.
 

@@ -37,6 +37,11 @@ from src.data.v1_dataset import (  # noqa: E402
     split_ranges,
     target_column,
 )
+from src.data.v1_episode_cache import (  # noqa: E402
+    CachedV1Dataset,
+    load_cached_sequence_stores,
+    load_cached_v1_dataset,
+)
 from src.data.episode_eligibility import (  # noqa: E402
     EpisodeEligibilityConfig,
     parse_allowed_exchanges,
@@ -116,6 +121,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--torch-batch-size", type=int, default=0, help="Override batch size for torch models.")
     parser.add_argument("--torch-hidden-units", type=int, default=0, help="Override hidden units for torch MLP models.")
     parser.add_argument("--torch-hidden-dim", type=int, default=0, help="Override hidden dimension for sequence/static torch models.")
+    parser.add_argument(
+        "--episode-cache-dir",
+        default="",
+        help=(
+            "Optional materialized V1 episode cache. When set, training loads cached "
+            "metadata/targets plus memmapped feature arrays instead of rebuilding "
+            "feature frames from daily CSVs."
+        ),
+    )
     parser.add_argument(
         "--disable-episode-eligibility-filter",
         action="store_true",
@@ -211,7 +225,11 @@ def _prepare_flat_inputs(
     task_type: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     meta = dataset.metadata.loc[rows].reset_index(drop=True)
-    x = dataset.feature_sets[feature_set].loc[rows, dataset.feature_columns[feature_set]].reset_index(drop=True)
+    feature_frame = dataset.feature_sets[feature_set]
+    if hasattr(feature_frame, "view"):
+        x = feature_frame.view(rows)
+    else:
+        x = feature_frame.loc[rows, dataset.feature_columns[feature_set]].reset_index(drop=True)
     y = dataset.targets.loc[rows, _task_target_columns(dataset, task_type)].reset_index(drop=True)
     return meta, x, y
 
@@ -533,6 +551,7 @@ def _train_task_holdout(
     models_dir: Path,
     generated_utc: str,
     task_type: str,
+    sequence_stores: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
     split = chronological_split(dataset.metadata, train_fraction=args.train_fraction, val_fraction=args.val_fraction)
     split_summary = split_ranges(dataset.metadata, split)
@@ -540,16 +559,17 @@ def _train_task_holdout(
     metrics_rows: list[dict[str, object]] = []
     prediction_frames: list[pd.DataFrame] = []
     trained_records: list[dict[str, object]] = []
-    sequence_stores = {
-        feature_set: build_sequence_feature_store(
-            stock_features,
-            feature_set,
-            context_features=context_features,
-            benchmark_ticker=args.benchmark_ticker,
-        )
-        for feature_set in feature_sets
-        if any(is_sequence_static_model(model_name) for model_name in model_names) and feature_set in SEQUENCE_FEATURE_SET_NAMES
-    }
+    if sequence_stores is None:
+        sequence_stores = {
+            feature_set: build_sequence_feature_store(
+                stock_features,
+                feature_set,
+                context_features=context_features,
+                benchmark_ticker=args.benchmark_ticker,
+            )
+            for feature_set in feature_sets
+            if any(is_sequence_static_model(model_name) for model_name in model_names) and feature_set in SEQUENCE_FEATURE_SET_NAMES
+        }
     target_columns = _task_target_columns(dataset, task_type)
     realized_col = _realized_return_column(dataset, args.classification_horizon)
 
@@ -697,6 +717,7 @@ def _train_task_walk_forward(
     models_dir: Path,
     generated_utc: str,
     task_type: str,
+    sequence_stores: dict[str, object] | None = None,
 ) -> tuple[list[dict[str, object]], pd.DataFrame]:
     purge_gap = args.walk_forward_purge_gap or max(horizons)
     folds = build_walk_forward_folds(
@@ -712,16 +733,17 @@ def _train_task_walk_forward(
         folds = folds[-args.walk_forward_max_folds :]
     dataset.metadata.to_csv(output_dir / "episode_metadata.csv", index=False)
     write_json(output_dir / "folds.json", {"folds": [_fold_summary(fold, dataset.metadata) for fold in folds]})
-    sequence_stores = {
-        feature_set: build_sequence_feature_store(
-            stock_features,
-            feature_set,
-            context_features=context_features,
-            benchmark_ticker=args.benchmark_ticker,
-        )
-        for feature_set in feature_sets
-        if any(is_sequence_static_model(model_name) for model_name in model_names) and feature_set in SEQUENCE_FEATURE_SET_NAMES
-    }
+    if sequence_stores is None:
+        sequence_stores = {
+            feature_set: build_sequence_feature_store(
+                stock_features,
+                feature_set,
+                context_features=context_features,
+                benchmark_ticker=args.benchmark_ticker,
+            )
+            for feature_set in feature_sets
+            if any(is_sequence_static_model(model_name) for model_name in model_names) and feature_set in SEQUENCE_FEATURE_SET_NAMES
+        }
     fold_metric_rows: list[dict[str, object]] = []
     oos_prediction_frames: list[pd.DataFrame] = []
     oos_metric_rows: list[dict[str, object]] = []
@@ -917,25 +939,34 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     models_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Loading daily stock features...")
-    stock_features = load_daily_features(args.dataset_root)
-    context_features = load_market_context_features(args.dataset_root, stock_features=stock_features)
-    if context_features.empty:
-        raise SystemExit("Market context features are missing. Run scripts/update_eodhd_daily_dataset.py first.")
     eligibility_config = _episode_eligibility_config(args)
+    cached_sequence_stores: dict[str, object] | None = None
+    if args.episode_cache_dir:
+        print("Loading materialized V1 episode cache...")
+        dataset = load_cached_v1_dataset(args.episode_cache_dir)
+        cached_sequence_stores = load_cached_sequence_stores(args.episode_cache_dir)
+        stock_features = pd.DataFrame()
+        context_features = pd.DataFrame()
+    else:
+        print("Loading daily stock features...")
+        stock_features = load_daily_features(args.dataset_root)
+        context_features = load_market_context_features(args.dataset_root, stock_features=stock_features)
+        if context_features.empty:
+            raise SystemExit("Market context features are missing. Run scripts/update_eodhd_daily_dataset.py first.")
 
-    print("Building V1 supervised dataset...")
-    dataset = build_v1_dataset(
-        stock_features,
-        context_features,
-        horizons=horizons,
-        window_length=args.window_length,
-        benchmark_ticker=args.benchmark_ticker,
-        max_episodes=args.max_episodes or None,
-        classification_horizon=args.classification_horizon,
-        classification_threshold=args.classification_threshold,
-        eligibility_config=eligibility_config,
-    )
+        print("Building V1 supervised dataset...")
+        dataset = build_v1_dataset(
+            stock_features,
+            context_features,
+            horizons=horizons,
+            window_length=args.window_length,
+            benchmark_ticker=args.benchmark_ticker,
+            max_episodes=args.max_episodes or None,
+            classification_horizon=args.classification_horizon,
+            classification_threshold=args.classification_threshold,
+            eligibility_config=eligibility_config,
+            feature_set_names=feature_sets,
+        )
     dataset.targets.to_csv(output_dir / "episode_targets.csv", index=False)
     generated_utc = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     task_types = _task_types(args)
@@ -943,6 +974,7 @@ def main() -> None:
     dataset_manifest = {
         "generated_utc": generated_utc,
         "dataset_root": str(Path(args.dataset_root).resolve()),
+        "episode_cache_dir": str(Path(args.episode_cache_dir).resolve()) if args.episode_cache_dir else None,
         "horizons": list(horizons),
         "target_columns": dataset.target_columns,
         "classification_target_columns": dataset.classification_target_columns,
@@ -1019,6 +1051,7 @@ def main() -> None:
                 models_dir=models_dir,
                 generated_utc=generated_utc,
                 task_type=task_type,
+                sequence_stores=cached_sequence_stores,
             )
             leaderboard = pd.read_csv(output_dir / ("leaderboard.csv" if task_type == "regression" else "classification_leaderboard.csv"))
         else:
@@ -1034,6 +1067,7 @@ def main() -> None:
                 models_dir=models_dir,
                 generated_utc=generated_utc,
                 task_type=task_type,
+                sequence_stores=cached_sequence_stores,
             )
         combined_records.extend(task_records)
         suffix = "regression" if task_type == "regression" else "classification"

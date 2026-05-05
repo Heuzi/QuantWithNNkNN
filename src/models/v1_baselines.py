@@ -6,7 +6,7 @@ import os
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, Sequence
+from typing import Any, Iterable, Protocol, Sequence
 
 import numpy as np
 import pandas as pd
@@ -78,6 +78,26 @@ class Standardizer:
         self.scale_[self.scale_ < EPS] = 1.0
         return self
 
+    def fit_batches(self, batches: Iterable[np.ndarray], *, width: int) -> "Standardizer":
+        counts = np.zeros(width, dtype=np.float64)
+        sums = np.zeros(width, dtype=np.float64)
+        sumsq = np.zeros(width, dtype=np.float64)
+        for batch in batches:
+            values = np.asarray(batch, dtype=np.float64)
+            if values.size == 0:
+                continue
+            valid = np.isfinite(values)
+            counts += valid.sum(axis=0)
+            safe = np.where(valid, values, 0.0)
+            sums += safe.sum(axis=0)
+            sumsq += (safe * safe).sum(axis=0)
+        self.mean_ = np.divide(sums, counts, out=np.zeros(width, dtype=np.float64), where=counts > 0)
+        variances = np.divide(sumsq, counts, out=np.ones(width, dtype=np.float64), where=counts > 0) - self.mean_**2
+        variances = np.maximum(variances, 0.0)
+        self.scale_ = np.sqrt(variances)
+        self.scale_[self.scale_ < EPS] = 1.0
+        return self
+
     def transform(self, x: np.ndarray) -> np.ndarray:
         if self.mean_ is None or self.scale_ is None:
             raise RuntimeError("Standardizer is not fit.")
@@ -93,6 +113,8 @@ class Standardizer:
 def _as_array(frame: pd.DataFrame | np.ndarray) -> np.ndarray:
     if isinstance(frame, pd.DataFrame):
         return frame.astype(float).to_numpy(dtype=np.float64)
+    if hasattr(frame, "to_numpy"):
+        return frame.to_numpy(dtype=np.float64)
     return np.asarray(frame, dtype=np.float64)
 
 
@@ -143,6 +165,19 @@ def _torch_loader_kwargs(*, device: str, shuffle: bool, batch_size: int) -> dict
         "shuffle": shuffle,
         "pin_memory": False,
     }
+
+
+def _fit_sequence_store_standardizer(
+    scaler: Standardizer,
+    store: Any,
+    cutoff_date: str,
+    *,
+    width: int,
+) -> Standardizer:
+    if hasattr(store, "iter_rows_through"):
+        return scaler.fit_batches(store.iter_rows_through(cutoff_date), width=width)
+    train_rows = store.fit_rows_through(cutoff_date)
+    return scaler.fit(train_rows.astype(np.float64))
 
 
 def _move_tensor(value, device, *, dtype=None):
@@ -424,9 +459,19 @@ class LightGBMRegressor:
     def _preprocess(self, x: pd.DataFrame, *, fit: bool) -> np.ndarray:
         from sklearn.impute import SimpleImputer
 
+        if hasattr(x, "iter_numpy_batches"):
+            # Cached tabular matrices are already float32 feature arrays with
+            # missing values filled at cache-build time. Loading the requested
+            # split from the memmap is still cheaper than rebuilding pandas
+            # feature frames for every fold/model.
+            if fit:
+                self.imputer_ = None
+            return np.nan_to_num(x.to_numpy(dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
         if fit:
             self.imputer_ = SimpleImputer(strategy="constant", fill_value=0.0, keep_empty_features=True)
             return self.imputer_.fit_transform(x)
+        if getattr(self, "imputer_", None) is None:
+            return np.nan_to_num(x.to_numpy(dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
         return self.imputer_.transform(x)
 
     def fit(
@@ -546,9 +591,15 @@ class XGBoostRegressor:
     def _preprocess(self, x: pd.DataFrame, *, fit: bool) -> np.ndarray:
         from sklearn.impute import SimpleImputer
 
+        if hasattr(x, "iter_numpy_batches"):
+            if fit:
+                self.imputer_ = None
+            return np.nan_to_num(x.to_numpy(dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
         if fit:
             self.imputer_ = SimpleImputer(strategy="constant", fill_value=0.0, keep_empty_features=True)
             return self.imputer_.fit_transform(x)
+        if getattr(self, "imputer_", None) is None:
+            return np.nan_to_num(x.to_numpy(dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
         return self.imputer_.transform(x)
 
     def fit(
@@ -1071,8 +1122,12 @@ class TorchSequenceStaticRegressor:
             int(np.max(x["static_categorical"][column])) + 1 if len(x["static_categorical"][column]) else 1
             for column in self.static_columns_
         ]
-        train_rows = x["store"].fit_rows_through(self._train_cutoff_date(x["metadata"]))
-        self.x_scaler.fit(train_rows.astype(np.float64))
+        _fit_sequence_store_standardizer(
+            self.x_scaler,
+            x["store"],
+            self._train_cutoff_date(x["metadata"]),
+            width=len(x["store"].feature_columns),
+        )
         y_train = self.y_scaler.fit(_as_array(y)).transform(_as_array(y)).astype(np.float32)
         y_val_arr = self.y_scaler.transform(_as_array(val_y)).astype(np.float32) if val_y is not None else None
         train_dataset = _SequenceStaticDataset(
@@ -1163,8 +1218,12 @@ class TorchSequenceStaticRegressor:
 
     def refit_full(self, x: dict[str, object], y: pd.DataFrame) -> "TorchSequenceStaticRegressor":
         self._resolve_device()
-        train_rows = x["store"].fit_rows_through(self._train_cutoff_date(x["metadata"]))
-        self.x_scaler.fit(train_rows.astype(np.float64))
+        _fit_sequence_store_standardizer(
+            self.x_scaler,
+            x["store"],
+            self._train_cutoff_date(x["metadata"]),
+            width=len(x["store"].feature_columns),
+        )
         y_train = self.y_scaler.fit(_as_array(y)).transform(_as_array(y)).astype(np.float32)
         train_dataset = _SequenceStaticDataset(
             store=x["store"],
@@ -1479,9 +1538,15 @@ class XGBoostClassifier:
     def _preprocess(self, x: pd.DataFrame, *, fit: bool) -> np.ndarray:
         from sklearn.impute import SimpleImputer
 
+        if hasattr(x, "iter_numpy_batches"):
+            if fit:
+                self.imputer_ = None
+            return np.nan_to_num(x.to_numpy(dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
         if fit:
             self.imputer_ = SimpleImputer(strategy="constant", fill_value=0.0, keep_empty_features=True)
             return self.imputer_.fit_transform(x)
+        if getattr(self, "imputer_", None) is None:
+            return np.nan_to_num(x.to_numpy(dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
         return self.imputer_.transform(x)
 
     def fit(
@@ -1762,6 +1827,86 @@ class TorchMLPClassifier:
                 loss.backward()
                 optimizer.step()
 
+    def _lazy_logloss(self, x, y_values: np.ndarray, mean_t, scale_t) -> float:
+        import torch
+
+        loss_fn = torch.nn.BCEWithLogitsLoss()
+        losses: list[float] = []
+        self.model_.eval()
+        with torch.no_grad():
+            for local_rows, batch in x.iter_numpy_batches(batch_size=self.batch_size, shuffle=False):
+                xb = torch.from_numpy(batch.astype(np.float32)).to(self.device_)
+                xb = (torch.nan_to_num(xb, nan=0.0) - mean_t) / scale_t
+                yb = torch.from_numpy(y_values[local_rows]).to(self.device_)
+                losses.append(float(loss_fn(self.model_(xb), yb).item()))
+        return float(np.mean(losses)) if losses else np.inf
+
+    def _fit_lazy(
+        self,
+        x,
+        y: pd.DataFrame,
+        *,
+        val_x=None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "TorchMLPClassifier":
+        import torch
+
+        torch.manual_seed(self.random_state)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.random_state)
+        self._resolve_device()
+        y_train = _as_array(y).reshape(-1, 1).astype(np.float32)
+        if np.unique(y_train).size < 2:
+            self.constant_probability_ = float(y_train[0, 0]) if len(y_train) else 0.0
+            self.best_epoch_ = 1
+            return self
+        self.x_scaler.fit_batches(
+            (batch for _, batch in x.iter_numpy_batches(batch_size=65_536, shuffle=False)),
+            width=x.shape[1],
+        )
+        y_val_arr = _as_array(val_y).reshape(-1, 1).astype(np.float32) if val_y is not None else None
+        self.model_ = self._build_model(x.shape[1]).to(self.device_)
+        optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
+        loss_fn = torch.nn.BCEWithLogitsLoss()
+        mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32)).to(self.device_)
+        scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32)).to(self.device_)
+        best_state = copy.deepcopy(self.model_.state_dict())
+        best_metric = np.inf
+        best_epoch = 1
+        epochs_without_improvement = 0
+        for epoch in range(self.max_epochs):
+            self.model_.train()
+            for local_rows, batch in x.iter_numpy_batches(
+                batch_size=self.batch_size,
+                shuffle=True,
+                random_state=self.random_state + epoch,
+            ):
+                xb = torch.from_numpy(batch.astype(np.float32)).to(self.device_)
+                xb = (torch.nan_to_num(xb, nan=0.0) - mean_t) / scale_t
+                yb = torch.from_numpy(y_train[local_rows]).to(self.device_)
+                logits = self.model_(xb)
+                loss = loss_fn(logits, yb)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+            metric = (
+                self._lazy_logloss(val_x, y_val_arr, mean_t, scale_t)
+                if val_x is not None and y_val_arr is not None
+                else self._lazy_logloss(x, y_train, mean_t, scale_t)
+            )
+            if metric + 1e-6 < best_metric:
+                best_metric = metric
+                best_state = copy.deepcopy(self.model_.state_dict())
+                best_epoch = epoch + 1
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+            if val_x is not None and epochs_without_improvement >= self.patience:
+                break
+        self.model_.load_state_dict(best_state)
+        self.best_epoch_ = best_epoch
+        return self
+
     def fit(
         self,
         x: pd.DataFrame,
@@ -1772,6 +1917,8 @@ class TorchMLPClassifier:
     ) -> "TorchMLPClassifier":
         import torch
 
+        if hasattr(x, "iter_numpy_batches"):
+            return self._fit_lazy(x, y, val_x=val_x, val_y=val_y)
         torch.manual_seed(self.random_state)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.random_state)
@@ -1825,6 +1972,17 @@ class TorchMLPClassifier:
         return self
 
     def refit_full(self, x: pd.DataFrame, y: pd.DataFrame) -> "TorchMLPClassifier":
+        if hasattr(x, "iter_numpy_batches"):
+            previous_epochs = int(getattr(self, "best_epoch_", self.max_epochs))
+            old_max_epochs = self.max_epochs
+            old_patience = self.patience
+            self.max_epochs = max(previous_epochs, 1)
+            self.patience = max(previous_epochs + 1, 1)
+            try:
+                return self._fit_lazy(x, y)
+            finally:
+                self.max_epochs = old_max_epochs
+                self.patience = old_patience
         x_full = self.x_scaler.fit(_as_array(x)).transform(_as_array(x)).astype(np.float32)
         y_full = _as_array(y).reshape(-1, 1).astype(np.float32)
         if np.unique(y_full).size < 2:
@@ -1838,12 +1996,25 @@ class TorchMLPClassifier:
     def predict(self, x: pd.DataFrame) -> np.ndarray:
         import torch
 
-        x_values = self.x_scaler.transform(_as_array(x)).astype(np.float32)
         if hasattr(self, "constant_probability_"):
-            return np.full((len(x_values), 1), float(self.constant_probability_), dtype=np.float64)
+            return np.full((len(x), 1), float(self.constant_probability_), dtype=np.float64)
         self._resolve_device()
         self.model_ = self.model_.to(self.device_)
         self.model_.eval()
+        if hasattr(x, "iter_numpy_batches"):
+            outputs: list[np.ndarray] = []
+            mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32)).to(self.device_)
+            scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32)).to(self.device_)
+            with torch.no_grad():
+                for _, batch in x.iter_numpy_batches(batch_size=self.batch_size, shuffle=False):
+                    xb = torch.from_numpy(batch.astype(np.float32)).to(self.device_)
+                    xb = (torch.nan_to_num(xb, nan=0.0) - mean_t) / scale_t
+                    logits = self.model_(xb).detach().cpu().numpy()
+                    outputs.append(1.0 / (1.0 + np.exp(-logits)))
+            if not outputs:
+                return np.empty((0, 1), dtype=np.float64)
+            return np.vstack(outputs).astype(np.float64)
+        x_values = self.x_scaler.transform(_as_array(x)).astype(np.float32)
         with torch.no_grad():
             logits = self.model_(_move_tensor(torch.from_numpy(x_values), self.device_)).detach().cpu().numpy()
         return (1.0 / (1.0 + np.exp(-logits))).astype(np.float64)
@@ -1978,8 +2149,12 @@ class TorchSequenceStaticClassifier:
             int(np.max(x["static_categorical"][column])) + 1 if len(x["static_categorical"][column]) else 1
             for column in self.static_columns_
         ]
-        train_rows = x["store"].fit_rows_through(self._train_cutoff_date(x["metadata"]))
-        self.x_scaler.fit(train_rows.astype(np.float64))
+        _fit_sequence_store_standardizer(
+            self.x_scaler,
+            x["store"],
+            self._train_cutoff_date(x["metadata"]),
+            width=len(x["store"].feature_columns),
+        )
         y_train = _as_array(y).reshape(-1, 1).astype(np.float32)
         if np.unique(y_train).size < 2:
             self.constant_probability_ = float(y_train[0, 0]) if len(y_train) else 0.0
@@ -2045,8 +2220,12 @@ class TorchSequenceStaticClassifier:
 
     def refit_full(self, x: dict[str, object], y: pd.DataFrame) -> "TorchSequenceStaticClassifier":
         self._resolve_device()
-        train_rows = x["store"].fit_rows_through(self._train_cutoff_date(x["metadata"]))
-        self.x_scaler.fit(train_rows.astype(np.float64))
+        _fit_sequence_store_standardizer(
+            self.x_scaler,
+            x["store"],
+            self._train_cutoff_date(x["metadata"]),
+            width=len(x["store"].feature_columns),
+        )
         y_train = _as_array(y).reshape(-1, 1).astype(np.float32)
         if np.unique(y_train).size < 2:
             self.constant_probability_ = float(y_train[0, 0]) if len(y_train) else 0.0

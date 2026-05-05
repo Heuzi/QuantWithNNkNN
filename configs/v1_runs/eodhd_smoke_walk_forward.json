@@ -1,0 +1,84 @@
+{
+  "name": "eodhd_smoke_walk_forward",
+  "dataset_root": "data/eodhd_us_equities_30y",
+  "stages": [
+    "materialize_panel",
+    "train"
+  ],
+  "materialize_panel": {
+    "end_date": "2026-04-24",
+    "force": true,
+    "output_dataset_root": "data/eodhd_training_panels/eodhd_smoke_walk_forward",
+    "progress_every": 50000,
+    "start_date": "2020-01-01",
+    "tickers": [
+      "AAPL",
+      "ABBV",
+      "ABT",
+      "ACN",
+      "ADBE",
+      "ADI",
+      "ADM",
+      "ADP",
+      "ADSK",
+      "AEP",
+      "AIG",
+      "ALGN",
+      "AMAT",
+      "AMD",
+      "AMGN",
+      "AMT",
+      "AMZN"
+    ]
+  },
+  "build_features": {
+    "force": true,
+    "max_tickers": 25,
+    "progress_every": 5,
+    "skip_fundamentals": false,
+    "skip_sentiment": false
+  },
+  "train": {
+    "benchmark_ticker": "SPY",
+    "classification_horizon": 20,
+    "classification_models": [
+      "lightgbm_classifier",
+      "torch_seq_static_classifier"
+    ],
+    "classification_threshold": 0.05,
+    "eval_mode": "walk_forward",
+    "feature_sets": [
+      "stock_only",
+      "stock_relative_market_sector",
+      "stock_only_fundamentals_sentiment",
+      "stock_relative_market_sector_fundamentals_sentiment",
+      "stock_only_sequence",
+      "stock_relative_market_sector_sequence",
+      "stock_relative_market_sector_sentiment_sequence"
+    ],
+    "final_stop_block_size": 21,
+    "horizons": [
+      5,
+      10,
+      20
+    ],
+    "max_episodes": 5000,
+    "models": [
+      "ridge",
+      "lightgbm",
+      "torch_seq_static"
+    ],
+    "output_root": "artifacts/v1_baselines",
+    "run_name": "eodhd_smoke_walk_forward",
+    "task_type": "both",
+    "torch_batch_size": 512,
+    "torch_max_epochs": 3,
+    "torch_patience": 1,
+    "walk_forward_max_folds": 2,
+    "walk_forward_min_train_dates": 126,
+    "walk_forward_oos_block_size": 21,
+    "walk_forward_purge_gap": 20,
+    "walk_forward_val_block_size": 21,
+    "window_length": 60
+  }
+}

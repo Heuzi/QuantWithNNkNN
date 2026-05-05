@@ -1,0 +1,72 @@
+{
+  "name": "eodhd_model_selection_walk_forward",
+  "description": "Model-selection benchmark for choosing candidates before a larger full run. It deliberately uses a smaller high-liquidity materialized panel so sequence models and heavier tabular models can be compared in the same walk-forward protocol.",
+  "dataset_root": "data/eodhd_us_equities_30y",
+  "stages": [
+    "materialize_panel",
+    "train"
+  ],
+  "materialize_panel": {
+    "end_date": "2026-04-24",
+    "force": true,
+    "max_tickers": 250,
+    "min_latest_dollar_volume": 1000000,
+    "min_latest_price": 1,
+    "output_dataset_root": "data/eodhd_training_panels/eodhd_model_selection_walk_forward",
+    "progress_every": 250000,
+    "start_date": "2018-01-01",
+    "ticker_selection": "latest_dollar_volume"
+  },
+  "train": {
+    "benchmark_ticker": "SPY",
+    "classification_horizon": 20,
+    "classification_models": [
+      "logistic_regression",
+      "elastic_net_classifier",
+      "lightgbm_classifier",
+      "xgboost_classifier",
+      "sklearn_mlp_classifier",
+      "torch_mlp_classifier",
+      "torch_seq_static_classifier"
+    ],
+    "classification_threshold": 0.05,
+    "eval_mode": "walk_forward",
+    "feature_sets": [
+      "stock_only",
+      "stock_relative_market_sector",
+      "stock_only_fundamentals_sentiment",
+      "stock_relative_market_sector_fundamentals_sentiment",
+      "stock_only_sequence",
+      "stock_relative_market_sector_sequence",
+      "stock_relative_market_sector_sentiment_sequence"
+    ],
+    "final_stop_block_size": 21,
+    "horizons": [
+      5,
+      10,
+      20
+    ],
+    "max_episodes": 60000,
+    "models": [
+      "ridge",
+      "elastic_net",
+      "lightgbm",
+      "xgboost",
+      "sklearn_mlp",
+      "torch_mlp",
+      "torch_seq_static"
+    ],
+    "output_root": "artifacts/v1_baselines",
+    "run_name": "eodhd_model_selection_walk_forward",
+    "task_type": "both",
+    "torch_batch_size": 1024,
+    "torch_max_epochs": 6,
+    "torch_patience": 2,
+    "walk_forward_max_folds": 4,
+    "walk_forward_min_train_dates": 252,
+    "walk_forward_oos_block_size": 21,
+    "walk_forward_purge_gap": 20,
+    "walk_forward_val_block_size": 21,
+    "window_length": 60
+  }
+}

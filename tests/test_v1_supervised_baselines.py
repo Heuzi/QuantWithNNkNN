@@ -30,6 +30,11 @@ from src.data.v1_dataset import (
     raw_level_model_input_columns,
     rows_for_dates,
 )
+from src.data.v1_episode_cache import (
+    build_episode_cache,
+    load_cached_sequence_stores,
+    load_cached_v1_dataset,
+)
 from src.models.v1_baselines import (
     build_leaderboard,
     evaluate_predictions,
@@ -404,6 +409,47 @@ class V1SupervisedBaselineTests(unittest.TestCase):
 
         self.assertIn("sentiment_count", store.feature_columns)
         self.assertEqual(identifier_model_input_columns(store.feature_columns), [])
+
+    def test_episode_cache_materializes_lazy_tabular_and_sequence_inputs(self) -> None:
+        stock_features, context_features = _stock_and_context_frames(ticker_count=5, days=45)
+        stock_features = stock_features.sort_values(["ticker", "date"]).reset_index(drop=True)
+        context_features = context_features.sort_values(["ticker", "date"]).reset_index(drop=True)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "dataset"
+            cache_dir = Path(tmpdir) / "episode_cache"
+            _write_dataset_root(root, stock_features, context_features)
+            manifest = build_episode_cache(
+                dataset_root=root,
+                cache_dir=cache_dir,
+                feature_sets=[
+                    "stock_relative_market_sector_fundamentals_sentiment",
+                    "stock_relative_market_sector_sentiment_sequence",
+                ],
+                horizons=(5,),
+                window_length=10,
+                benchmark_ticker="SPY",
+                max_episodes=100,
+                classification_horizon=5,
+                classification_threshold=0.01,
+                eligibility_config=None,
+                force=True,
+                progress_every=0,
+            )
+            cached = load_cached_v1_dataset(cache_dir)
+            stores = load_cached_sequence_stores(cache_dir)
+
+            self.assertEqual(manifest["episode_count"], len(cached.metadata))
+            self.assertIn("stock_relative_market_sector_fundamentals_sentiment", cached.feature_sets)
+            self.assertIn("stock_relative_market_sector_sentiment_sequence", stores)
+            rows = cached.metadata["anchor_date"].notna()
+            view = cached.feature_sets["stock_relative_market_sector_fundamentals_sentiment"].view(rows)
+            self.assertEqual(view.shape[0], len(cached.metadata))
+            self.assertEqual(identifier_model_input_columns(view.columns), [])
+            store = stores["stock_relative_market_sector_sentiment_sequence"]
+            first = cached.metadata.iloc[0]
+            window = store.get_window(first["ticker"], int(first["window_row_count"]) - 1, 10)
+            self.assertEqual(window.shape, (10, len(store.feature_columns)))
 
     def test_model_feature_columns_reject_raw_level_inputs(self) -> None:
         stock_features, context_features = _stock_and_context_frames(days=75)

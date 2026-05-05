@@ -428,6 +428,24 @@ Full-universe storage policy:
 - `raw/eodhd_stock_bars.csv`, `raw/market_context_bars.csv`, `raw/eodhd_fundamentals_raw/`, `raw/eodhd_sentiment_daily.csv`, and `raw/eodhd_fetch_status.csv` are local generated outputs and are not committed.
 - `raw/eodhd_fetch_manifest.json` records raw fetch status counts and row counts for full runs.
 - A full 30-year all-stock panel can be tens of millions of rows. Use `scripts/build_eodhd_daily_features_chunked.py` for per-ticker daily feature generation from raw bars. Full-panel cross-sectional normalization still requires a chunked or out-of-core implementation. The existing end-to-end rebuild path remains appropriate for small smoke and pilot panels.
+- Standardized V1 preparation and train/test runs should use `scripts/run_v1_pipeline.py` with JSON profiles in `configs/v1_runs/`. Use `eodhd_full_walk_forward` for the standard high-liquidity EODHD walk-forward benchmark and `eodhd_smoke_walk_forward` for short post-build training checks.
+- The current pandas trainer should not point directly at the 34GB full `processed/daily_features.csv`. Use `scripts/materialize_v1_training_panel.py` through the profile runner to create a bounded dataset root under `data/eodhd_training_panels/`, with sector/industry metadata joined from `raw/eodhd_equity_metadata.csv`.
+- Full-profile training should then use `scripts/materialize_v1_episode_cache.py` through the `materialize_cache` profile stage. The cache writes episode metadata/targets, float32 tabular `.npy` matrices, and memmapped sequence row arrays so expensive feature engineering is done once before model/fold training.
+- Cache-backed training is the required path for full or near-full universe experiments. Torch sequence models read windows lazily from the memmapped sequence store; torch MLP classifiers batch from cached tabular matrices; XGBoost classifiers consume the cached float32 tabular matrix instead of rebuilding pandas feature frames per fold.
+
+Standard dataset/run sizes:
+- Smoke runs are plumbing checks. They use very small ticker/date/episode limits and short model budgets. They should prove that feature construction, cache materialization, and training execute, but their metrics should not be used for model selection.
+- `eodhd_full_walk_forward` is the current serious benchmark profile. It reads from `data/eodhd_us_equities_30y`, materializes a bounded high-liquidity panel under `data/eodhd_training_panels/`, builds an episode cache, and trains the selected classification candidates. Its current config is intentionally smaller than the full universe: 1,500 tickers, 2014-01-01 through 2026-04-24, 500,000 most recent eligible episodes, and 6 walk-forward folds.
+- A true full-universe run is a separate escalation after the benchmark profile passes. It should use `max_tickers=0`, the intended long EODHD history, the same episode-cache training path, and either no episode cap or an explicitly documented compute cap.
+- `eodhd_model_selection_walk_forward` is a research/model-selection profile, not the default production benchmark. Use it when changing the candidate list.
+
+Production refresh, prediction, and retraining policy:
+- V1 production is classification-first. The standard full run trains `torch_seq_static_classifier`, `torch_mlp_classifier`, and `xgboost_classifier`; regression is retained only for explicit research ablations.
+- Refresh EODHD OHLCV, market context, and sentiment daily or weekly after market close when fresh predictions are needed.
+- Refresh fundamentals monthly by default, and more often around earnings/filing seasons if API quota allows. Only records with verified availability dates can become historical model features.
+- After each data refresh, build or update the prediction dataset root and score latest target-pending windows with saved final classifier bundles. Prediction does not require retraining.
+- Retrain monthly or quarterly by default, and immediately after changes to feature schema, target definition, universe policy, vendor semantics, or clear OOS performance drift.
+- Novel tickers do not require model retraining if they pass episode eligibility and have enough prior window data in the prediction dataset. Ticker and vendor symbol identifiers remain metadata only; unseen static sector/industry categories map to unknown id `0`.
 
 Known risks:
 - ticker identity and symbol reuse are not fully solved by the daily bar adapter
@@ -485,8 +503,8 @@ V1 supervised split semantics:
 - One supervised row is one stock-window episode: `(ticker, anchor_date, prior window features)`.
 - Training, validation, and OOS test splits are assigned by `anchor_date`, not by randomly shuffling episodes.
 - Current default input window is `60` trading days ending on `anchor_date`.
-- Current regression labels are future market-adjusted returns measured after `anchor_date`, such as 5, 10, and 20 trading days forward.
-- Current classification label is `market_outperform_any_20d_gt_5pct`, positive when pathwise market-adjusted outperformance exceeds `5%` within the next 20 trading days.
+- Regression labels are future market-adjusted returns measured after `anchor_date`, such as 5, 10, and 20 trading days forward, but they are no longer part of the standard full V1 run.
+- The standard classification label is `market_outperform_any_20d_gt_5pct`, positive when pathwise market-adjusted outperformance exceeds `5%` within the next 20 trading days.
 - Walk-forward folds use an expanding training date range, then a later validation block, then a purge gap, then a later OOS test block.
 - The default purge gap is the maximum forward target horizon, currently `20` trading days, to avoid validation target windows bleeding into OOS scoring windows.
 - Later folds have more training episodes because scored history is allowed to join the expanding training range.
@@ -498,6 +516,7 @@ Final deploy fit semantics:
 - The deploy model is then refit on all resolved episodes when the model supports `refit_full`.
 - For sequence-static models, this means choosing `best_epoch_` on the final train/validation split, then retraining on all resolved 60-day sequence episodes for that many epochs.
 - Dates whose future target windows are not fully resolved remain target-pending and should not enter supervised train/validation/OOS scoring.
+- The final deploy bundles are the source of truth for later prediction runs until the next scheduled retrain. New target-pending episodes are scored by rebuilding their features and loading the saved bundle; they are not used for training until their future labels resolve and a later retrain is intentionally run.
 
 ## Auditability requirements
 Every feature family should record:

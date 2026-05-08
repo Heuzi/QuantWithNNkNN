@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import copy
+import gc
 import json
 import os
 import pickle
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Protocol, Sequence
@@ -159,12 +161,279 @@ def _gpu_available() -> bool:
     return False
 
 
+def _xgboost_device(prefer_gpu: bool) -> str:
+    requested = os.environ.get("V1_XGBOOST_DEVICE", "auto").strip().lower()
+    if requested in {"cpu", "-1", "none", "void"}:
+        return "cpu"
+    if requested in {"cuda", "gpu"}:
+        return "cuda" if _gpu_available() else "cpu"
+    return "cuda" if prefer_gpu and _gpu_available() else "cpu"
+
+
+def _xgboost_nthread(default: int = 1) -> int:
+    raw = os.environ.get("V1_XGBOOST_NTHREAD", "").strip()
+    if not raw:
+        return default
+    try:
+        return max(int(raw), 1)
+    except ValueError:
+        return default
+
+
+def _xgboost_chunk_rows(default: int = 1_048_576) -> int:
+    raw = os.environ.get("V1_XGBOOST_CHUNK_ROWS", "").strip()
+    if not raw:
+        return default
+    try:
+        return max(int(raw), 1)
+    except ValueError:
+        return default
+
+
+def _xgboost_chunk_epochs(default: int = 1) -> int:
+    raw = os.environ.get("V1_XGBOOST_CHUNK_EPOCHS", "").strip()
+    if not raw:
+        return default
+    try:
+        return max(int(raw), 1)
+    except ValueError:
+        return default
+
+
+def _xgboost_training_mode(row_count: int) -> str:
+    requested = os.environ.get("V1_XGBOOST_TRAINING_MODE", "auto").strip().lower()
+    if requested in {"chunk", "chunks", "chunked"}:
+        return "chunked"
+    if requested in {"external", "external_memory", "extmem"}:
+        return "external"
+    try:
+        threshold = max(int(os.environ.get("V1_XGBOOST_CHUNK_THRESHOLD_ROWS", "5000000")), 1)
+    except ValueError:
+        threshold = 5_000_000
+    return "chunked" if int(row_count) >= threshold else "external"
+
+
 def _torch_loader_kwargs(*, device: str, shuffle: bool, batch_size: int) -> dict[str, object]:
-    return {
+    kwargs: dict[str, object] = {
         "batch_size": batch_size,
         "shuffle": shuffle,
-        "pin_memory": False,
+        "pin_memory": device == "cuda",
     }
+    workers_raw = os.environ.get("V1_TORCH_NUM_WORKERS", "0").strip()
+    try:
+        workers = max(int(workers_raw), 0)
+    except ValueError:
+        workers = 0
+    if workers:
+        kwargs["num_workers"] = workers
+        kwargs["persistent_workers"] = True
+        try:
+            prefetch_factor = max(int(os.environ.get("V1_TORCH_PREFETCH_FACTOR", "2")), 1)
+        except ValueError:
+            prefetch_factor = 2
+        kwargs["prefetch_factor"] = prefetch_factor
+    return kwargs
+
+
+def _torch_progress_every(total_batches: int) -> int:
+    raw = os.environ.get("V1_TORCH_PROGRESS_EVERY_BATCHES", "").strip()
+    if raw:
+        try:
+            return max(int(raw), 1)
+        except ValueError:
+            pass
+    if total_batches <= 100:
+        return 1
+    return max(min(total_batches // 100, 500), 25)
+
+
+def _sequence_standardizer_batches(store: Any, cutoff_date: str) -> Iterable[np.ndarray]:
+    raw_batch_size = os.environ.get("V1_SEQUENCE_STANDARDIZER_BATCH_ROWS", "524288").strip()
+    try:
+        batch_size = max(int(raw_batch_size), 1)
+    except ValueError:
+        batch_size = 524_288
+    raw_progress = os.environ.get("V1_SEQUENCE_STANDARDIZER_PROGRESS_BATCHES", "10").strip()
+    try:
+        progress_every = max(int(raw_progress), 1)
+    except ValueError:
+        progress_every = 10
+    batches = store.iter_rows_through(cutoff_date, batch_size=batch_size)
+    rows_seen = 0
+    start_time = time.monotonic()
+    for batch_index, batch in enumerate(batches, start=1):
+        yield batch
+        rows_seen += int(len(batch))
+        if batch_index == 1 or batch_index % progress_every == 0:
+            print(
+                json.dumps(
+                    {
+                        "step": "sequence_standardizer_scan",
+                        "feature_set": getattr(store, "feature_set", ""),
+                        "cutoff_date": cutoff_date,
+                        "batch": batch_index,
+                        "batch_rows": int(len(batch)),
+                        "rows_seen": rows_seen,
+                        "source_rows_total": int(getattr(store, "shape", (0, 0))[0]),
+                        "elapsed_seconds": round(time.monotonic() - start_time, 1),
+                    }
+                ),
+                flush=True,
+            )
+
+
+def _tabular_scaler_batches(x: Any, *, batch_size: int = 262_144, phase: str = "fit") -> Iterable[np.ndarray]:
+    total_rows = len(x) if hasattr(x, "__len__") else 0
+    total_batches = (total_rows + batch_size - 1) // batch_size if total_rows else 0
+    progress_every = _torch_progress_every(max(total_batches, 1))
+    rows_seen = 0
+    start_time = time.monotonic()
+    for batch_index, (_, batch) in enumerate(x.iter_numpy_batches(batch_size=batch_size, shuffle=False), start=1):
+        yield batch
+        rows_seen += int(len(batch))
+        if batch_index == 1 or batch_index % progress_every == 0 or batch_index == total_batches:
+            print(
+                json.dumps(
+                    {
+                        "step": "torch_mlp_classifier_scaler_scan",
+                        "phase": phase,
+                        "batch": batch_index,
+                        "total_batches": total_batches,
+                        "rows_seen": rows_seen,
+                        "rows_total": total_rows,
+                        "elapsed_seconds": round(time.monotonic() - start_time, 1),
+                    }
+                ),
+                flush=True,
+            )
+
+
+def _sequence_standardizer_cache_path(store: Any, cutoff_date: str) -> Path | None:
+    path = getattr(store, "path", None)
+    feature_set = str(getattr(store, "feature_set", "") or "sequence")
+    if path is None:
+        return None
+    root = Path(path).parent.parent
+    safe_cutoff = str(cutoff_date).replace("/", "-").replace(":", "-")
+    return root / "standardizers" / f"{feature_set}__through_{safe_cutoff}.npz"
+
+
+def _load_sequence_standardizer_cache(scaler: Standardizer, store: Any, cutoff_date: str, *, width: int) -> bool:
+    cache_path = _sequence_standardizer_cache_path(store, cutoff_date)
+    path = getattr(store, "path", None)
+    if cache_path is None or path is None or not cache_path.exists():
+        return False
+    try:
+        payload = np.load(cache_path)
+        expected_mtime = int(Path(path).stat().st_mtime_ns)
+        if int(payload["width"]) != int(width):
+            return False
+        if int(payload["data_mtime_ns"]) != expected_mtime:
+            return False
+        scaler.mean_ = np.asarray(payload["mean"], dtype=np.float64)
+        scaler.scale_ = np.asarray(payload["scale"], dtype=np.float64)
+    except Exception:
+        return False
+    print(
+        json.dumps(
+            {
+                "step": "sequence_standardizer_cache_hit",
+                "feature_set": getattr(store, "feature_set", ""),
+                "cutoff_date": cutoff_date,
+                "cache_path": str(cache_path),
+            }
+        ),
+        flush=True,
+    )
+    return True
+
+
+def _save_sequence_standardizer_cache(scaler: Standardizer, store: Any, cutoff_date: str, *, width: int) -> None:
+    cache_path = _sequence_standardizer_cache_path(store, cutoff_date)
+    path = getattr(store, "path", None)
+    if cache_path is None or path is None or scaler.mean_ is None or scaler.scale_ is None:
+        return
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        cache_path,
+        mean=np.asarray(scaler.mean_, dtype=np.float64),
+        scale=np.asarray(scaler.scale_, dtype=np.float64),
+        width=np.asarray(int(width), dtype=np.int64),
+        data_mtime_ns=np.asarray(int(Path(path).stat().st_mtime_ns), dtype=np.int64),
+    )
+    print(
+        json.dumps(
+            {
+                "step": "sequence_standardizer_cache_saved",
+                "feature_set": getattr(store, "feature_set", ""),
+                "cutoff_date": cutoff_date,
+                "cache_path": str(cache_path),
+            }
+        ),
+        flush=True,
+    )
+
+
+class _ContiguousGroupBatchSampler:
+    def __init__(
+        self,
+        group_ranges: Sequence[tuple[int, int]],
+        *,
+        batch_size: int,
+        shuffle_groups: bool,
+        random_state: int,
+    ) -> None:
+        self.group_ranges = [(int(start), int(end)) for start, end in group_ranges if int(end) > int(start)]
+        self.batch_size = max(int(batch_size), 1)
+        self.shuffle_groups = shuffle_groups
+        self.random_state = int(random_state)
+        self._iteration = 0
+
+    def __iter__(self):
+        order = np.arange(len(self.group_ranges), dtype=np.int64)
+        if self.shuffle_groups and len(order):
+            rng = np.random.default_rng(self.random_state + self._iteration)
+            rng.shuffle(order)
+        self._iteration += 1
+        for group_position in order:
+            start, end = self.group_ranges[int(group_position)]
+            for batch_start in range(start, end, self.batch_size):
+                yield list(range(batch_start, min(batch_start + self.batch_size, end)))
+
+    def __len__(self) -> int:
+        total = 0
+        for start, end in self.group_ranges:
+            total += (end - start + self.batch_size - 1) // self.batch_size
+        return total
+
+
+def _sequence_data_loader(
+    dataset: Any,
+    *,
+    device: str,
+    shuffle: bool,
+    batch_size: int,
+    random_state: int = 0,
+):
+    import torch
+
+    effective_batch_size = min(max(int(batch_size), 1), max(len(dataset), 1))
+    group_ranges = getattr(dataset, "group_ranges", [])
+    if shuffle and group_ranges:
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_sampler=_ContiguousGroupBatchSampler(
+                group_ranges,
+                batch_size=effective_batch_size,
+                shuffle_groups=True,
+                random_state=random_state,
+            ),
+            pin_memory=device == "cuda",
+        )
+    return torch.utils.data.DataLoader(
+        dataset,
+        **_torch_loader_kwargs(device=device, shuffle=shuffle, batch_size=effective_batch_size),
+    )
 
 
 def _fit_sequence_store_standardizer(
@@ -175,7 +444,11 @@ def _fit_sequence_store_standardizer(
     width: int,
 ) -> Standardizer:
     if hasattr(store, "iter_rows_through"):
-        return scaler.fit_batches(store.iter_rows_through(cutoff_date), width=width)
+        if _load_sequence_standardizer_cache(scaler, store, cutoff_date, width=width):
+            return scaler
+        scaler.fit_batches(_sequence_standardizer_batches(store, cutoff_date), width=width)
+        _save_sequence_standardizer_cache(scaler, store, cutoff_date, width=width)
+        return scaler
     train_rows = store.fit_rows_through(cutoff_date)
     return scaler.fit(train_rows.astype(np.float64))
 
@@ -474,6 +747,252 @@ class LightGBMRegressor:
             return np.nan_to_num(x.to_numpy(dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
         return self.imputer_.transform(x)
 
+    def _lazy_matrix(self, x, y_values: np.ndarray | None, *, phase: str):
+        import xgboost as xgb
+
+        try:
+            batch_size = max(int(os.environ.get("V1_XGBOOST_BATCH_ROWS", "262144")), 1)
+        except ValueError:
+            batch_size = 262_144
+        iterator = _XGBoostTabularDataIter(
+            x,
+            y_values,
+            batch_size=batch_size,
+            cache_prefix=_xgboost_cache_prefix(x, phase=phase, random_state=self.random_state),
+        ).iterator
+        try:
+            return xgb.ExtMemQuantileDMatrix(iterator, max_bin=256)
+        except Exception as exc:
+            print(
+                json.dumps(
+                    {
+                        "step": "xgboost_classifier_extmem_fallback",
+                        "phase": phase,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                ),
+                flush=True,
+            )
+            return xgb.QuantileDMatrix(iterator, max_bin=256)
+
+    def _train_lazy_chunks(
+        self,
+        x,
+        y_values: np.ndarray,
+        *,
+        params: dict[str, object],
+        rounds: int,
+        val_x=None,
+        y_val_arr: np.ndarray | None = None,
+        phase: str,
+        start_step: str,
+        chunk_step: str,
+        complete_step: str,
+    ):
+        import xgboost as xgb
+
+        chunk_rows = _xgboost_chunk_rows()
+        epochs = _xgboost_chunk_epochs()
+        row_count = len(x)
+        chunks_per_epoch = max((row_count + chunk_rows - 1) // chunk_rows, 1)
+        total_chunks = chunks_per_epoch * epochs
+        rounds_total = max(int(rounds), 1)
+        rounds_remaining = rounds_total
+        chunks_remaining = total_chunks
+        booster = None
+        validation = None
+        if val_x is not None and y_val_arr is not None:
+            x_val = self._preprocess(val_x, fit=False)
+            validation = xgb.DMatrix(x_val, label=y_val_arr)
+        print(
+            json.dumps(
+                {
+                    "step": start_step,
+                    "phase": phase,
+                    "training_mode": "chunked",
+                    "rows": row_count,
+                    "features": x.shape[1],
+                    "n_estimators": rounds_total,
+                    "device": params.get("device"),
+                    "nthread": params.get("nthread"),
+                    "chunk_rows": chunk_rows,
+                    "chunks_per_epoch": chunks_per_epoch,
+                    "epochs": epochs,
+                }
+            ),
+            flush=True,
+        )
+        rounds_done = 0
+        chunks_done = 0
+        start = time.monotonic()
+        for epoch in range(epochs):
+            iterator = x.iter_numpy_batches(
+                batch_size=chunk_rows,
+                shuffle=True,
+                random_state=self.random_state + epoch,
+            )
+            for local_rows, batch in iterator:
+                if rounds_remaining <= 0:
+                    break
+                chunk_rounds = max(1, int(np.ceil(rounds_remaining / max(chunks_remaining, 1))))
+                values = np.nan_to_num(batch.astype(np.float32, copy=False), nan=0.0, posinf=0.0, neginf=0.0)
+                labels = y_values[local_rows]
+                dtrain = xgb.DMatrix(values, label=labels)
+                evals = [(validation, "validation")] if validation is not None else []
+                booster = xgb.train(
+                    params,
+                    dtrain,
+                    num_boost_round=chunk_rounds,
+                    xgb_model=booster,
+                    evals=evals,
+                    verbose_eval=False,
+                )
+                rounds_done += chunk_rounds
+                rounds_remaining -= chunk_rounds
+                chunks_done += 1
+                chunks_remaining -= 1
+                print(
+                    json.dumps(
+                        {
+                            "step": chunk_step,
+                            "phase": phase,
+                            "epoch": epoch + 1,
+                            "epochs": epochs,
+                            "chunk": chunks_done,
+                            "chunks_total": total_chunks,
+                            "rows": int(len(batch)),
+                            "rounds_done": rounds_done,
+                            "rounds_total": rounds_total,
+                            "elapsed_seconds": round(time.monotonic() - start, 1),
+                        }
+                    ),
+                    flush=True,
+                )
+                del dtrain, values, labels, batch
+                gc.collect()
+            if rounds_remaining <= 0:
+                break
+        if booster is None:
+            raise RuntimeError("XGBoost chunked training did not receive any training batches.")
+        print(
+            json.dumps(
+                {
+                    "step": complete_step,
+                    "phase": phase,
+                    "training_mode": "chunked",
+                    "best_iteration": rounds_done,
+                    "device": params.get("device"),
+                    "nthread": params.get("nthread"),
+                }
+            ),
+            flush=True,
+        )
+        return booster, rounds_done
+
+    def _fit_lazy(
+        self,
+        x,
+        y: pd.DataFrame,
+        *,
+        val_x=None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "XGBoostClassifier":
+        import xgboost as xgb
+
+        y_train = _as_array(y).reshape(-1).astype(np.float32)
+        if np.unique(y_train).size < 2:
+            self.model_ = _ConstantProbabilityClassifier(float(y_train[0]) if len(y_train) else 0.0)
+            self.best_iteration_ = 1
+            self.device_ = "cpu"
+            self.gpu_fallback_error_ = ""
+            return self
+        y_val_arr = _as_array(val_y).reshape(-1).astype(np.float32) if val_y is not None else None
+        scale_pos_weight = float((len(y_train) - y_train.sum()) / max(y_train.sum(), 1.0))
+        self.gpu_fallback_error_ = ""
+        self.device_ = _xgboost_device(self.prefer_gpu)
+        nthread = _xgboost_nthread()
+        params = {
+            "learning_rate": 0.03,
+            "max_depth": 4,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "objective": "binary:logistic",
+            "tree_method": "hist",
+            "device": self.device_,
+            "eval_metric": "logloss",
+            "scale_pos_weight": max(scale_pos_weight, 1.0),
+            "seed": self.random_state,
+            "nthread": nthread,
+        }
+        if _xgboost_training_mode(len(x)) == "chunked":
+            self.model_, self.best_iteration_ = self._train_lazy_chunks(
+                x,
+                y_train,
+                params=params,
+                rounds=self.n_estimators,
+                val_x=val_x,
+                y_val_arr=y_val_arr,
+                phase="fit",
+                start_step="xgboost_classifier_train_start",
+                chunk_step="xgboost_classifier_chunk_train",
+                complete_step="xgboost_classifier_train_complete",
+            )
+            return self
+        dtrain = self._lazy_matrix(x, y_train, phase="fit")
+        evals = []
+        if val_x is not None and y_val_arr is not None:
+            x_val = self._preprocess(val_x, fit=False)
+            evals.append((xgb.DMatrix(x_val, label=y_val_arr), "validation"))
+        print(
+            json.dumps(
+                {
+                    "step": "xgboost_classifier_train_start",
+                    "rows": len(x),
+                    "features": x.shape[1],
+                    "n_estimators": self.n_estimators,
+                    "device": self.device_,
+                    "nthread": nthread,
+                }
+            ),
+            flush=True,
+        )
+        try:
+            self.model_ = xgb.train(
+                params,
+                dtrain,
+                num_boost_round=self.n_estimators,
+                evals=evals,
+                early_stopping_rounds=self.patience if evals else None,
+                verbose_eval=25 if evals else False,
+            )
+        except Exception as exc:
+            if self.device_ != "cuda":
+                raise
+            self.gpu_fallback_error_ = f"{type(exc).__name__}: {exc}"
+            self.device_ = "cpu"
+            params["device"] = self.device_
+            self.model_ = xgb.train(
+                params,
+                dtrain,
+                num_boost_round=self.n_estimators,
+                evals=evals,
+                early_stopping_rounds=self.patience if evals else None,
+                verbose_eval=25 if evals else False,
+            )
+        best_iteration = getattr(self.model_, "best_iteration", None)
+        self.best_iteration_ = int(best_iteration + 1) if best_iteration is not None else self.n_estimators
+        print(
+            json.dumps(
+                {
+                    "step": "xgboost_classifier_train_complete",
+                    "best_iteration": self.best_iteration_,
+                    "device": self.device_,
+                }
+            ),
+            flush=True,
+        )
+        return self
+
     def fit(
         self,
         x: pd.DataFrame,
@@ -602,6 +1121,236 @@ class XGBoostRegressor:
             return np.nan_to_num(x.to_numpy(dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
         return self.imputer_.transform(x)
 
+    def _lazy_matrix(self, x, y_values: np.ndarray | None, *, phase: str):
+        import xgboost as xgb
+
+        try:
+            batch_size = max(int(os.environ.get("V1_XGBOOST_BATCH_ROWS", "262144")), 1)
+        except ValueError:
+            batch_size = 262_144
+        iterator = _XGBoostTabularDataIter(
+            x,
+            y_values,
+            batch_size=batch_size,
+            cache_prefix=_xgboost_cache_prefix(x, phase=phase, random_state=self.random_state),
+        ).iterator
+        try:
+            return xgb.ExtMemQuantileDMatrix(iterator, max_bin=256)
+        except Exception as exc:
+            print(
+                json.dumps(
+                    {
+                        "step": "xgboost_classifier_extmem_fallback",
+                        "phase": phase,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                ),
+                flush=True,
+            )
+            return xgb.QuantileDMatrix(iterator, max_bin=256)
+
+    def _train_lazy_chunks(
+        self,
+        x,
+        y_values: np.ndarray,
+        *,
+        params: dict[str, object],
+        rounds: int,
+        val_x=None,
+        y_val_arr: np.ndarray | None = None,
+        phase: str,
+        start_step: str,
+        chunk_step: str,
+        complete_step: str,
+    ):
+        import xgboost as xgb
+
+        chunk_rows = _xgboost_chunk_rows()
+        epochs = _xgboost_chunk_epochs()
+        row_count = len(x)
+        chunks_per_epoch = max((row_count + chunk_rows - 1) // chunk_rows, 1)
+        total_chunks = chunks_per_epoch * epochs
+        rounds_total = max(int(rounds), 1)
+        rounds_remaining = rounds_total
+        chunks_remaining = total_chunks
+        booster = None
+        validation = None
+        if val_x is not None and y_val_arr is not None:
+            x_val = self._preprocess(val_x, fit=False)
+            validation = xgb.DMatrix(x_val, label=y_val_arr)
+        print(
+            json.dumps(
+                {
+                    "step": start_step,
+                    "phase": phase,
+                    "training_mode": "chunked",
+                    "rows": row_count,
+                    "features": x.shape[1],
+                    "n_estimators": rounds_total,
+                    "device": params.get("device"),
+                    "nthread": params.get("nthread"),
+                    "chunk_rows": chunk_rows,
+                    "chunks_per_epoch": chunks_per_epoch,
+                    "epochs": epochs,
+                }
+            ),
+            flush=True,
+        )
+        rounds_done = 0
+        chunks_done = 0
+        start = time.monotonic()
+        for epoch in range(epochs):
+            iterator = x.iter_numpy_batches(
+                batch_size=chunk_rows,
+                shuffle=True,
+                random_state=self.random_state + epoch,
+            )
+            for local_rows, batch in iterator:
+                if rounds_remaining <= 0:
+                    break
+                chunk_rounds = max(1, int(np.ceil(rounds_remaining / max(chunks_remaining, 1))))
+                values = np.nan_to_num(batch.astype(np.float32, copy=False), nan=0.0, posinf=0.0, neginf=0.0)
+                labels = y_values[local_rows]
+                dtrain = xgb.DMatrix(values, label=labels)
+                evals = [(validation, "validation")] if validation is not None else []
+                booster = xgb.train(
+                    params,
+                    dtrain,
+                    num_boost_round=chunk_rounds,
+                    xgb_model=booster,
+                    evals=evals,
+                    verbose_eval=False,
+                )
+                rounds_done += chunk_rounds
+                rounds_remaining -= chunk_rounds
+                chunks_done += 1
+                chunks_remaining -= 1
+                print(
+                    json.dumps(
+                        {
+                            "step": chunk_step,
+                            "phase": phase,
+                            "epoch": epoch + 1,
+                            "epochs": epochs,
+                            "chunk": chunks_done,
+                            "chunks_total": total_chunks,
+                            "rows": int(len(batch)),
+                            "rounds_done": rounds_done,
+                            "rounds_total": rounds_total,
+                            "elapsed_seconds": round(time.monotonic() - start, 1),
+                        }
+                    ),
+                    flush=True,
+                )
+                del dtrain, values, labels, batch
+                gc.collect()
+            if rounds_remaining <= 0:
+                break
+        if booster is None:
+            raise RuntimeError("XGBoost chunked training did not receive any training batches.")
+        print(
+            json.dumps(
+                {
+                    "step": complete_step,
+                    "phase": phase,
+                    "training_mode": "chunked",
+                    "best_iteration": rounds_done,
+                    "device": params.get("device"),
+                    "nthread": params.get("nthread"),
+                }
+            ),
+            flush=True,
+        )
+        return booster, rounds_done
+
+    def _fit_lazy(
+        self,
+        x,
+        y: pd.DataFrame,
+        *,
+        val_x=None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "XGBoostClassifier":
+        import xgboost as xgb
+
+        y_train = _as_array(y).reshape(-1).astype(np.float32)
+        if np.unique(y_train).size < 2:
+            self.model_ = _ConstantProbabilityClassifier(float(y_train[0]) if len(y_train) else 0.0)
+            self.best_iteration_ = 1
+            self.device_ = "cpu"
+            self.gpu_fallback_error_ = ""
+            return self
+        y_val_arr = _as_array(val_y).reshape(-1).astype(np.float32) if val_y is not None else None
+        scale_pos_weight = float((len(y_train) - y_train.sum()) / max(y_train.sum(), 1.0))
+        self.gpu_fallback_error_ = ""
+        self.device_ = "cuda" if self.prefer_gpu and _gpu_available() else "cpu"
+        params = {
+            "learning_rate": 0.03,
+            "max_depth": 4,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "objective": "binary:logistic",
+            "tree_method": "hist",
+            "device": self.device_,
+            "eval_metric": "logloss",
+            "scale_pos_weight": max(scale_pos_weight, 1.0),
+            "seed": self.random_state,
+            "nthread": 1,
+        }
+        dtrain = self._lazy_matrix(x, y_train, phase="fit")
+        evals = []
+        if val_x is not None and y_val_arr is not None:
+            x_val = self._preprocess(val_x, fit=False)
+            evals.append((xgb.DMatrix(x_val, label=y_val_arr), "validation"))
+        print(
+            json.dumps(
+                {
+                    "step": "xgboost_classifier_train_start",
+                    "rows": len(x),
+                    "features": x.shape[1],
+                    "n_estimators": self.n_estimators,
+                    "device": self.device_,
+                }
+            ),
+            flush=True,
+        )
+        try:
+            self.model_ = xgb.train(
+                params,
+                dtrain,
+                num_boost_round=self.n_estimators,
+                evals=evals,
+                early_stopping_rounds=self.patience if evals else None,
+                verbose_eval=25 if evals else False,
+            )
+        except Exception as exc:
+            if self.device_ != "cuda":
+                raise
+            self.gpu_fallback_error_ = f"{type(exc).__name__}: {exc}"
+            self.device_ = "cpu"
+            params["device"] = self.device_
+            self.model_ = xgb.train(
+                params,
+                dtrain,
+                num_boost_round=self.n_estimators,
+                evals=evals,
+                early_stopping_rounds=self.patience if evals else None,
+                verbose_eval=25 if evals else False,
+            )
+        best_iteration = getattr(self.model_, "best_iteration", None)
+        self.best_iteration_ = int(best_iteration + 1) if best_iteration is not None else self.n_estimators
+        print(
+            json.dumps(
+                {
+                    "step": "xgboost_classifier_train_complete",
+                    "best_iteration": self.best_iteration_,
+                    "device": self.device_,
+                }
+            ),
+            flush=True,
+        )
+        return self
+
     def fit(
         self,
         x: pd.DataFrame,
@@ -703,6 +1452,88 @@ class XGBoostRegressor:
         x_values = self._preprocess(x, fit=False)
         preds = [np.asarray(model.predict(x_values), dtype=np.float64) for model in self.models_]
         return np.column_stack(preds)
+
+
+class _XGBoostTabularDataIter:
+    def __init__(
+        self,
+        x: Any,
+        y_values: np.ndarray | None = None,
+        *,
+        batch_size: int = 262_144,
+        cache_prefix: str | None = None,
+        progress_step: str = "xgboost_classifier_data_scan",
+    ) -> None:
+        import xgboost as xgb
+
+        class _Iterator(xgb.DataIter):
+            def __init__(self, outer: "_XGBoostTabularDataIter") -> None:
+                super().__init__(cache_prefix=outer.cache_prefix, release_data=True)
+                self.outer = outer
+                self._iterator = None
+                self._batch_index = 0
+                self._rows_seen = 0
+                self._start_time = time.monotonic()
+
+            def reset(self) -> None:
+                self._iterator = self.outer.x.iter_numpy_batches(batch_size=self.outer.batch_size, shuffle=False)
+                self._batch_index = 0
+                self._rows_seen = 0
+                self._start_time = time.monotonic()
+
+            def next(self, input_data) -> bool:
+                if self._iterator is None:
+                    self.reset()
+                try:
+                    local_rows, batch = next(self._iterator)
+                except StopIteration:
+                    return False
+                self._batch_index += 1
+                values = np.nan_to_num(batch.astype(np.float32, copy=False), nan=0.0, posinf=0.0, neginf=0.0)
+                kwargs: dict[str, object] = {"data": values}
+                if self.outer.y_values is not None:
+                    kwargs["label"] = self.outer.y_values[local_rows]
+                input_data(**kwargs)
+                self._rows_seen += int(len(batch))
+                if (
+                    self._batch_index == 1
+                    or self._batch_index % self.outer.progress_every == 0
+                    or self._rows_seen >= self.outer.rows_total
+                ):
+                    print(
+                        json.dumps(
+                            {
+                                "step": self.outer.progress_step,
+                                "batch": self._batch_index,
+                                "rows_seen": self._rows_seen,
+                                "rows_total": self.outer.rows_total,
+                                "elapsed_seconds": round(time.monotonic() - self._start_time, 1),
+                            }
+                        ),
+                        flush=True,
+                    )
+                return True
+
+        self.x = x
+        self.y_values = y_values
+        self.batch_size = max(int(batch_size), 1)
+        self.cache_prefix = cache_prefix
+        self.progress_step = progress_step
+        self.rows_total = len(x) if hasattr(x, "__len__") else 0
+        total_batches = (self.rows_total + self.batch_size - 1) // self.batch_size if self.rows_total else 1
+        self.progress_every = _torch_progress_every(total_batches)
+        self.iterator = _Iterator(self)
+
+
+def _xgboost_cache_prefix(x: Any, *, phase: str, random_state: int) -> str | None:
+    store = getattr(x, "store", None)
+    path = getattr(store, "path", None)
+    feature_set = str(getattr(store, "feature_set", "tabular") or "tabular")
+    if path is None:
+        return None
+    root = Path(path).parent.parent / "xgboost_cache"
+    root.mkdir(parents=True, exist_ok=True)
+    return str(root / f"{feature_set}_{phase}_{os.getpid()}_{random_state}")
 
 
 class TorchMLPRegressor:
@@ -890,6 +1721,21 @@ class _SequenceStaticDataset:
         self.static_columns = list(static_columns)
         self.static_values = _hstack_static_arrays(static_categorical, self.static_columns)
         self.targets = _as_array(target_frame).astype(np.float32) if target_frame is not None else None
+        self.group_ranges = self._contiguous_group_ranges()
+
+    def _contiguous_group_ranges(self) -> list[tuple[int, int]]:
+        if not self.tickers:
+            return []
+        ranges: list[tuple[int, int]] = []
+        start = 0
+        current = self.tickers[0]
+        for position, ticker in enumerate(self.tickers[1:], start=1):
+            if ticker != current:
+                ranges.append((start, position))
+                start = position
+                current = ticker
+        ranges.append((start, len(self.tickers)))
+        return ranges
 
     def __len__(self) -> int:
         return len(self.tickers)
@@ -902,6 +1748,44 @@ class _SequenceStaticDataset:
         if self.targets is None:
             return sequence, static_ids
         return sequence, static_ids, self.targets[index]
+
+    def __getitems__(self, indices):
+        index_array = np.asarray(indices, dtype=np.int64)
+        if index_array.size == 0:
+            return []
+        if (
+            hasattr(self.store, "open")
+            and hasattr(self.store, "ticker_offsets")
+            and all(self.tickers[int(index)] == self.tickers[int(index_array[0])] for index in index_array)
+        ):
+            symbol = self.tickers[int(index_array[0])]
+            if symbol not in self.store.ticker_offsets or symbol not in self.store.ticker_lengths:
+                return [self.__getitem__(int(index)) for index in index_array]
+            end_indices = self.end_indices[index_array].astype(np.int64)
+            min_end = int(end_indices.min())
+            max_end = int(end_indices.max())
+            start = min_end - self.window_length + 1
+            if start >= 0 and max_end < self.store.ticker_lengths[symbol]:
+                offset = int(self.store.ticker_offsets[symbol])
+                block = np.asarray(
+                    self.store.open()[offset + start : offset + max_end + 1],
+                    dtype=np.float32,
+                )
+                sequences = np.stack(
+                    [
+                        block[int(end_index - min_end) : int(end_index - min_end) + self.window_length]
+                        for end_index in end_indices
+                    ]
+                ).astype(np.float32, copy=False)
+                static_values = self.static_values[index_array].astype(np.int64, copy=False)
+                if self.targets is None:
+                    return [(sequences[position], static_values[position]) for position in range(len(index_array))]
+                targets = self.targets[index_array].astype(np.float32, copy=False)
+                return [
+                    (sequences[position], static_values[position], targets[position])
+                    for position in range(len(index_array))
+                ]
+        return [self.__getitem__(int(index)) for index in index_array]
 
 
 class _SequenceStaticNet:
@@ -1549,6 +2433,252 @@ class XGBoostClassifier:
             return np.nan_to_num(x.to_numpy(dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
         return self.imputer_.transform(x)
 
+    def _lazy_matrix(self, x, y_values: np.ndarray | None, *, phase: str):
+        import xgboost as xgb
+
+        try:
+            batch_size = max(int(os.environ.get("V1_XGBOOST_BATCH_ROWS", "262144")), 1)
+        except ValueError:
+            batch_size = 262_144
+        iterator = _XGBoostTabularDataIter(
+            x,
+            y_values,
+            batch_size=batch_size,
+            cache_prefix=_xgboost_cache_prefix(x, phase=phase, random_state=self.random_state),
+        ).iterator
+        try:
+            return xgb.ExtMemQuantileDMatrix(iterator, max_bin=256)
+        except Exception as exc:
+            print(
+                json.dumps(
+                    {
+                        "step": "xgboost_classifier_extmem_fallback",
+                        "phase": phase,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                ),
+                flush=True,
+            )
+            return xgb.QuantileDMatrix(iterator, max_bin=256)
+
+    def _train_lazy_chunks(
+        self,
+        x,
+        y_values: np.ndarray,
+        *,
+        params: dict[str, object],
+        rounds: int,
+        val_x=None,
+        y_val_arr: np.ndarray | None = None,
+        phase: str,
+        start_step: str,
+        chunk_step: str,
+        complete_step: str,
+    ):
+        import xgboost as xgb
+
+        chunk_rows = _xgboost_chunk_rows()
+        epochs = _xgboost_chunk_epochs()
+        row_count = len(x)
+        chunks_per_epoch = max((row_count + chunk_rows - 1) // chunk_rows, 1)
+        total_chunks = chunks_per_epoch * epochs
+        rounds_total = max(int(rounds), 1)
+        rounds_remaining = rounds_total
+        chunks_remaining = total_chunks
+        booster = None
+        validation = None
+        if val_x is not None and y_val_arr is not None:
+            x_val = self._preprocess(val_x, fit=False)
+            validation = xgb.DMatrix(x_val, label=y_val_arr)
+        print(
+            json.dumps(
+                {
+                    "step": start_step,
+                    "phase": phase,
+                    "training_mode": "chunked",
+                    "rows": row_count,
+                    "features": x.shape[1],
+                    "n_estimators": rounds_total,
+                    "device": params.get("device"),
+                    "nthread": params.get("nthread"),
+                    "chunk_rows": chunk_rows,
+                    "chunks_per_epoch": chunks_per_epoch,
+                    "epochs": epochs,
+                }
+            ),
+            flush=True,
+        )
+        rounds_done = 0
+        chunks_done = 0
+        start = time.monotonic()
+        for epoch in range(epochs):
+            iterator = x.iter_numpy_batches(
+                batch_size=chunk_rows,
+                shuffle=True,
+                random_state=self.random_state + epoch,
+            )
+            for local_rows, batch in iterator:
+                if rounds_remaining <= 0:
+                    break
+                chunk_rounds = max(1, int(np.ceil(rounds_remaining / max(chunks_remaining, 1))))
+                values = np.nan_to_num(batch.astype(np.float32, copy=False), nan=0.0, posinf=0.0, neginf=0.0)
+                labels = y_values[local_rows]
+                dtrain = xgb.DMatrix(values, label=labels)
+                evals = [(validation, "validation")] if validation is not None else []
+                booster = xgb.train(
+                    params,
+                    dtrain,
+                    num_boost_round=chunk_rounds,
+                    xgb_model=booster,
+                    evals=evals,
+                    verbose_eval=False,
+                )
+                rounds_done += chunk_rounds
+                rounds_remaining -= chunk_rounds
+                chunks_done += 1
+                chunks_remaining -= 1
+                print(
+                    json.dumps(
+                        {
+                            "step": chunk_step,
+                            "phase": phase,
+                            "epoch": epoch + 1,
+                            "epochs": epochs,
+                            "chunk": chunks_done,
+                            "chunks_total": total_chunks,
+                            "rows": int(len(batch)),
+                            "rounds_done": rounds_done,
+                            "rounds_total": rounds_total,
+                            "elapsed_seconds": round(time.monotonic() - start, 1),
+                        }
+                    ),
+                    flush=True,
+                )
+                del dtrain, values, labels, batch
+                gc.collect()
+            if rounds_remaining <= 0:
+                break
+        if booster is None:
+            raise RuntimeError("XGBoost chunked training did not receive any training batches.")
+        print(
+            json.dumps(
+                {
+                    "step": complete_step,
+                    "phase": phase,
+                    "training_mode": "chunked",
+                    "best_iteration": rounds_done,
+                    "device": params.get("device"),
+                    "nthread": params.get("nthread"),
+                }
+            ),
+            flush=True,
+        )
+        return booster, rounds_done
+
+    def _fit_lazy(
+        self,
+        x,
+        y: pd.DataFrame,
+        *,
+        val_x=None,
+        val_y: pd.DataFrame | None = None,
+    ) -> "XGBoostClassifier":
+        import xgboost as xgb
+
+        y_train = _as_array(y).reshape(-1).astype(np.float32)
+        if np.unique(y_train).size < 2:
+            self.model_ = _ConstantProbabilityClassifier(float(y_train[0]) if len(y_train) else 0.0)
+            self.best_iteration_ = 1
+            self.device_ = "cpu"
+            self.gpu_fallback_error_ = ""
+            return self
+        y_val_arr = _as_array(val_y).reshape(-1).astype(np.float32) if val_y is not None else None
+        scale_pos_weight = float((len(y_train) - y_train.sum()) / max(y_train.sum(), 1.0))
+        self.gpu_fallback_error_ = ""
+        self.device_ = _xgboost_device(self.prefer_gpu)
+        nthread = _xgboost_nthread()
+        params = {
+            "learning_rate": 0.03,
+            "max_depth": 4,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "objective": "binary:logistic",
+            "tree_method": "hist",
+            "device": self.device_,
+            "eval_metric": "logloss",
+            "scale_pos_weight": max(scale_pos_weight, 1.0),
+            "seed": self.random_state,
+            "nthread": nthread,
+        }
+        if _xgboost_training_mode(len(x)) == "chunked":
+            self.model_, self.best_iteration_ = self._train_lazy_chunks(
+                x,
+                y_train,
+                params=params,
+                rounds=self.n_estimators,
+                val_x=val_x,
+                y_val_arr=y_val_arr,
+                phase="fit",
+                start_step="xgboost_classifier_train_start",
+                chunk_step="xgboost_classifier_chunk_train",
+                complete_step="xgboost_classifier_train_complete",
+            )
+            return self
+        dtrain = self._lazy_matrix(x, y_train, phase="fit")
+        evals = []
+        if val_x is not None and y_val_arr is not None:
+            x_val = self._preprocess(val_x, fit=False)
+            evals.append((xgb.DMatrix(x_val, label=y_val_arr), "validation"))
+        print(
+            json.dumps(
+                {
+                    "step": "xgboost_classifier_train_start",
+                    "rows": len(x),
+                    "features": x.shape[1],
+                    "n_estimators": self.n_estimators,
+                    "device": self.device_,
+                    "nthread": nthread,
+                }
+            ),
+            flush=True,
+        )
+        try:
+            self.model_ = xgb.train(
+                params,
+                dtrain,
+                num_boost_round=self.n_estimators,
+                evals=evals,
+                early_stopping_rounds=self.patience if evals else None,
+                verbose_eval=25 if evals else False,
+            )
+        except Exception as exc:
+            if self.device_ != "cuda":
+                raise
+            self.gpu_fallback_error_ = f"{type(exc).__name__}: {exc}"
+            self.device_ = "cpu"
+            params["device"] = self.device_
+            self.model_ = xgb.train(
+                params,
+                dtrain,
+                num_boost_round=self.n_estimators,
+                evals=evals,
+                early_stopping_rounds=self.patience if evals else None,
+                verbose_eval=25 if evals else False,
+            )
+        best_iteration = getattr(self.model_, "best_iteration", None)
+        self.best_iteration_ = int(best_iteration + 1) if best_iteration is not None else self.n_estimators
+        print(
+            json.dumps(
+                {
+                    "step": "xgboost_classifier_train_complete",
+                    "best_iteration": self.best_iteration_,
+                    "device": self.device_,
+                }
+            ),
+            flush=True,
+        )
+        return self
+
     def fit(
         self,
         x: pd.DataFrame,
@@ -1559,6 +2689,8 @@ class XGBoostClassifier:
     ) -> "XGBoostClassifier":
         from xgboost import XGBClassifier
 
+        if hasattr(x, "iter_numpy_batches"):
+            return self._fit_lazy(x, y, val_x=val_x, val_y=val_y)
         x_train = self._preprocess(x, fit=True)
         x_val = self._preprocess(val_x, fit=False) if val_x is not None else None
         y_train = _as_array(y).reshape(-1)
@@ -1571,7 +2703,8 @@ class XGBoostClassifier:
         y_val_arr = _as_array(val_y).reshape(-1) if val_y is not None else None
         scale_pos_weight = float((len(y_train) - y_train.sum()) / max(y_train.sum(), 1.0))
         self.gpu_fallback_error_ = ""
-        self.device_ = "cuda" if self.prefer_gpu and _gpu_available() else "cpu"
+        self.device_ = _xgboost_device(self.prefer_gpu)
+        nthread = _xgboost_nthread()
         estimator_kwargs = {
             "n_estimators": self.n_estimators,
             "learning_rate": 0.03,
@@ -1580,7 +2713,7 @@ class XGBoostClassifier:
             "colsample_bytree": 0.8,
             "objective": "binary:logistic",
             "random_state": self.random_state,
-            "n_jobs": 1,
+            "n_jobs": nthread,
             "tree_method": "hist",
             "device": self.device_,
             "eval_metric": "logloss",
@@ -1612,13 +2745,73 @@ class XGBoostClassifier:
 
     def refit_full(self, x: pd.DataFrame, y: pd.DataFrame) -> "XGBoostClassifier":
         from xgboost import XGBClassifier
+        import xgboost as xgb
 
+        if hasattr(x, "iter_numpy_batches"):
+            y_full = _as_array(y).reshape(-1).astype(np.float32)
+            if np.unique(y_full).size < 2:
+                self.model_ = _ConstantProbabilityClassifier(float(y_full[0]) if len(y_full) else 0.0)
+                return self
+            scale_pos_weight = float((len(y_full) - y_full.sum()) / max(y_full.sum(), 1.0))
+            nthread = _xgboost_nthread()
+            params = {
+                "learning_rate": 0.03,
+                "max_depth": 4,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "objective": "binary:logistic",
+                "tree_method": "hist",
+                "device": getattr(self, "device_", "cpu"),
+                "eval_metric": "logloss",
+                "scale_pos_weight": max(scale_pos_weight, 1.0),
+                "seed": self.random_state,
+                "nthread": nthread,
+            }
+            rounds = int(getattr(self, "best_iteration_", self.n_estimators))
+            if _xgboost_training_mode(len(x)) == "chunked":
+                self.model_, self.best_iteration_ = self._train_lazy_chunks(
+                    x,
+                    y_full,
+                    params=params,
+                    rounds=rounds,
+                    phase="refit_full",
+                    start_step="xgboost_classifier_refit_start",
+                    chunk_step="xgboost_classifier_refit_chunk_train",
+                    complete_step="xgboost_classifier_refit_complete",
+                )
+                return self
+            dtrain = self._lazy_matrix(x, y_full, phase="refit_full")
+            print(
+                json.dumps(
+                    {
+                        "step": "xgboost_classifier_refit_start",
+                        "rows": len(x),
+                        "features": x.shape[1],
+                        "n_estimators": rounds,
+                        "device": params["device"],
+                        "nthread": nthread,
+                    }
+                ),
+                flush=True,
+            )
+            self.model_ = xgb.train(params, dtrain, num_boost_round=rounds, verbose_eval=False)
+            print(
+                json.dumps(
+                    {
+                        "step": "xgboost_classifier_refit_complete",
+                        "device": params["device"],
+                    }
+                ),
+                flush=True,
+            )
+            return self
         x_full = self._preprocess(x, fit=True)
         y_full = _as_array(y).reshape(-1)
         if np.unique(y_full).size < 2:
             self.model_ = _ConstantProbabilityClassifier(float(y_full[0]) if len(y_full) else 0.0)
             return self
         scale_pos_weight = float((len(y_full) - y_full.sum()) / max(y_full.sum(), 1.0))
+        nthread = _xgboost_nthread()
         estimator_kwargs = {
             "n_estimators": int(getattr(self, "best_iteration_", self.n_estimators)),
             "learning_rate": 0.03,
@@ -1627,7 +2820,7 @@ class XGBoostClassifier:
             "colsample_bytree": 0.8,
             "objective": "binary:logistic",
             "random_state": self.random_state,
-            "n_jobs": 1,
+            "n_jobs": nthread,
             "tree_method": "hist",
             "device": getattr(self, "device_", "cpu"),
             "eval_metric": "logloss",
@@ -1646,6 +2839,20 @@ class XGBoostClassifier:
         return self
 
     def predict(self, x: pd.DataFrame) -> np.ndarray:
+        import xgboost as xgb
+
+        if hasattr(x, "iter_numpy_batches") and not hasattr(self.model_, "predict_proba"):
+            outputs: list[np.ndarray] = []
+            try:
+                batch_size = max(int(os.environ.get("V1_XGBOOST_PREDICT_BATCH_ROWS", "262144")), 1)
+            except ValueError:
+                batch_size = 262_144
+            for _, batch in x.iter_numpy_batches(batch_size=batch_size, shuffle=False):
+                values = np.nan_to_num(batch.astype(np.float32, copy=False), nan=0.0, posinf=0.0, neginf=0.0)
+                outputs.append(np.asarray(self.model_.predict(xgb.DMatrix(values)), dtype=np.float64).reshape(-1, 1))
+            if not outputs:
+                return np.empty((0, 1), dtype=np.float64)
+            return np.vstack(outputs)
         x_values = self._preprocess(x, fit=False)
         return self.model_.predict_proba(x_values)[:, 1:2].astype(np.float64)
 
@@ -1819,13 +3026,35 @@ class TorchMLPClassifier:
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
         loss_fn = torch.nn.BCEWithLogitsLoss()
         self.model_.train()
-        for _ in range(max(epochs, 1)):
-            for batch_x, batch_y in loader:
+        total_batches = len(loader)
+        progress_every = _torch_progress_every(total_batches)
+        start_time = time.monotonic()
+        for epoch in range(max(epochs, 1)):
+            for batch_index, (batch_x, batch_y) in enumerate(loader, start=1):
                 pred = self.model_(_move_tensor(batch_x, self.device_))
                 loss = loss_fn(pred, _move_tensor(batch_y, self.device_))
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                if batch_index == 1 or batch_index % progress_every == 0 or batch_index == total_batches:
+                    print(
+                        json.dumps(
+                            {
+                                "step": "torch_mlp_classifier_batch",
+                                "phase": "fixed_epochs",
+                                "epoch": epoch + 1,
+                                "max_epochs": max(epochs, 1),
+                                "batch": batch_index,
+                                "total_batches": total_batches,
+                                "rows_seen": min(batch_index * self.batch_size, len(dataset)),
+                                "rows_total": len(dataset),
+                                "loss": float(loss.detach().cpu().item()),
+                                "elapsed_seconds": round(time.monotonic() - start_time, 1),
+                                "device": str(self.device_),
+                            }
+                        ),
+                        flush=True,
+                    )
 
     def _lazy_logloss(self, x, y_values: np.ndarray, mean_t, scale_t) -> float:
         import torch
@@ -1860,10 +3089,7 @@ class TorchMLPClassifier:
             self.constant_probability_ = float(y_train[0, 0]) if len(y_train) else 0.0
             self.best_epoch_ = 1
             return self
-        self.x_scaler.fit_batches(
-            (batch for _, batch in x.iter_numpy_batches(batch_size=65_536, shuffle=False)),
-            width=x.shape[1],
-        )
+        self.x_scaler.fit_batches(_tabular_scaler_batches(x, phase="fit"), width=x.shape[1])
         y_val_arr = _as_array(val_y).reshape(-1, 1).astype(np.float32) if val_y is not None else None
         self.model_ = self._build_model(x.shape[1]).to(self.device_)
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
@@ -1874,12 +3100,18 @@ class TorchMLPClassifier:
         best_metric = np.inf
         best_epoch = 1
         epochs_without_improvement = 0
+        total_batches = (len(x) + self.batch_size - 1) // self.batch_size if len(x) else 0
+        progress_every = _torch_progress_every(max(total_batches, 1))
+        start_time = time.monotonic()
         for epoch in range(self.max_epochs):
             self.model_.train()
-            for local_rows, batch in x.iter_numpy_batches(
+            for batch_index, (local_rows, batch) in enumerate(
+                x.iter_numpy_batches(
                 batch_size=self.batch_size,
                 shuffle=True,
                 random_state=self.random_state + epoch,
+                ),
+                start=1,
             ):
                 xb = torch.from_numpy(batch.astype(np.float32)).to(self.device_)
                 xb = (torch.nan_to_num(xb, nan=0.0) - mean_t) / scale_t
@@ -1889,6 +3121,25 @@ class TorchMLPClassifier:
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                if batch_index == 1 or batch_index % progress_every == 0 or batch_index == total_batches:
+                    print(
+                        json.dumps(
+                            {
+                                "step": "torch_mlp_classifier_batch",
+                                "phase": "fit",
+                                "epoch": epoch + 1,
+                                "max_epochs": self.max_epochs,
+                                "batch": batch_index,
+                                "total_batches": total_batches,
+                                "rows_seen": min(batch_index * self.batch_size, len(x)),
+                                "rows_total": len(x),
+                                "loss": float(loss.detach().cpu().item()),
+                                "elapsed_seconds": round(time.monotonic() - start_time, 1),
+                                "device": str(self.device_),
+                            }
+                        ),
+                        flush=True,
+                    )
             metric = (
                 self._lazy_logloss(val_x, y_val_arr, mean_t, scale_t)
                 if val_x is not None and y_val_arr is not None
@@ -1901,6 +3152,19 @@ class TorchMLPClassifier:
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
+            print(
+                json.dumps(
+                    {
+                        "step": "torch_mlp_classifier_epoch",
+                        "epoch": epoch + 1,
+                        "max_epochs": self.max_epochs,
+                        "best_epoch": best_epoch,
+                        "metric": best_metric,
+                        "device": str(self.device_),
+                    }
+                ),
+                flush=True,
+            )
             if val_x is not None and epochs_without_improvement >= self.patience:
                 break
         self.model_.load_state_dict(best_state)
@@ -2093,9 +3357,11 @@ class TorchSequenceStaticClassifier:
     def _dataset_logloss(self, dataset: _SequenceStaticDataset) -> float:
         import torch
 
-        loader = torch.utils.data.DataLoader(
+        loader = _sequence_data_loader(
             dataset,
-            **_torch_loader_kwargs(device=self.device_.type, shuffle=False, batch_size=min(self.batch_size, len(dataset))),
+            device=self.device_.type,
+            shuffle=False,
+            batch_size=self.batch_size,
         )
         loss_fn = torch.nn.BCEWithLogitsLoss()
         mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32)).to(self.device_)
@@ -2112,23 +3378,48 @@ class TorchSequenceStaticClassifier:
     def _train_epochs(self, dataset: _SequenceStaticDataset, epochs: int) -> None:
         import torch
 
-        loader = torch.utils.data.DataLoader(
+        loader = _sequence_data_loader(
             dataset,
-            **_torch_loader_kwargs(device=self.device_.type, shuffle=True, batch_size=min(self.batch_size, len(dataset))),
+            device=self.device_.type,
+            shuffle=True,
+            batch_size=self.batch_size,
+            random_state=self.random_state,
         )
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
         loss_fn = torch.nn.BCEWithLogitsLoss()
         mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32)).to(self.device_)
         scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32)).to(self.device_)
         self.model_.train()
-        for _ in range(max(epochs, 1)):
-            for sequence, static_ids, target in loader:
+        total_batches = len(loader)
+        progress_every = _torch_progress_every(total_batches)
+        start_time = time.monotonic()
+        for epoch in range(max(epochs, 1)):
+            for batch_index, (sequence, static_ids, target) in enumerate(loader, start=1):
                 sequence = self._prepare_sequence_tensor(_move_tensor(sequence, self.device_), mean_t, scale_t)
                 logits = self.model_(sequence, _move_tensor(static_ids.long(), self.device_))
                 loss = loss_fn(logits, _move_tensor(target.float(), self.device_))
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                if batch_index == 1 or batch_index % progress_every == 0 or batch_index == total_batches:
+                    print(
+                        json.dumps(
+                            {
+                                "step": "torch_seq_static_classifier_batch",
+                                "phase": "refit_full",
+                                "epoch": epoch + 1,
+                                "max_epochs": max(epochs, 1),
+                                "batch": batch_index,
+                                "total_batches": total_batches,
+                                "rows_seen": min(batch_index * self.batch_size, len(dataset)),
+                                "rows_total": len(dataset),
+                                "loss": float(loss.detach().cpu().item()),
+                                "elapsed_seconds": round(time.monotonic() - start_time, 1),
+                                "device": str(self.device_),
+                            }
+                        ),
+                        flush=True,
+                    )
 
     def fit(
         self,
@@ -2185,9 +3476,12 @@ class TorchSequenceStaticClassifier:
         ).to(self.device_)
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
         loss_fn = torch.nn.BCEWithLogitsLoss()
-        train_loader = torch.utils.data.DataLoader(
+        train_loader = _sequence_data_loader(
             train_dataset,
-            **_torch_loader_kwargs(device=self.device_.type, shuffle=True, batch_size=min(self.batch_size, len(train_dataset))),
+            device=self.device_.type,
+            shuffle=True,
+            batch_size=self.batch_size,
+            random_state=self.random_state,
         )
         mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32)).to(self.device_)
         scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32)).to(self.device_)
@@ -2195,15 +3489,37 @@ class TorchSequenceStaticClassifier:
         best_metric = np.inf
         best_epoch = 1
         epochs_without_improvement = 0
+        total_batches = len(train_loader)
+        progress_every = _torch_progress_every(total_batches)
+        start_time = time.monotonic()
         for epoch in range(self.max_epochs):
             self.model_.train()
-            for sequence, static_ids, target in train_loader:
+            for batch_index, (sequence, static_ids, target) in enumerate(train_loader, start=1):
                 sequence = self._prepare_sequence_tensor(_move_tensor(sequence, self.device_), mean_t, scale_t)
                 logits = self.model_(sequence, _move_tensor(static_ids.long(), self.device_))
                 loss = loss_fn(logits, _move_tensor(target.float(), self.device_))
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                if batch_index == 1 or batch_index % progress_every == 0 or batch_index == total_batches:
+                    print(
+                        json.dumps(
+                            {
+                                "step": "torch_seq_static_classifier_batch",
+                                "phase": "fit",
+                                "epoch": epoch + 1,
+                                "max_epochs": self.max_epochs,
+                                "batch": batch_index,
+                                "total_batches": total_batches,
+                                "rows_seen": min(batch_index * self.batch_size, len(train_dataset)),
+                                "rows_total": len(train_dataset),
+                                "loss": float(loss.detach().cpu().item()),
+                                "elapsed_seconds": round(time.monotonic() - start_time, 1),
+                                "device": str(self.device_),
+                            }
+                        ),
+                        flush=True,
+                    )
             metric = self._dataset_logloss(val_dataset if val_dataset is not None else train_dataset)
             if metric + 1e-6 < best_metric:
                 best_metric = metric
@@ -2212,6 +3528,19 @@ class TorchSequenceStaticClassifier:
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
+            print(
+                json.dumps(
+                    {
+                        "step": "torch_seq_static_classifier_epoch",
+                        "epoch": epoch + 1,
+                        "max_epochs": self.max_epochs,
+                        "best_epoch": best_epoch,
+                        "metric": best_metric,
+                        "device": str(self.device_),
+                    }
+                ),
+                flush=True,
+            )
             if val_dataset is not None and epochs_without_improvement >= self.patience:
                 break
         self.model_.load_state_dict(best_state)
@@ -2260,9 +3589,11 @@ class TorchSequenceStaticClassifier:
             return np.full((len(dataset), 1), float(self.constant_probability_), dtype=np.float64)
         self._resolve_device()
         self.model_ = self.model_.to(self.device_)
-        loader = torch.utils.data.DataLoader(
+        loader = _sequence_data_loader(
             dataset,
-            **_torch_loader_kwargs(device=self.device_.type, shuffle=False, batch_size=min(self.batch_size, len(dataset))),
+            device=self.device_.type,
+            shuffle=False,
+            batch_size=self.batch_size,
         )
         mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32)).to(self.device_)
         scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32)).to(self.device_)

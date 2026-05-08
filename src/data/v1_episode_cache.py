@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import heapq
 import json
+import os
 from pathlib import Path
 import time
 from typing import Iterable, Iterator, Sequence
@@ -40,6 +41,18 @@ from src.data.v1_dataset import (
     target_column,
     validate_model_feature_columns,
 )
+
+
+_MEMMAP_CACHE: dict[tuple[int, str], np.ndarray] = {}
+
+
+def _open_memmap(path: Path) -> np.ndarray:
+    key = (os.getpid(), str(Path(path).resolve()))
+    array = _MEMMAP_CACHE.get(key)
+    if array is None:
+        array = np.load(path, mmap_mode="r")
+        _MEMMAP_CACHE[key] = array
+    return array
 
 
 TABULAR_CONTEXT_MISSING_COLUMNS = ("market_context_context_missing", "sector_context_context_missing")
@@ -418,7 +431,7 @@ class CachedTabularFeatureStore:
         return CachedTabularView(self, row_indices.astype(np.int64))
 
     def open(self) -> np.ndarray:
-        return np.load(self.path, mmap_mode="r")
+        return _open_memmap(self.path)
 
 
 @dataclass(frozen=True)
@@ -448,15 +461,30 @@ class CachedTabularView:
         shuffle: bool = False,
         random_state: int = 0,
     ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-        order = np.arange(len(self.row_indices), dtype=np.int64)
-        if shuffle and len(order):
-            rng = np.random.default_rng(random_state)
-            rng.shuffle(order)
+        batch_size = max(int(batch_size), 1)
+        row_count = len(self.row_indices)
         data = self.store.open()
-        for start in range(0, len(order), max(int(batch_size), 1)):
-            local = order[start : start + int(batch_size)]
-            source_rows = self.row_indices[local]
-            yield local, np.asarray(data[source_rows], dtype=np.float32).copy()
+        if not shuffle:
+            for start in range(0, row_count, batch_size):
+                local = np.arange(start, min(start + batch_size, row_count), dtype=np.int64)
+                source_rows = self.row_indices[local]
+                yield local, np.asarray(data[source_rows], dtype=np.float32).copy()
+            return
+        raw_block_size = os.environ.get("V1_TABULAR_SHUFFLE_BLOCK_ROWS", "1048576").strip()
+        try:
+            block_size = max(int(raw_block_size), batch_size)
+        except ValueError:
+            block_size = max(1_048_576, batch_size)
+        blocks = np.arange(0, row_count, block_size, dtype=np.int64)
+        if len(blocks):
+            rng = np.random.default_rng(random_state)
+            rng.shuffle(blocks)
+        for block_start in blocks:
+            block_end = min(int(block_start) + block_size, row_count)
+            for start in range(int(block_start), block_end, batch_size):
+                local = np.arange(start, min(start + batch_size, block_end), dtype=np.int64)
+                source_rows = self.row_indices[local]
+                yield local, np.asarray(data[source_rows], dtype=np.float32).copy()
 
 
 @dataclass(frozen=True)
@@ -470,10 +498,10 @@ class MemmapSequenceFeatureStore:
     ticker_lengths: dict[str, int]
 
     def open(self) -> np.ndarray:
-        return np.load(self.path, mmap_mode="r")
+        return _open_memmap(self.path)
 
     def open_dates(self) -> np.ndarray:
-        return np.load(self.date_path, mmap_mode="r")
+        return _open_memmap(self.date_path)
 
     def get_window(self, ticker: str, end_index: int, window_length: int) -> np.ndarray:
         symbol = str(ticker).upper()
@@ -486,15 +514,19 @@ class MemmapSequenceFeatureStore:
         data = self.open()
         return np.asarray(data[offset + start : offset + int(end_index) + 1], dtype=np.float32).copy()
 
-    def iter_rows_through(self, cutoff_date: str, *, batch_size: int = 262_144) -> Iterator[np.ndarray]:
+    def iter_rows_through(self, cutoff_date: str, *, batch_size: int = 524_288) -> Iterator[np.ndarray]:
         cutoff = _date_to_int(cutoff_date)
         data = self.open()
         dates = self.open_dates()
         for start in range(0, self.shape[0], max(int(batch_size), 1)):
             end = min(start + int(batch_size), self.shape[0])
-            mask = dates[start:end] <= cutoff
+            date_block = dates[start:end]
+            mask = date_block <= cutoff
             if mask.any():
-                yield np.asarray(data[start:end][mask], dtype=np.float32).copy()
+                if bool(mask.all()):
+                    yield data[start:end]
+                else:
+                    yield data[start:end][mask]
 
 
 @dataclass(frozen=True)
@@ -505,8 +537,26 @@ class CachedV1Dataset(V1Dataset):
 def load_cached_v1_dataset(cache_dir: str | Path) -> CachedV1Dataset:
     root = Path(cache_dir)
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    metadata = pd.read_csv(root / "episode_metadata.csv")
-    targets = pd.read_csv(root / "targets.csv")
+    metadata = pd.read_csv(
+        root / "episode_metadata.csv",
+        dtype={
+            "ticker": "string",
+            "anchor_date": "string",
+            "gics_sector": "string",
+            "gics_sub_industry": "string",
+            "exchange": "string",
+        },
+        keep_default_na=False,
+    )
+    targets = pd.read_csv(
+        root / "targets.csv",
+        dtype={"ticker": "string", "anchor_date": "string"},
+        keep_default_na=False,
+    )
+    metadata["ticker"] = metadata["ticker"].astype(str).str.upper()
+    targets["ticker"] = targets["ticker"].astype(str).str.upper()
+    for column in [*manifest["target_columns"], *manifest["classification_target_columns"]]:
+        targets[column] = pd.to_numeric(targets[column], errors="coerce")
     feature_sets: dict[str, CachedTabularFeatureStore] = {}
     feature_columns: dict[str, list[str]] = {}
     for feature_set, payload in manifest.get("tabular_feature_sets", {}).items():
@@ -543,8 +593,8 @@ def load_cached_sequence_stores(cache_dir: str | Path) -> dict[str, MemmapSequen
             path=root / payload["path"],
             date_path=root / payload["date_path"],
             shape=(shape[0], shape[1]),
-            ticker_offsets={str(k): int(v) for k, v in payload["ticker_offsets"].items()},
-            ticker_lengths={str(k): int(v) for k, v in payload["ticker_lengths"].items()},
+            ticker_offsets={str(k).upper(): int(v) for k, v in payload["ticker_offsets"].items()},
+            ticker_lengths={str(k).upper(): int(v) for k, v in payload["ticker_lengths"].items()},
         )
     return stores
 

@@ -65,6 +65,20 @@ def _resolve_model_index_path(run_dir: Path) -> Path:
     raise SystemExit(f"Missing model index. Checked: {preferred} and {fallback}")
 
 
+def _resolve_artifact_path(run_dir: Path, artifact_path: str) -> Path:
+    recorded = Path(artifact_path)
+    candidates: list[Path]
+    if recorded.is_absolute():
+        candidates = [recorded, run_dir / "models" / recorded.name]
+    else:
+        candidates = [run_dir / recorded, recorded]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    candidate_text = ", ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(f"Model artifact not found. Tried: {candidate_text}")
+
+
 def _parse_benchmark_return_assumption(value: str, target_columns: list[str]) -> dict[str, float]:
     parts = [part.strip() for part in value.split(",") if part.strip()]
     if not parts:
@@ -160,7 +174,7 @@ def main() -> None:
         task_type = str(record.get("task_type") or "regression")
         feature_set = record["feature_set"]
         model_name = record["model_name"]
-        bundle = load_model_bundle(record["artifact_path"])
+        bundle = load_model_bundle(_resolve_artifact_path(run_dir, str(record["artifact_path"])))
         model = bundle["model"]
         bundle_metadata = bundle.get("metadata", {})
         input_layout = str(record.get("input_layout") or bundle_metadata.get("input_layout") or "tabular")

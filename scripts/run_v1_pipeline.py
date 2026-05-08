@@ -78,7 +78,7 @@ def _build_features_command(profile: dict[str, Any]) -> list[str]:
     dataset_root = profile.get("dataset_root")
     if dataset_root and "dataset_root" not in config:
         config["dataset_root"] = dataset_root
-    command = [sys.executable, "scripts/build_eodhd_daily_features_chunked.py"]
+    command = [sys.executable, "-u", "scripts/build_eodhd_daily_features_chunked.py"]
     for key, value in config.items():
         _append_option(command, key, value)
     return command
@@ -91,7 +91,7 @@ def _materialize_panel_command(profile: dict[str, Any]) -> list[str]:
         config["source_dataset_root"] = dataset_root
     if "output_dataset_root" not in config:
         raise SystemExit("Profiles with materialize_panel must set materialize_panel.output_dataset_root.")
-    command = [sys.executable, "scripts/materialize_v1_training_panel.py"]
+    command = [sys.executable, "-u", "scripts/materialize_v1_training_panel.py"]
     for key, value in config.items():
         _append_option(command, key, value)
     return command
@@ -134,7 +134,7 @@ def _materialize_cache_command(profile: dict[str, Any]) -> list[str]:
     ):
         if key in train_config and key not in config:
             config[key] = train_config[key]
-    command = [sys.executable, "scripts/materialize_v1_episode_cache.py"]
+    command = [sys.executable, "-u", "scripts/materialize_v1_episode_cache.py"]
     for key, value in config.items():
         _append_option(command, key, value)
     return command
@@ -163,7 +163,7 @@ def _train_command(profile: dict[str, Any]) -> list[str]:
     cache_dir = _episode_cache_dir(profile)
     if cache_dir and "episode_cache_dir" not in config:
         config["episode_cache_dir"] = cache_dir
-    command = [sys.executable, "scripts/train_v1_supervised_baselines.py"]
+    command = [sys.executable, "-u", "scripts/train_v1_supervised_baselines.py"]
     for key, value in config.items():
         _append_option(command, key, value)
     return command

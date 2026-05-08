@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+import json
 import os
 from pathlib import Path
 import sys
@@ -470,10 +471,12 @@ def _compare_against_legacy(
 
 
 def _write_model_index(path: Path, *, generated_utc: str, eval_mode: str, records: list[dict[str, object]]) -> None:
+    trained_at_utc = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     write_json(
         path,
         {
             "generated_utc": generated_utc,
+            "trained_at_utc": trained_at_utc,
             "evaluation_mode": eval_mode,
             "models": records,
         },
@@ -574,7 +577,7 @@ def _train_task_holdout(
     realized_col = _realized_return_column(dataset, args.classification_horizon)
 
     for feature_set, model_name in _build_combo_iterable(feature_sets, model_names):
-        print(f"Training {task_type}::{model_name} on {feature_set} ({args.eval_mode})...")
+        print(f"Training {task_type}::{model_name} on {feature_set} ({args.eval_mode})...", flush=True)
         train_rows = split == "train"
         val_rows = split == "val"
         test_rows = split == "test"
@@ -673,7 +676,7 @@ def _train_task_holdout(
             classification_horizon=args.classification_horizon,
         )
         save_model_bundle(model_path, model=model, metadata=model_metadata)
-        trained_records.append({**model_metadata, "artifact_path": str(model_path.resolve())})
+        trained_records.append({**model_metadata, "artifact_path": model_path.relative_to(output_dir).as_posix()})
 
     metrics = pd.DataFrame(metrics_rows)
     leaderboard = (
@@ -753,9 +756,21 @@ def _train_task_walk_forward(
     realized_col = _realized_return_column(dataset, args.classification_horizon)
 
     for feature_set, model_name in _build_combo_iterable(feature_sets, model_names):
-        print(f"Training {task_type}::{model_name} on {feature_set} ({args.eval_mode})...")
+        print(f"Training {task_type}::{model_name} on {feature_set} ({args.eval_mode})...", flush=True)
         combo_oos_frames: list[pd.DataFrame] = []
         for fold in folds:
+            print(
+                json.dumps(
+                    {
+                        "step": "walk_forward_fold_start",
+                        "task_type": task_type,
+                        "model_name": model_name,
+                        "feature_set": feature_set,
+                        "fold_id": fold.fold_id,
+                    }
+                ),
+                flush=True,
+            )
             train_rows = rows_for_dates(dataset.metadata, fold.train_dates)
             val_rows = rows_for_dates(dataset.metadata, fold.val_dates)
             oos_rows = rows_for_dates(dataset.metadata, fold.oos_dates)
@@ -783,6 +798,18 @@ def _train_task_walk_forward(
                 model_kwargs=model_kwargs,
             )
             model.fit(x_train, y_train, val_x=x_val, val_y=y_val)
+            print(
+                json.dumps(
+                    {
+                        "step": "walk_forward_fold_fit_complete",
+                        "task_type": task_type,
+                        "model_name": model_name,
+                        "feature_set": feature_set,
+                        "fold_id": fold.fold_id,
+                    }
+                ),
+                flush=True,
+            )
             for split_name, meta, x_eval, y_eval, rows in (("val", val_meta, x_val, y_val, val_rows), ("oos", oos_meta, x_oos, y_oos, oos_rows)):
                 pred = model.predict(x_eval)
                 if task_type == "classification":
@@ -860,6 +887,17 @@ def _train_task_walk_forward(
             )
         oos_prediction_frames.append(combo_oos)
 
+        print(
+            json.dumps(
+                {
+                    "step": "final_deploy_fit_start",
+                    "task_type": task_type,
+                    "model_name": model_name,
+                    "feature_set": feature_set,
+                }
+            ),
+            flush=True,
+        )
         final_model, final_vocabularies = _fit_final_deploy_model(
             dataset=dataset,
             feature_set=feature_set,
@@ -890,7 +928,19 @@ def _train_task_walk_forward(
             classification_horizon=args.classification_horizon,
         )
         save_model_bundle(model_path, model=final_model, metadata=model_metadata)
-        trained_records.append({**model_metadata, "artifact_path": str(model_path.resolve())})
+        print(
+            json.dumps(
+                {
+                    "step": "final_deploy_model_saved",
+                    "task_type": task_type,
+                    "model_name": model_name,
+                    "feature_set": feature_set,
+                    "artifact_path": str(model_path.resolve()),
+                }
+            ),
+                flush=True,
+            )
+        trained_records.append({**model_metadata, "artifact_path": model_path.relative_to(output_dir).as_posix()})
 
     fold_metrics = pd.DataFrame(fold_metric_rows)
     oos_metrics = pd.DataFrame(oos_metric_rows)
@@ -942,19 +992,19 @@ def main() -> None:
     eligibility_config = _episode_eligibility_config(args)
     cached_sequence_stores: dict[str, object] | None = None
     if args.episode_cache_dir:
-        print("Loading materialized V1 episode cache...")
+        print("Loading materialized V1 episode cache...", flush=True)
         dataset = load_cached_v1_dataset(args.episode_cache_dir)
         cached_sequence_stores = load_cached_sequence_stores(args.episode_cache_dir)
         stock_features = pd.DataFrame()
         context_features = pd.DataFrame()
     else:
-        print("Loading daily stock features...")
+        print("Loading daily stock features...", flush=True)
         stock_features = load_daily_features(args.dataset_root)
         context_features = load_market_context_features(args.dataset_root, stock_features=stock_features)
         if context_features.empty:
             raise SystemExit("Market context features are missing. Run scripts/update_eodhd_daily_dataset.py first.")
 
-        print("Building V1 supervised dataset...")
+        print("Building V1 supervised dataset...", flush=True)
         dataset = build_v1_dataset(
             stock_features,
             context_features,
@@ -1091,7 +1141,7 @@ def main() -> None:
     legacy_run_dir = Path(args.compare_against_run) if args.compare_against_run else None
     if legacy_run_dir and legacy_run_dir.exists() and regression_leaderboard is not None:
         _compare_against_legacy(legacy_run_dir=legacy_run_dir, new_leaderboard=regression_leaderboard, output_dir=output_dir)
-    print(f"Training complete. Artifacts written to {output_dir.resolve()}")
+    print(f"Training complete. Artifacts written to {output_dir.resolve()}", flush=True)
 
 
 if __name__ == "__main__":

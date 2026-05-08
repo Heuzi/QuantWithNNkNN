@@ -8,6 +8,8 @@ Use this file as the shared handoff note when switching between computers or Cod
 - `ARCHITECTURE.md`
 - `DATA_SCHEMA.md`
 - `HANDOFF.md`
+- `PRODUCTION_MODELS.md`
+- `TRADING_STRATEGY.md`
 
 ## Current Task
 
@@ -22,6 +24,8 @@ Use this file as the shared handoff note when switching between computers or Cod
 - Context instruments remain `SPY` plus sector ETFs and are stored in the separate market-context table.
 - Current full-run plan: classification-only. The standard full profile trains `torch_seq_static_classifier`, `torch_mlp_classifier`, and `xgboost_classifier`; regression is kept only for explicit research ablations.
 - Prediction plan: refresh data and score latest windows with saved final classifier bundles between retrains. New ticker windows do not require retraining if their features can be built and they pass eligibility.
+- Current production model registry: `PRODUCTION_MODELS.md`.
+- Current production retrain policy: score fresh data with saved bundles after routine data refreshes; retrain only periodically, usually monthly, or every 2 weeks during volatile regimes or close live-monitoring periods.
 
 ## Current Branch And State
 
@@ -85,6 +89,8 @@ Legacy Massive scripts remain in the repo for reproducibility but are no longer 
   Reason: Model selection favored classifiers, and the production question is now event probability for outperformance rather than direct return regression.
 - Decision: Retrain periodically, not for every prediction refresh.
   Reason: Saved classifier bundles can score new target-pending stock-window episodes without retraining as long as the feature schema is unchanged.
+- Decision: Track promoted production model timestamps in `PRODUCTION_MODELS.md`.
+  Reason: Existing May 2026 model indexes contain `generated_utc`, but that field can reflect run/index generation time rather than final model save time. Future training indexes also write `trained_at_utc`.
 
 ## Run Size Profiles
 
@@ -99,7 +105,7 @@ Legacy Massive scripts remain in the repo for reproducibility but are no longer 
 - True full-universe run:
   - Purpose: eventual large-scale experiment after the benchmark profile is stable.
   - Shape: `max_tickers=0`, intended long EODHD history, same materialized-panel plus episode-cache path, and no small benchmark cap unless a compute cap is deliberately documented.
-  - Status: not the current default profile.
+  - Status: completed for the current three production classifiers. See `PRODUCTION_MODELS.md` for model paths, metrics, timestamps, and caveats.
 - `eodhd_model_selection_walk_forward` is separate from the three sizes above. Use it for research when changing the model candidate list.
 
 ## Validation Checklist
@@ -120,6 +126,10 @@ Before trusting a new EODHD run:
   - `py -3.11 scripts/run_v1_pipeline.py --profile eodhd_full_walk_forward`
 - Score latest target-pending windows after a data refresh, using saved deploy bundles. Point `--dataset-root` at a bounded prediction/materialized dataset root, not directly at the 34GB full processed feature CSV:
   - `py -3.11 scripts/predict_v1_supervised_baselines.py --run-dir artifacts/v1_baselines/eodhd_full_walk_forward --dataset-root data/eodhd_training_panels/eodhd_full_walk_forward`
+- Score current production full-universe classifiers after a data refresh:
+  - `py -3.11 scripts/predict_v1_supervised_baselines.py --run-dir artifacts/v1_baselines/eodhd_true_full_xgboost --dataset-root data/eodhd_us_equities_30y --output-file artifacts/production_predictions/latest_xgboost.csv`
+  - `py -3.11 scripts/predict_v1_supervised_baselines.py --run-dir artifacts/v1_baselines/eodhd_true_full_torch_mlp --dataset-root data/eodhd_us_equities_30y --output-file artifacts/production_predictions/latest_torch_mlp.csv`
+  - `py -3.11 scripts/predict_v1_supervised_baselines.py --run-dir artifacts/v1_baselines/eodhd_true_full_torch_seq_static --dataset-root data/eodhd_us_equities_30y --output-file artifacts/production_predictions/latest_torch_seq_static.csv`
 - Rebuild only the materialized trainable panel:
   - `py -3.11 scripts/run_v1_pipeline.py --profile eodhd_full_walk_forward --stage materialize_panel`
 - Rebuild only the episode cache after the trainable panel is ready:
@@ -141,7 +151,7 @@ Before trusting a new EODHD run:
 - Daily or weekly after market close: refresh OHLCV, market context, and sentiment when fresh predictions are needed.
 - Monthly by default: refresh fundamentals, with extra refreshes around earnings/filing seasons if quota allows.
 - After each data refresh: rebuild the bounded prediction/materialized panel and run latest prediction from saved final classifier bundles.
-- Monthly or quarterly: run the full classification retrain and walk-forward benchmark.
+- Model retraining: run the full classification retrain every 2 to 4 weeks; monthly is the default cadence, with a 2-week cadence during volatile regimes or close live-monitoring periods.
 - Immediately: retrain after target, feature schema, universe policy, vendor semantics, or material OOS monitoring changes.
 
 ## Known Risks

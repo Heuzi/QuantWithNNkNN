@@ -97,6 +97,10 @@ Current implementation snapshot:
 - Raw identifiers such as `ticker`, `eodhd_symbol`, ISIN, CIK/CUSIP/FIGI, and company name are metadata only and are rejected from model feature columns.
 - Latest inference uses final deployment bundles saved after the walk-forward run completes. Scoring a new target-pending stock-window episode does not require retraining as long as the required features can be built.
 - Raw identifiers remain metadata at inference time. A novel ticker can be scored if it exists in the prediction dataset root, passes the same episode eligibility filter, and has enough prior window data. Unseen sector or industry categories map to unknown id `0` in static categorical encoders.
+- Current deployable full-universe classifiers, OOS metrics, and last trained/saved timestamps are tracked in `PRODUCTION_MODELS.md`.
+- Routine data refreshes should score latest target-pending windows with saved final bundles. Do not retrain just because a new daily bar arrived.
+- Production retraining cadence is every 2 to 4 weeks, with monthly as the default. Retrain immediately only after target, feature schema, universe policy, vendor semantics, leakage, or material live/OOS monitoring changes.
+- Future training indexes write `trained_at_utc`; existing May 2026 production artifacts should use the model file save timestamp recorded in `PRODUCTION_MODELS.md`.
 - Cache-backed training path:
   - `scripts/materialize_v1_episode_cache.py` streams a ticker-contiguous daily feature CSV and writes `episode_metadata.csv`, `targets.csv`, tabular `.npy` matrices, sequence `.npy` row stores, date arrays, and a manifest.
   - `scripts/train_v1_supervised_baselines.py --episode-cache-dir ...` loads metadata/targets plus memory-mapped arrays instead of loading/rebuilding tabular feature frames from daily CSV.
@@ -399,7 +403,7 @@ Report:
 For domain shift and production maintenance:
 - run data refreshes for prediction more often than model retraining
 - score latest windows with saved deploy bundles after each data refresh
-- retrain monthly or quarterly by default
+- retrain every 2 to 4 weeks, with monthly as the default operating cadence
 - retrain immediately after feature schema, target, vendor semantics, or universe-policy changes
 - retrain sooner if OOS monitoring shows material performance drift
 - prefer rolling retraining, periodic supervised refresh, replay windows, and recency weighting before adding online learning

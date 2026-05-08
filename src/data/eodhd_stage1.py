@@ -289,6 +289,32 @@ class EODHDRESTClient:
             return [dict(row) for row in data if isinstance(row, dict)]
         raise EODHDAPIError(f"EODHD EOD response for {symbol} was not a list.")
 
+    def get_bulk_eod_last_day(
+        self,
+        exchange: str,
+        *,
+        date: str | None = None,
+        symbols: Sequence[str] | None = None,
+        fmt: str = "json",
+    ) -> list[dict[str, object]]:
+        requested = [str(symbol).upper() for symbol in symbols or [] if str(symbol).strip()]
+        data = self.request_json(
+            f"/eod-bulk-last-day/{exchange}",
+            params={
+                "date": date,
+                "symbols": ",".join(requested) if requested else None,
+                "fmt": fmt,
+            },
+        )
+        if isinstance(data, list):
+            return [dict(row) for row in data if isinstance(row, dict)]
+        if isinstance(data, dict):
+            for key in ("data", "results"):
+                rows = data.get(key)
+                if isinstance(rows, list):
+                    return [dict(row) for row in rows if isinstance(row, dict)]
+        raise EODHDAPIError(f"EODHD bulk EOD response for {exchange} was not a list.")
+
     def get_exchange_symbol_list(
         self,
         exchange: str,
@@ -493,6 +519,47 @@ def normalize_eodhd_eod_rows(
             }
         )
     return [row for row in normalized if row.get("date") and row.get("close") is not None]
+
+
+def normalize_eodhd_bulk_eod_rows(
+    rows: Sequence[dict[str, object]],
+    *,
+    exchange: str = "US",
+    adjusted: bool = True,
+) -> list[dict[str, object]]:
+    normalized: list[dict[str, object]] = []
+    for row in rows:
+        code = (
+            row.get("code")
+            or row.get("Code")
+            or row.get("symbol")
+            or row.get("Symbol")
+            or row.get("ticker")
+            or row.get("Ticker")
+        )
+        if code in (None, ""):
+            continue
+        code_text = str(code).strip().upper()
+        if not code_text:
+            continue
+        eodhd_symbol = code_text if "." in code_text else eodhd_symbol_for_code(code_text, default_exchange=exchange)
+        row_exchange = (
+            row.get("exchange_short_name")
+            or row.get("exchange")
+            or row.get("Exchange")
+            or row.get("exchange_code")
+            or exchange
+        )
+        normalized.extend(
+            normalize_eodhd_eod_rows(
+                [row],
+                symbol=eodhd_symbol,
+                ticker=internal_ticker_from_eodhd_symbol(eodhd_symbol),
+                exchange=str(row_exchange).upper() if row_exchange else exchange,
+                adjusted=adjusted,
+            )
+        )
+    return sorted(normalized, key=lambda item: (str(item["ticker"]), str(item["date"])))
 
 
 def normalize_exchange_symbol_rows(

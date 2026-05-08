@@ -2854,6 +2854,9 @@ class XGBoostClassifier:
                 return np.empty((0, 1), dtype=np.float64)
             return np.vstack(outputs)
         x_values = self._preprocess(x, fit=False)
+        if not hasattr(self.model_, "predict_proba"):
+            values = np.nan_to_num(x_values.astype(np.float32, copy=False), nan=0.0, posinf=0.0, neginf=0.0)
+            return np.asarray(self.model_.predict(xgb.DMatrix(values)), dtype=np.float64).reshape(-1, 1)
         return self.model_.predict_proba(x_values)[:, 1:2].astype(np.float64)
 
 

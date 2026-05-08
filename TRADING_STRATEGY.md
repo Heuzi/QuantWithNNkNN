@@ -22,17 +22,20 @@ Core principle:
 
 Each run should do the following:
 
-1. Refresh most recent data using the existing project data-refresh pipeline.
-2. Preprocess/build the latest prediction-ready dataset using the existing project schema and point-in-time rules.
-3. Load the saved final deployment model bundles.
-4. Generate latest predictions for all eligible target-pending stock-window episodes.
-5. Rank all eligible stocks by model confidence.
-6. Identify top-ranked candidates.
-7. Check agreement across available production models.
-8. Produce an entry-candidate report.
-9. Load the current open-position ledger.
-10. Review previously entered positions against updated model rank and trade-management rules.
-11. Produce a position-review report.
+1. Determine the latest local EODHD market-bar date from the latest-inference manifest, falling back to the raw fetch manifest.
+2. Fetch only missing recent EOD OHLCV bars after that date.
+3. Prefer EODHD's bulk EOD endpoint for whole-exchange daily bars. Fall back to per-symbol EOD only for missing context tickers or endpoint failures.
+4. Do not refresh fundamentals or sentiment during the normal daily run. Existing saved fundamentals and sentiment are joined from local raw files.
+5. Build/update the compact latest-inference cache under `data/eodhd_us_equities_30y/processed/latest_inference/`.
+6. Load the saved final deployment model bundles.
+7. Generate latest predictions for all eligible target-pending stock-window episodes.
+8. Rank all eligible stocks by model confidence.
+9. Identify top-ranked candidates.
+10. Check agreement across available production models.
+11. Produce entry-candidate, watchlist, ranked-prediction, and model-agreement reports.
+12. Load the current open-position ledger, if present.
+13. Review previously entered positions against updated model rank and trade-management rules.
+14. Produce a position-review report.
 
 ## Data and Model Assumptions
 
@@ -73,26 +76,60 @@ The OOS positive baseline for the current full-run test folds is `50.25%`. Treat
 
 ### Prediction Refresh
 
-After a data refresh, run predictions from the saved bundles. This does not retrain the models.
+After a data refresh, run predictions from the saved bundles. This does not retrain the models and should not scan the full 34GB `processed/daily_features.csv`.
+
+Default daily command:
 
 ```powershell
-py -3.11 scripts\predict_v1_supervised_baselines.py `
-  --run-dir artifacts\v1_baselines\eodhd_true_full_xgboost `
+py -3.11 scripts\run_trading_strategy.py `
   --dataset-root data\eodhd_us_equities_30y `
-  --output-file artifacts\production_predictions\latest_xgboost.csv
-
-py -3.11 scripts\predict_v1_supervised_baselines.py `
-  --run-dir artifacts\v1_baselines\eodhd_true_full_torch_mlp `
-  --dataset-root data\eodhd_us_equities_30y `
-  --output-file artifacts\production_predictions\latest_torch_mlp.csv
-
-py -3.11 scripts\predict_v1_supervised_baselines.py `
-  --run-dir artifacts\v1_baselines\eodhd_true_full_torch_seq_static `
-  --dataset-root data\eodhd_us_equities_30y `
-  --output-file artifacts\production_predictions\latest_torch_seq_static.csv
+  --credentials-path EODHD_api_key
 ```
 
-If the full EODHD root is too large for the prediction machine, use a bounded prediction dataset root that preserves the same feature schema and point-in-time rules.
+The script writes the bounded latest-window feature cache to:
+
+- `data/eodhd_us_equities_30y/processed/latest_inference/recent_stock_bars.csv`
+- `data/eodhd_us_equities_30y/processed/latest_inference/recent_context_bars.csv`
+- `data/eodhd_us_equities_30y/processed/latest_inference/latest_daily_features.csv`
+- `data/eodhd_us_equities_30y/processed/latest_inference/latest_market_context_features.csv`
+- `data/eodhd_us_equities_30y/processed/latest_inference/prediction_windows.csv`
+- `data/eodhd_us_equities_30y/processed/latest_inference/run_manifest.json`
+
+The report folder is timestamped under `artifacts/production_reports/` and includes:
+
+- `entry_candidates.csv`
+- `watchlist.csv`
+- `all_ranked_predictions.csv`
+- `model_agreement_summary.csv`
+- `position_review.csv`
+- `all_model_predictions.csv`
+- `run_manifest.json`
+- `summary.md`
+
+For a local-only run without new API calls:
+
+```powershell
+py -3.11 scripts\run_trading_strategy.py `
+  --dataset-root data\eodhd_us_equities_30y `
+  --skip-fetch
+```
+
+For a smoke test on a small ticker subset:
+
+```powershell
+py -3.11 scripts\run_trading_strategy.py `
+  --dataset-root data\eodhd_us_equities_30y `
+  --skip-fetch `
+  --max-tickers 100 `
+  --report-name smoke_latest_inference
+```
+
+Daily API-efficiency rule:
+
+- Use whole-exchange EODHD bulk EOD calls first. EODHD documents whole-exchange bulk EOD as 100 API-call units per date, while symbol-filtered bulk adds 1 unit per ticker.
+- Fetch only missing dates after the local latest-inference date.
+- Rank only current windows by default. The runner keeps tickers whose latest anchor is within 3 calendar days of the newest available anchor date, which avoids stale/delisted symbols appearing as current trading candidates.
+- Do not refetch the full universe, full history, fundamentals, or sentiment during normal prediction refresh.
 
 ### Retrain And Promote
 

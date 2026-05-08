@@ -1,62 +1,9 @@
-"We ran out the 100,000 API calls per user on EODHD. Can you explain how we used it? How much API is each part of the data costing? How far away are we from gaining all the data? Is there more efficient ways to use the API or we can probably consider trim the data needs to save API calls. "
-You suggested the following fix:
-"
-Recommended Trim / Fix
-I would change the plan this way:
+report the stats of the results. Accuracy, top decile, etc. and where the stat results are stored
 
-Stop regular per-symbol fundamentals for full universe.
-Use bulk fundamentals if your package includes it.
+#### chatGPT
 
-Fetch OHLCV first.
-OHLCV is the core dataset and much cheaper per symbol. Fundamentals are optional enrichment.
-
-Trim fundamentals to eligible/liquid symbols only.
-Run OHLCV first, apply liquidity/history/price filters, then fetch fundamentals only for symbols that produce useful episodes.
-
-Delay sentiment or limit it to recent years.
-For daily sequence models, sentiment is useful, but 30 years of sentiment is probably not equally valuable. Start with 5-10 years.
-
-Use full universe for OHLCV, but narrower universe for expensive enrichments.
-Example:
-
-OHLCV: all 17,456 symbols
-fundamentals: symbols with enough usable OHLCV episodes
-sentiment: liquid/current names, recent 5-10 years
-The current implementation now stops cleanly on quota exhaustion and can resume, but before resuming I recommend switching fundamentals to bulk or delaying fundamentals until after OHLCV filtering.
-"
+give context for ChatGPT
 
 
-144 usable tickers after target/window availability
-
-
-
-make sure the model can run on future tickers, meaning that we don't necessarily require identifiers such as ticker name as input (do we do that right now?) 
-
-
-explain the training scheme and data (different variants of the data)
-
-
-Run both regression and classification models
-
-more data
-
-
-down the road: combine seq model and tabular model.
-
-
-
-
-
-
-
-
-"If you want, I can next give you a concrete upgrade plan for torch_seq_static that has the best chance of beating the current stock_only baselines."
-
-
-"One caveat: for final experiments, this should be ablated. Good comparisons would be:
-
-stock_only
-stock_relative
-stock_relative_market
-stock_relative_market_sector
-That tells us whether the relative versions actually improve out-of-sample performance or are just adding noise."
+build the trade ledger + exit decision dashboard in excel, I plan to create a repo the publicise my trading history and gain/losses. in the hope that I can sell this algorithm in the future.
+I also need to include a description: describing what I am doing, how I trained my model how everything is considered. but not expose the algorithms. Stating that all results will be point-in-time, and I will record as I progress/trade. I will not make changes to the past records, only add new records or close past records by selling the stocks. (GitHub history can prove that).

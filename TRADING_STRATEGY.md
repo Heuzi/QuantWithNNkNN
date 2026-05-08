@@ -114,6 +114,22 @@ py -3.11 scripts\run_trading_strategy.py `
   --skip-fetch
 ```
 
+Monitor a running strategy process:
+
+```powershell
+py -3.11 scripts\monitor_trading_strategy_progress.py `
+  --pid <PID> `
+  --latest-inference-dir data\eodhd_us_equities_30y\processed\latest_inference `
+  --report-dir artifacts\production_reports\<RUN_FOLDER> `
+  --watch `
+  --poll-seconds 30
+```
+
+The runner also writes machine-readable progress files:
+
+- `data/eodhd_us_equities_30y/processed/latest_inference/progress.json`
+- `artifacts/production_reports/<RUN_FOLDER>/progress.json`
+
 For a smoke test on a small ticker subset:
 
 ```powershell
@@ -129,6 +145,8 @@ Daily API-efficiency rule:
 - Use whole-exchange EODHD bulk EOD calls first. EODHD documents whole-exchange bulk EOD as 100 API-call units per date, while symbol-filtered bulk adds 1 unit per ticker.
 - Fetch only missing dates after the local latest-inference date.
 - Rank only current windows by default. The runner keeps tickers whose latest anchor is within 3 calendar days of the newest available anchor date, which avoids stale/delisted symbols appearing as current trading candidates.
+- Exclude exchange test symbols such as `ZVZZT`, `ZWZZT`, and `NTEST` by default.
+- Reuse the bounded latest-inference feature cache when no new EOD bars are fetched. Use `--force-rebuild-latest-inference` only when the cache needs to be rebuilt.
 - Do not refetch the full universe, full history, fundamentals, or sentiment during normal prediction refresh.
 
 ### Retrain And Promote

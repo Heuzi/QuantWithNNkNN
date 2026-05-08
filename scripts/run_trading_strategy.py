@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import time
 from collections import deque
 from datetime import date, datetime, timedelta, timezone
@@ -120,12 +121,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tickers", type=int, default=0, help="Optional smoke cap for stock tickers.")
     parser.add_argument("--skip-fundamentals", action="store_true", help="Do not join saved fundamentals.")
     parser.add_argument("--skip-sentiment", action="store_true", help="Do not join saved sentiment.")
+    parser.add_argument("--include-test-symbols", action="store_true", help="Include exchange test symbols if present.")
+    parser.add_argument(
+        "--force-rebuild-latest-inference",
+        action="store_true",
+        help="Rebuild latest inference features even when a current cache exists.",
+    )
     parser.add_argument(
         "--latest-inference-dir",
         default="",
         help="Optional latest-inference output/cache directory. Defaults under dataset_root/processed.",
     )
     parser.add_argument("--progress-every-rows", type=int, default=2_000_000)
+    parser.add_argument("--feature-progress-every-tickers", type=int, default=500)
+    parser.add_argument("--progress-bar-width", type=int, default=30)
     parser.add_argument("--rate-limit-calls", type=int, default=200)
     parser.add_argument("--rate-limit-period-seconds", type=float, default=60.0)
     parser.add_argument(
@@ -166,6 +175,61 @@ def _run_date() -> str:
 def _log(message: str) -> None:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"{timestamp} | {message}", flush=True)
+
+
+def _progress_bar(current: int, total: int | None, *, width: int = 30) -> str:
+    if not total or total <= 0:
+        return f"[{'?' * width}]"
+    current = max(min(int(current), int(total)), 0)
+    filled = int(round(width * current / total))
+    return f"[{'#' * filled}{'-' * (width - filled)}]"
+
+
+def _write_progress(
+    path: Path | None,
+    *,
+    phase: str,
+    current: int = 0,
+    total: int | None = None,
+    detail: str = "",
+    extra: dict[str, object] | None = None,
+) -> None:
+    if path is None:
+        return
+    payload: dict[str, object] = {
+        "generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "pid": os.getpid(),
+        "phase": phase,
+        "current": int(current),
+        "total": int(total) if total is not None else None,
+        "detail": detail,
+    }
+    if total:
+        payload["percent"] = round(100.0 * min(max(current, 0), total) / total, 2)
+    if extra:
+        payload.update(extra)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    temp_path.replace(path)
+
+
+def _report_progress(
+    path: Path | None,
+    *,
+    phase: str,
+    current: int = 0,
+    total: int | None = None,
+    detail: str = "",
+    width: int = 30,
+    extra: dict[str, object] | None = None,
+) -> None:
+    _write_progress(path, phase=phase, current=current, total=total, detail=detail, extra=extra)
+    if total:
+        percent = 100.0 * min(max(current, 0), total) / total
+        _log(f"{_progress_bar(current, total, width=width)} {percent:5.1f}% | {phase} | {detail}")
+    else:
+        _log(f"{_progress_bar(current, total, width=width)}       | {phase} | {detail}")
 
 
 def _daily_features_path(dataset_root: Path) -> Path:
@@ -341,6 +405,8 @@ def _stream_recent_bar_rows(
     rows_per_ticker: int,
     wanted_tickers: set[str] | None = None,
     progress_every_rows: int = 2_000_000,
+    progress_path: Path | None = None,
+    progress_width: int = 30,
 ) -> list[dict[str, object]]:
     if not path.exists():
         raise FileNotFoundError(path)
@@ -359,9 +425,16 @@ def _stream_recent_bar_rows(
                 tails[ticker] = deque(maxlen=rows_per_ticker)
             tails[ticker].append(row)
             if progress_every_rows and rows_seen % progress_every_rows == 0:
-                _log(
-                    f"read {rows_seen:,} raw rows; retained {sum(len(items) for items in tails.values()):,} "
-                    f"rows for {len(tails):,} tickers in {time.monotonic() - start_time:.1f}s"
+                _report_progress(
+                    progress_path,
+                    phase="bootstrap_recent_raw_cache",
+                    current=rows_seen,
+                    total=None,
+                    detail=(
+                        f"read {rows_seen:,} raw rows; retained {sum(len(items) for items in tails.values()):,} "
+                        f"rows for {len(tails):,} tickers in {time.monotonic() - start_time:.1f}s"
+                    ),
+                    width=progress_width,
                 )
     parsed = [_parse_bar_row(row) for items in tails.values() for row in items]
     parsed = _merge_bar_rows(parsed)
@@ -369,7 +442,20 @@ def _stream_recent_bar_rows(
     return parsed
 
 
-def _load_universe(dataset_root: Path, max_tickers: int = 0) -> tuple[list[dict[str, str]], set[str], set[str]]:
+def _looks_like_test_symbol(row: dict[str, str]) -> bool:
+    ticker = str(row.get("ticker") or row.get("symbol") or "").upper()
+    name = str(row.get("name") or "").upper()
+    if ticker in {"ZVZZT", "ZWZZT", "NTEST"}:
+        return True
+    return "TEST" in name and ("STOCK" in name or "SYMBOL" in name or "ISSUE" in name)
+
+
+def _load_universe(
+    dataset_root: Path,
+    max_tickers: int = 0,
+    *,
+    include_test_symbols: bool = False,
+) -> tuple[list[dict[str, str]], set[str], set[str], dict[str, str]]:
     path = dataset_root / "raw" / "eodhd_common_stock_universe.csv"
     if not path.exists():
         raise FileNotFoundError(path)
@@ -384,12 +470,19 @@ def _load_universe(dataset_root: Path, max_tickers: int = 0) -> tuple[list[dict[
             row = dict(row)
             row["ticker"] = ticker
             row["eodhd_symbol"] = symbol
+            if not include_test_symbols and _looks_like_test_symbol(row):
+                continue
             rows.append(row)
             if max_tickers and len(rows) >= max_tickers:
                 break
     stock_tickers = {row["ticker"] for row in rows}
     context_tickers = {str(ticker).upper() for ticker in MARKET_CONTEXT_TICKERS}
-    return rows, stock_tickers, context_tickers
+    exchange_by_ticker = {
+        row["ticker"]: str(row.get("exchange") or "").upper()
+        for row in rows
+        if row.get("exchange")
+    }
+    return rows, stock_tickers, context_tickers, exchange_by_ticker
 
 
 def _max_date_from_rows(rows: Sequence[dict[str, object]]) -> str | None:
@@ -403,11 +496,27 @@ def _filter_bulk_rows(
     exchange: str,
     stock_tickers: set[str],
     context_tickers: set[str],
+    exchange_by_ticker: dict[str, str],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     normalized = normalize_eodhd_bulk_eod_rows(rows, exchange=exchange, adjusted=True)
     stock_rows = [row for row in normalized if str(row.get("ticker") or "").upper() in stock_tickers]
+    stock_rows = _apply_exchange_by_ticker(stock_rows, exchange_by_ticker)
     context_rows = [row for row in normalized if str(row.get("ticker") or "").upper() in context_tickers]
     return stock_rows, context_rows
+
+
+def _apply_exchange_by_ticker(
+    rows: Sequence[dict[str, object]],
+    exchange_by_ticker: dict[str, str],
+) -> list[dict[str, object]]:
+    out: list[dict[str, object]] = []
+    for row in rows:
+        normalized = dict(row)
+        ticker = str(normalized.get("ticker") or "").upper()
+        if ticker in exchange_by_ticker:
+            normalized["exchange"] = exchange_by_ticker[ticker]
+        out.append(normalized)
+    return out
 
 
 def _fetch_missing_eod_rows(
@@ -421,6 +530,9 @@ def _fetch_missing_eod_rows(
     skip_fetch: bool,
     stock_tickers: set[str],
     context_tickers: set[str],
+    exchange_by_ticker: dict[str, str],
+    progress_path: Path | None = None,
+    progress_width: int = 30,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object]]:
     local_end = _local_data_end_date(dataset_root, latest_dir)
     latest_probe_rows: list[dict[str, object]] = []
@@ -428,6 +540,7 @@ def _fetch_missing_eod_rows(
     api_calls_estimate = 0
 
     if skip_fetch:
+        _report_progress(progress_path, phase="fetch_eod", current=1, total=1, detail="skipped", width=progress_width)
         return [], [], {
             "skipped_fetch": True,
             "local_data_end_date_before_fetch": local_end,
@@ -444,6 +557,7 @@ def _fetch_missing_eod_rows(
             exchange=exchange,
             stock_tickers=stock_tickers,
             context_tickers=context_tickers,
+            exchange_by_ticker=exchange_by_ticker,
         )
         latest_probe_date = _max_date_from_rows([*latest_stock_probe, *latest_context_probe])
         api_calls_estimate += 100
@@ -460,6 +574,14 @@ def _fetch_missing_eod_rows(
     end = _parse_iso_date(fetch_end_date)
     planned_dates = _weekday_dates(start, end) if start <= end else []
     if not planned_dates:
+        _report_progress(
+            progress_path,
+            phase="fetch_eod",
+            current=1,
+            total=1,
+            detail=f"already current through {fetch_end_date}",
+            width=progress_width,
+        )
         return [], [], {
             "skipped_fetch": False,
             "local_data_end_date_before_fetch": local_end,
@@ -484,6 +606,7 @@ def _fetch_missing_eod_rows(
     per_date: list[dict[str, object]] = []
     latest_rows_by_date = {latest_probe_date: latest_probe_rows} if latest_probe_date and latest_probe_rows else {}
     for planned_date in planned_dates:
+        date_index = planned_dates.index(planned_date) + 1
         planned_date_str = planned_date.isoformat()
         try:
             raw_rows = latest_rows_by_date.get(planned_date_str)
@@ -495,6 +618,7 @@ def _fetch_missing_eod_rows(
                 exchange=exchange,
                 stock_tickers=stock_tickers,
                 context_tickers=context_tickers,
+                exchange_by_ticker=exchange_by_ticker,
             )
             stock_rows_all.extend(stock_rows)
             context_rows_all.extend(context_rows)
@@ -512,11 +636,27 @@ def _fetch_missing_eod_rows(
                 f"bulk EOD {planned_date_str}: raw={len(raw_rows):,}, "
                 f"stocks={len(stock_rows):,}, context={len(context_rows):,}"
             )
+            _report_progress(
+                progress_path,
+                phase="fetch_bulk_eod",
+                current=date_index,
+                total=len(planned_dates),
+                detail=f"{planned_date_str} stocks={len(stock_rows):,} context={len(context_rows):,}",
+                width=progress_width,
+            )
         except EODHDRateLimitError:
             raise
         except EODHDAPIError as exc:
             per_date.append({"date": planned_date_str, "status": "error", "error": str(exc)[:500]})
             _log(f"bulk EOD {planned_date_str} failed: {exc}")
+            _report_progress(
+                progress_path,
+                phase="fetch_bulk_eod",
+                current=date_index,
+                total=len(planned_dates),
+                detail=f"{planned_date_str} error={str(exc)[:120]}",
+                width=progress_width,
+            )
 
     existing_context_keys = {(str(row["ticker"]).upper(), str(row["date"])[:10]) for row in context_rows_all}
     fallback_rows: list[dict[str, object]] = []
@@ -562,10 +702,13 @@ def _build_recent_raw_cache(
     latest_dir: Path,
     stock_tickers: set[str],
     context_tickers: set[str],
+    exchange_by_ticker: dict[str, str],
     fetched_stock_rows: Sequence[dict[str, object]],
     fetched_context_rows: Sequence[dict[str, object]],
     rows_per_ticker: int,
     progress_every_rows: int,
+    progress_path: Path | None = None,
+    progress_width: int = 30,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     raw_dir = dataset_root / "raw"
     stock_cache_path = latest_dir / RECENT_STOCK_BARS_FILENAME
@@ -577,6 +720,14 @@ def _build_recent_raw_cache(
     _update_daily_update_file(context_update_path, fetched_context_rows)
 
     if stock_cache_path.exists():
+        _report_progress(
+            progress_path,
+            phase="load_recent_raw_cache",
+            current=1,
+            total=3,
+            detail=f"loading existing {stock_cache_path.name}",
+            width=progress_width,
+        )
         stock_source = _load_bar_csv(stock_cache_path)
     else:
         stock_source = _stream_recent_bar_rows(
@@ -584,14 +735,32 @@ def _build_recent_raw_cache(
             rows_per_ticker=rows_per_ticker,
             wanted_tickers=stock_tickers,
             progress_every_rows=progress_every_rows,
+            progress_path=progress_path,
+            progress_width=progress_width,
         )
         stock_source.extend(_load_bar_csv(stock_update_path))
     stock_source.extend(fetched_stock_rows)
-    stock_recent = _tail_bar_rows(stock_source, rows_per_ticker)
+    stock_recent = _apply_exchange_by_ticker(_tail_bar_rows(stock_source, rows_per_ticker), exchange_by_ticker)
 
     if context_cache_path.exists():
+        _report_progress(
+            progress_path,
+            phase="load_recent_raw_cache",
+            current=2,
+            total=3,
+            detail=f"loading existing {context_cache_path.name}",
+            width=progress_width,
+        )
         context_source = _load_bar_csv(context_cache_path)
     else:
+        _report_progress(
+            progress_path,
+            phase="load_recent_raw_cache",
+            current=2,
+            total=3,
+            detail=f"loading {raw_dir / 'market_context_bars.csv'}",
+            width=progress_width,
+        )
         context_source = [
             row
             for row in _load_bar_csv(raw_dir / "market_context_bars.csv")
@@ -603,7 +772,64 @@ def _build_recent_raw_cache(
 
     _write_bar_csv(stock_cache_path, stock_recent)
     _write_bar_csv(context_cache_path, context_recent)
+    _report_progress(
+        progress_path,
+        phase="load_recent_raw_cache",
+        current=3,
+        total=3,
+        detail=f"stock_rows={len(stock_recent):,} context_rows={len(context_recent):,}",
+        width=progress_width,
+    )
     return stock_recent, context_recent
+
+
+def _compute_daily_features_with_progress(
+    rows: Sequence[dict[str, object]],
+    *,
+    label: str,
+    progress_path: Path | None = None,
+    progress_every_tickers: int = 500,
+    progress_width: int = 30,
+) -> list[dict[str, object]]:
+    if not rows:
+        _report_progress(progress_path, phase=f"compute_{label}_features", current=1, total=1, detail="no rows", width=progress_width)
+        return []
+    sorted_rows = sorted(rows, key=lambda item: (str(item.get("ticker") or ""), str(item.get("date") or "")))
+    total_tickers = len({str(row.get("ticker") or "").upper() for row in sorted_rows if row.get("ticker")})
+    feature_rows: list[dict[str, object]] = []
+    group: list[dict[str, object]] = []
+    current_ticker = ""
+    processed = 0
+    start_time = time.monotonic()
+
+    def flush_group() -> None:
+        nonlocal group, current_ticker, processed
+        if not group:
+            return
+        feature_rows.extend(compute_daily_features(group))
+        processed += 1
+        if processed == 1 or processed % max(progress_every_tickers, 1) == 0 or processed == total_tickers:
+            _report_progress(
+                progress_path,
+                phase=f"compute_{label}_features",
+                current=processed,
+                total=total_tickers,
+                detail=(
+                    f"ticker={current_ticker} features={len(feature_rows):,} "
+                    f"elapsed={time.monotonic() - start_time:.1f}s"
+                ),
+                width=progress_width,
+            )
+        group = []
+
+    for row in sorted_rows:
+        ticker = str(row.get("ticker") or "").upper()
+        if group and ticker != current_ticker:
+            flush_group()
+        current_ticker = ticker
+        group.append(dict(row))
+    flush_group()
+    return sorted(feature_rows, key=lambda item: (str(item["ticker"]), str(item["date"])))
 
 
 def _materialize_latest_inference_features(
@@ -614,20 +840,45 @@ def _materialize_latest_inference_features(
     context_bars: Sequence[dict[str, object]],
     skip_fundamentals: bool,
     skip_sentiment: bool,
+    progress_path: Path | None = None,
+    progress_width: int = 30,
+    feature_progress_every_tickers: int = 500,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     raw_dir = dataset_root / "raw"
     latest_dir.mkdir(parents=True, exist_ok=True)
     _log(f"computing latest stock features from {len(stock_bars):,} bounded raw rows")
-    stock_features = compute_daily_features(stock_bars)
+    stock_features = _compute_daily_features_with_progress(
+        stock_bars,
+        label="stock",
+        progress_path=progress_path,
+        progress_every_tickers=feature_progress_every_tickers,
+        progress_width=progress_width,
+    )
     stock_frame = _add_static_metadata(pd.DataFrame(stock_features), dataset_root)
     stock_features = stock_frame.to_dict("records")
 
     if not skip_fundamentals:
+        _report_progress(
+            progress_path,
+            phase="join_fundamentals",
+            current=0,
+            total=None,
+            detail="loading local fundamental feature rows",
+            width=progress_width,
+        )
         symbols = sorted({str(row.get("eodhd_symbol") or "").upper() for row in stock_bars if row.get("eodhd_symbol")})
         _log(f"joining saved fundamentals for {len(symbols):,} symbols")
         fundamental_rows = load_fundamental_feature_rows(raw_dir / "eodhd_fundamentals_raw", symbols=symbols)
         stock_features = add_fundamental_features(stock_features, fundamental_rows)
     if not skip_sentiment:
+        _report_progress(
+            progress_path,
+            phase="join_sentiment",
+            current=0,
+            total=None,
+            detail="loading local sentiment rows",
+            width=progress_width,
+        )
         wanted = {str(row.get("ticker") or "").upper() for row in stock_bars if row.get("ticker")}
         min_date = min(str(row.get("date"))[:10] for row in stock_bars if row.get("date"))
         _log("joining saved sentiment rows")
@@ -638,7 +889,13 @@ def _materialize_latest_inference_features(
         ]
         stock_features = add_sentiment_features(stock_features, sentiment_rows)
 
-    context_features = compute_daily_features(context_bars)
+    context_features = _compute_daily_features_with_progress(
+        context_bars,
+        label="context",
+        progress_path=progress_path,
+        progress_every_tickers=max(min(feature_progress_every_tickers, 10), 1),
+        progress_width=progress_width,
+    )
     stock_frame = pd.DataFrame(stock_features)
     context_frame = pd.DataFrame(context_features)
     if not stock_frame.empty:
@@ -657,14 +914,76 @@ def _materialize_latest_inference_features(
         latest = stock_frame.sort_values(["ticker", "date"]).groupby("ticker", sort=False).tail(1)
         prediction_windows = latest[["ticker", "date"]].rename(columns={"date": "anchor_date"}).to_dict("records")
     pd.DataFrame(prediction_windows).to_csv(latest_dir / "prediction_windows.csv", index=False)
+    _report_progress(
+        progress_path,
+        phase="materialize_latest_inference",
+        current=1,
+        total=1,
+        detail=f"stock_features={len(stock_frame):,} context_features={len(context_frame):,}",
+        width=progress_width,
+    )
     return stock_frame, context_frame
+
+
+def _load_latest_feature_cache(
+    latest_dir: Path,
+    *,
+    stock_tickers: set[str],
+    context_tickers: set[str],
+    progress_path: Path | None = None,
+    progress_width: int = 30,
+) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+    stock_path = latest_dir / LATEST_STOCK_FEATURES_FILENAME
+    context_path = latest_dir / LATEST_CONTEXT_FEATURES_FILENAME
+    if not stock_path.exists() or not context_path.exists():
+        return None
+    _report_progress(
+        progress_path,
+        phase="load_latest_feature_cache",
+        current=0,
+        total=None,
+        detail=f"loading {stock_path.name} and {context_path.name}",
+        width=progress_width,
+    )
+    stock_features = pd.read_csv(stock_path, low_memory=False)
+    context_features = pd.read_csv(context_path, low_memory=False)
+    if stock_features.empty or context_features.empty:
+        return None
+    stock_features["ticker"] = stock_features["ticker"].astype(str).str.upper()
+    stock_features["date"] = stock_features["date"].astype(str)
+    context_features["ticker"] = context_features["ticker"].astype(str).str.upper()
+    context_features["date"] = context_features["date"].astype(str)
+    stock_features = stock_features[stock_features["ticker"].isin(stock_tickers)].copy()
+    context_features = context_features[context_features["ticker"].isin(context_tickers)].copy()
+    _report_progress(
+        progress_path,
+        phase="load_latest_feature_cache",
+        current=1,
+        total=1,
+        detail=f"stock_features={len(stock_features):,} context_features={len(context_features):,}",
+        width=progress_width,
+    )
+    return stock_features, context_features
 
 
 def _refresh_latest_inference_dataset(args: argparse.Namespace, run_dirs: Sequence[Path]) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object], Path]:
     dataset_root = Path(args.dataset_root)
     latest_dir = _latest_inference_dir(dataset_root, args.latest_inference_dir)
     latest_dir.mkdir(parents=True, exist_ok=True)
-    universe_rows, stock_tickers, context_tickers = _load_universe(dataset_root, max_tickers=args.max_tickers)
+    progress_path = latest_dir / "progress.json"
+    _report_progress(
+        progress_path,
+        phase="preflight",
+        current=0,
+        total=None,
+        detail="loading universe and model indexes",
+        width=args.progress_bar_width,
+    )
+    universe_rows, stock_tickers, context_tickers, exchange_by_ticker = _load_universe(
+        dataset_root,
+        max_tickers=args.max_tickers,
+        include_test_symbols=args.include_test_symbols,
+    )
     credentials = load_eodhd_credentials(args.credentials_path)
     if not args.skip_fetch and not credentials.api_key:
         raise SystemExit("EODHD_API_KEY is missing. Set it in EODHD_api_key or the environment.")
@@ -687,16 +1006,63 @@ def _refresh_latest_inference_dataset(args: argparse.Namespace, run_dirs: Sequen
         skip_fetch=args.skip_fetch,
         stock_tickers=stock_tickers,
         context_tickers=context_tickers,
+        exchange_by_ticker=exchange_by_ticker,
+        progress_path=progress_path,
+        progress_width=args.progress_bar_width,
     )
+    if not args.force_rebuild_latest_inference and not stock_rows and not context_rows:
+        cached = _load_latest_feature_cache(
+            latest_dir,
+            stock_tickers=stock_tickers,
+            context_tickers=context_tickers,
+            progress_path=progress_path,
+            progress_width=args.progress_bar_width,
+        )
+        if cached is not None:
+            stock_features, context_features = cached
+            local_max = max(
+                str(stock_features["date"].max()) if not stock_features.empty else "",
+                str(context_features["date"].max()) if not context_features.empty else "",
+            )
+            manifest = {
+                "generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                "mode": "latest_inference_daily_refresh",
+                "dataset_root": str(dataset_root.resolve()),
+                "latest_inference_dir": str(latest_dir.resolve()),
+                "universe_rows_loaded": len(universe_rows),
+                "stock_tickers": len(stock_tickers),
+                "context_tickers": len(context_tickers),
+                "latest_stock_feature_rows": len(stock_features),
+                "latest_context_feature_rows": len(context_features),
+                "local_data_end_date": local_max or None,
+                "cache_reused": True,
+                "skip_fundamentals": bool(args.skip_fundamentals),
+                "skip_sentiment": bool(args.skip_sentiment),
+                "include_test_symbols": bool(args.include_test_symbols),
+                "fetch": fetch_manifest,
+            }
+            write_json(latest_dir / "run_manifest.json", manifest)
+            _report_progress(
+                progress_path,
+                phase="latest_inference_ready",
+                current=1,
+                total=1,
+                detail=f"reused cache local_data_end_date={local_max}",
+                width=args.progress_bar_width,
+            )
+            return stock_features, context_features, manifest, latest_dir
     raw_stock, raw_context = _build_recent_raw_cache(
         dataset_root=dataset_root,
         latest_dir=latest_dir,
         stock_tickers=stock_tickers,
         context_tickers=context_tickers,
+        exchange_by_ticker=exchange_by_ticker,
         fetched_stock_rows=stock_rows,
         fetched_context_rows=context_rows,
         rows_per_ticker=max(int(args.recent_raw_rows_per_ticker), 125),
         progress_every_rows=args.progress_every_rows,
+        progress_path=progress_path,
+        progress_width=args.progress_bar_width,
     )
     stock_features, context_features = _materialize_latest_inference_features(
         dataset_root=dataset_root,
@@ -705,6 +1071,9 @@ def _refresh_latest_inference_dataset(args: argparse.Namespace, run_dirs: Sequen
         context_bars=raw_context,
         skip_fundamentals=args.skip_fundamentals,
         skip_sentiment=args.skip_sentiment,
+        progress_path=progress_path,
+        progress_width=args.progress_bar_width,
+        feature_progress_every_tickers=args.feature_progress_every_tickers,
     )
     local_max = _max_date_from_rows([*raw_stock, *raw_context])
     manifest = {
@@ -721,11 +1090,21 @@ def _refresh_latest_inference_dataset(args: argparse.Namespace, run_dirs: Sequen
         "latest_stock_feature_rows": len(stock_features),
         "latest_context_feature_rows": len(context_features),
         "local_data_end_date": local_max,
+        "cache_reused": False,
         "skip_fundamentals": bool(args.skip_fundamentals),
         "skip_sentiment": bool(args.skip_sentiment),
+        "include_test_symbols": bool(args.include_test_symbols),
         "fetch": fetch_manifest,
     }
     write_json(latest_dir / "run_manifest.json", manifest)
+    _report_progress(
+        progress_path,
+        phase="latest_inference_ready",
+        current=1,
+        total=1,
+        detail=f"local_data_end_date={local_max}",
+        width=args.progress_bar_width,
+    )
     return stock_features, context_features, manifest, latest_dir
 
 
@@ -802,6 +1181,8 @@ def _build_latest_feature_sets_for_records(
     anchor_date: str | None,
     max_anchor_lag_days: int,
     eligibility_config: object | None,
+    progress_path: Path | None = None,
+    progress_width: int = 30,
 ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], dict[str, list[str]]]:
     requested_tabular = {
         str(record["feature_set"])
@@ -816,7 +1197,14 @@ def _build_latest_feature_sets_for_records(
         stocks = stocks[stocks["date"] <= cutoff]
         context = context[context["date"] <= cutoff]
 
-    _log("adding market/sector relative return features")
+    _report_progress(
+        progress_path,
+        phase="build_feature_sets",
+        current=0,
+        total=None,
+        detail="adding market/sector relative return features",
+        width=progress_width,
+    )
     stocks = add_context_relative_return_features(
         stocks,
         context,
@@ -867,7 +1255,8 @@ def _build_latest_feature_sets_for_records(
         "window_row_count",
         *eligibility_metadata_columns(metadata),
     }
-    for feature_set in sorted(requested_tabular):
+    feature_set_names = sorted(requested_tabular)
+    for feature_index, feature_set in enumerate(feature_set_names, start=1):
         parts = set(feature_set.split("_"))
         compact = "compact" in parts
         include_relative = "relative" in parts
@@ -876,6 +1265,14 @@ def _build_latest_feature_sets_for_records(
         include_fundamentals = "fundamentals" in parts
         include_sentiment = "sentiment" in parts
         _log(f"building tabular feature set {feature_set}")
+        _report_progress(
+            progress_path,
+            phase="build_feature_sets",
+            current=feature_index,
+            total=max(len(feature_set_names), 1),
+            detail=f"tabular {feature_set}",
+            width=progress_width,
+        )
         stock_cols = select_augmented_stock_feature_columns(
             stocks,
             include_relative=include_relative,
@@ -946,11 +1343,13 @@ def _score_models(
     feature_sets: dict[str, pd.DataFrame],
     stock_features: pd.DataFrame,
     context_features: pd.DataFrame,
+    progress_path: Path | None = None,
+    progress_width: int = 30,
 ) -> pd.DataFrame:
     first_model = records[0]
     sequence_stores: dict[tuple[str, tuple[str, ...]], object] = {}
     prediction_frames: list[pd.DataFrame] = []
-    for record in records:
+    for record_index, record in enumerate(records, start=1):
         run_dir = Path(record["run_dir"])
         task_type = str(record.get("task_type") or "classification")
         if task_type != "classification":
@@ -958,6 +1357,14 @@ def _score_models(
             continue
         model_name = str(record["model_name"])
         feature_set = str(record["feature_set"])
+        _report_progress(
+            progress_path,
+            phase="score_models",
+            current=record_index,
+            total=len(records),
+            detail=f"loading/scoring {model_name}",
+            width=progress_width,
+        )
         _log(f"loading {model_name} from {run_dir}")
         bundle = load_model_bundle(_resolve_artifact_path(run_dir, str(record["artifact_path"])))
         model = bundle["model"]
@@ -1319,6 +1726,15 @@ def main() -> None:
     report_name = args.report_name or _utc_now_label()
     output_dir = Path(args.output_root) / report_name
     output_dir.mkdir(parents=True, exist_ok=True)
+    report_progress_path = output_dir / "progress.json"
+    _report_progress(
+        report_progress_path,
+        phase="start",
+        current=0,
+        total=None,
+        detail="starting trading strategy run",
+        width=args.progress_bar_width,
+    )
 
     records = _load_model_records(run_dirs)
     benchmark_ticker = str(records[0].get("benchmark_ticker") or "SPY")
@@ -1351,6 +1767,8 @@ def main() -> None:
         anchor_date=args.anchor_date or None,
         max_anchor_lag_days=args.max_anchor_lag_days,
         eligibility_config=eligibility_config,
+        progress_path=report_progress_path,
+        progress_width=args.progress_bar_width,
     )
     metadata = _add_anchor_close(metadata, stock_features)
     if metadata.empty:
@@ -1363,6 +1781,8 @@ def main() -> None:
         feature_sets=feature_sets,
         stock_features=stock_features,
         context_features=context_features,
+        progress_path=report_progress_path,
+        progress_width=args.progress_bar_width,
     )
     predictions.to_csv(output_dir / "all_model_predictions.csv", index=False)
     predictions.to_csv(output_dir / "all_ranked_predictions.csv", index=False)
@@ -1451,6 +1871,14 @@ def main() -> None:
     (output_dir / "run_manifest.json").write_text(
         json.dumps(run_manifest, indent=2, sort_keys=True),
         encoding="utf-8",
+    )
+    _report_progress(
+        report_progress_path,
+        phase="complete",
+        current=1,
+        total=1,
+        detail=f"reports written to {output_dir.resolve()}",
+        width=args.progress_bar_width,
     )
     _log(f"reports written to {output_dir.resolve()}")
     _log(

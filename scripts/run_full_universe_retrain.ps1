@@ -23,8 +23,14 @@ function Write-Stage {
 function Invoke-Step {
     param(
         [string]$Name,
-        [string[]]$Command
+        [string[]]$Command,
+        [string]$ResumeStage = ""
     )
+    if ($Resume -and $ResumeStage -and (Test-StageOutput -Stage $ResumeStage)) {
+        Write-Stage -Name $Name -State "SKIP"
+        Write-Output "Skipping completed stage via -Resume: $Name"
+        return
+    }
     Write-Stage -Name $Name -State "START"
     if ($DryRun) {
         Write-Output ("DRYRUN " + ($Command -join " "))
@@ -68,6 +74,49 @@ function Invoke-Cleanup {
     Write-Stage -Name $Name -State "END"
 }
 
+function Test-StageOutput {
+    param(
+        [ValidateSet("raw_refresh","feature_build","normalized","panel","cache","train_xgboost","train_torch_mlp","train_torch_seq_static")]
+        [string]$Stage
+    )
+    switch ($Stage) {
+        "raw_refresh" {
+            $path = Join-Path $repoRoot "$DatasetRoot/raw/eodhd_fetch_manifest.json"
+            return (Test-Path $path)
+        }
+        "feature_build" {
+            $path = Join-Path $repoRoot "$DatasetRoot/processed/daily_features_chunked_manifest.json"
+            return (Test-Path $path)
+        }
+        "normalized" {
+            $manifest = Join-Path $repoRoot "$DatasetRoot/processed/daily_features_normalized_manifest.json"
+            $data = Join-Path $repoRoot "$DatasetRoot/processed/daily_features_normalized.csv"
+            return (Test-Path $manifest) -and (Test-Path $data)
+        }
+        "panel" {
+            $path = Join-Path $repoRoot "data/eodhd_training_panels/eodhd_true_full_walk_forward/processed/materialized_panel_manifest.json"
+            return (Test-Path $path)
+        }
+        "cache" {
+            $path = Join-Path $repoRoot "data/eodhd_training_panels/eodhd_true_full_walk_forward/episode_cache/manifest.json"
+            return (Test-Path $path)
+        }
+        "train_xgboost" {
+            $path = Join-Path $repoRoot "artifacts/v1_baselines/eodhd_true_full_xgboost/final_models.json"
+            return (Test-Path $path)
+        }
+        "train_torch_mlp" {
+            $path = Join-Path $repoRoot "artifacts/v1_baselines/eodhd_true_full_torch_mlp/final_models.json"
+            return (Test-Path $path)
+        }
+        "train_torch_seq_static" {
+            $path = Join-Path $repoRoot "artifacts/v1_baselines/eodhd_true_full_torch_seq_static/final_models.json"
+            return (Test-Path $path)
+        }
+    }
+    return $false
+}
+
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -105,7 +154,7 @@ try {
             "--fetch-only",
             "--recent-overlap-days", "7"
         )
-    )
+    ) -ResumeStage "raw_refresh"
 
     if ($Resume) {
         Invoke-Step -Name "rebuild_root_features_resume" -Command (
@@ -116,7 +165,7 @@ try {
                 "--max-tickers", "0",
                 "--resume"
             )
-        )
+        ) -ResumeStage "feature_build"
     } else {
         Invoke-Step -Name "rebuild_root_features" -Command (
             @($python) + $basePyArgs +
@@ -126,7 +175,7 @@ try {
                 "--max-tickers", "0",
                 "--force"
             )
-        )
+        ) -ResumeStage "feature_build"
     }
 
     Invoke-Step -Name "rebuild_root_normalized" -Command (
@@ -135,7 +184,7 @@ try {
             "scripts/build_normalized_features_from_processed.py",
             "--dataset-root", $DatasetRoot
         )
-    )
+    ) -ResumeStage "normalized"
 
     $resumeArgs = @()
     if ($Resume) {
@@ -149,7 +198,7 @@ try {
             "--profile", $pipelineProfile,
             "--stage", "materialize_panel"
         ) + $resumeArgs
-    )
+    ) -ResumeStage "panel"
 
     Invoke-Step -Name "materialize_cache" -Command (
         @($python) + $basePyArgs +
@@ -158,7 +207,7 @@ try {
             "--profile", $pipelineProfile,
             "--stage", "materialize_cache"
         ) + $resumeArgs
-    )
+    ) -ResumeStage "cache"
 
     Invoke-Step -Name "train_xgboost" -Command (
         @($python) + $basePyArgs +
@@ -166,7 +215,7 @@ try {
             "scripts/run_v1_pipeline.py",
             "--profile", $xgbProfile
         ) + $resumeArgs
-    )
+    ) -ResumeStage "train_xgboost"
 
     Invoke-Step -Name "train_torch_mlp" -Command (
         @($python) + $basePyArgs +
@@ -174,7 +223,7 @@ try {
             "scripts/run_v1_pipeline.py",
             "--profile", $mlpProfile
         ) + $resumeArgs
-    )
+    ) -ResumeStage "train_torch_mlp"
 
     Invoke-Step -Name "train_torch_seq_static" -Command (
         @($python) + $basePyArgs +
@@ -182,7 +231,7 @@ try {
             "scripts/run_v1_pipeline.py",
             "--profile", $seqProfile
         ) + $resumeArgs
-    )
+    ) -ResumeStage "train_torch_seq_static"
 }
 finally {
     [KeepAwakeNative]::SetThreadExecutionState([uint32]$ES_CONTINUOUS) | Out-Null

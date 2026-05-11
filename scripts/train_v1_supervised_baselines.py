@@ -5,6 +5,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import time
 import sys
 
 import pandas as pd
@@ -20,6 +21,7 @@ from src.data.v1_dataset import (  # noqa: E402
     DEFAULT_CLASSIFICATION_THRESHOLD,
     DEFAULT_WINDOW_LENGTH,
     FEATURE_SET_NAMES,
+    PATH_5PCT_20D_EVENT_TYPE,
     SEQUENCE_FEATURE_SET_NAMES,
     STATIC_CATEGORICAL_COLUMNS,
     V1Dataset,
@@ -27,6 +29,9 @@ from src.data.v1_dataset import (  # noqa: E402
     build_sequence_feature_store,
     build_v1_dataset,
     build_walk_forward_folds,
+    classification_class_labels,
+    classification_label_kind,
+    classification_positive_class,
     chronological_split,
     encode_static_categories,
     load_daily_features,
@@ -47,7 +52,9 @@ from src.data.episode_eligibility import (  # noqa: E402
     EpisodeEligibilityConfig,
     parse_allowed_exchanges,
 )
+from src.data.research_universe import ConservativeResearchUniverseConfig  # noqa: E402
 from src.models.v1_baselines import (  # noqa: E402
+    SEQUENCE_STATIC_CLASSIFICATION_MODEL_NAME,
     build_classification_leaderboard,
     build_leaderboard,
     build_metric_summary,
@@ -60,6 +67,27 @@ from src.models.v1_baselines import (  # noqa: E402
     save_model_bundle,
     write_json,
 )
+
+
+PATH_5PCT_20D_SUPPORTED_CLASSIFIERS = (
+    "xgboost_classifier",
+    "torch_mlp_classifier",
+    SEQUENCE_STATIC_CLASSIFICATION_MODEL_NAME,
+)
+
+
+def _progress_bar(completed: int, total: int, *, width: int = 24) -> str:
+    safe_total = max(int(total), 1)
+    safe_completed = min(max(int(completed), 0), safe_total)
+    filled = int(round((safe_completed / safe_total) * width))
+    return "[" + "#" * filled + "-" * (width - filled) + f"] {safe_completed}/{safe_total}"
+
+
+def _emit_combo_progress(prefix: str, completed: int, total: int, *, detail: str = "") -> None:
+    message = f"{prefix} {_progress_bar(completed, total)}"
+    if detail:
+        message += f" {detail}"
+    print(message, flush=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -117,6 +145,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--classification-horizon", type=int, default=DEFAULT_CLASSIFICATION_HORIZON)
     parser.add_argument("--classification-threshold", type=float, default=DEFAULT_CLASSIFICATION_THRESHOLD)
+    parser.add_argument(
+        "--classification-event-type",
+        default=DEFAULT_CLASSIFICATION_EVENT_TYPE,
+        help=(
+            "Classification label semantics. Default preserves the current anytime "
+            "pathwise target; sustained_pathwise_outperform and path_5pct_20d are opt-in."
+        ),
+    )
     parser.add_argument("--torch-max-epochs", type=int, default=0, help="Override max epochs for torch models.")
     parser.add_argument("--torch-patience", type=int, default=0, help="Override early-stop patience for torch models.")
     parser.add_argument("--torch-batch-size", type=int, default=0, help="Override batch size for torch models.")
@@ -147,6 +183,33 @@ def parse_args() -> argparse.Namespace:
         default="NYSE,NASDAQ,AMEX,BATS",
         help="Comma-separated exchange allowlist. AMEX also matches EODHD NYSE MKT / NYSE American.",
     )
+    parser.add_argument(
+        "--disable-conservative-research-universe",
+        action="store_true",
+        help="Disable the shared strategy-universe filter for train/test/latest prediction windows.",
+    )
+    parser.add_argument("--research-common-stocks-only", action="store_true", default=True)
+    parser.add_argument("--research-allowed-exchanges", default="NYSE,NASDAQ,AMEX")
+    parser.add_argument("--research-min-price", type=float, default=10.0)
+    parser.add_argument("--research-min-history-days", type=int, default=252)
+    parser.add_argument("--research-min-median-dollar-volume-20d", type=float, default=10_000_000.0)
+    parser.add_argument("--research-min-median-dollar-volume-60d", type=float, default=10_000_000.0)
+    parser.add_argument("--research-max-zero-volume-day-ratio-60d", type=float, default=0.02)
+    parser.add_argument("--research-min-current-dollar-volume-vs-median-20d", type=float, default=0.20)
+    parser.add_argument("--research-liquidity-short-lookback-days", type=int, default=20)
+    parser.add_argument("--research-liquidity-long-lookback-days", type=int, default=60)
+    parser.add_argument("--research-trend-lookback-days", type=int, default=252)
+    parser.add_argument("--research-return-6m-lookback-days", type=int, default=126)
+    parser.add_argument("--research-sma-short-lookback-days", type=int, default=50)
+    parser.add_argument("--research-sma-long-lookback-days", type=int, default=200)
+    parser.add_argument("--research-min-return-6m", type=float, default=-0.15)
+    parser.add_argument("--research-max-drawdown-from-252d-high-pct", type=float, default=35.0)
+    parser.add_argument("--research-disable-close-above-sma200", action="store_true")
+    parser.add_argument("--research-disable-sma50-above-sma200", action="store_true")
+    parser.add_argument("--research-disable-spike-filter", action="store_true")
+    parser.add_argument("--research-spike-lookback-days", type=int, default=60)
+    parser.add_argument("--research-max-abs-return-1d-60d-pct", type=float, default=25.0)
+    parser.add_argument("--research-max-true-range-60d-pct", type=float, default=25.0)
     return parser.parse_args()
 
 
@@ -159,8 +222,20 @@ def _task_types(args: argparse.Namespace) -> list[str]:
 def _resolve_model_names(args: argparse.Namespace, task_type: str) -> list[str]:
     raw = args.classification_models if task_type == "classification" else args.models
     if raw.strip():
-        return [item.strip() for item in raw.split(",") if item.strip()]
-    return default_model_names(args.eval_mode, task_type=task_type)
+        names = [item.strip() for item in raw.split(",") if item.strip()]
+    elif task_type == "classification" and args.classification_event_type == PATH_5PCT_20D_EVENT_TYPE:
+        names = list(PATH_5PCT_20D_SUPPORTED_CLASSIFIERS)
+    else:
+        names = default_model_names(args.eval_mode, task_type=task_type)
+    if task_type == "classification" and args.classification_event_type == PATH_5PCT_20D_EVENT_TYPE:
+        unsupported = [name for name in names if name not in PATH_5PCT_20D_SUPPORTED_CLASSIFIERS]
+        if unsupported:
+            supported = ", ".join(PATH_5PCT_20D_SUPPORTED_CLASSIFIERS)
+            raise SystemExit(
+                "path_5pct_20d supports only these classification models: "
+                f"{supported}. Unsupported requested model(s): {unsupported}"
+            )
+    return names
 
 
 def _supported_feature_set(model_name: str, feature_set: str) -> bool:
@@ -194,6 +269,35 @@ def _episode_eligibility_config(args: argparse.Namespace) -> EpisodeEligibilityC
     )
 
 
+def _research_universe_config(args: argparse.Namespace) -> ConservativeResearchUniverseConfig | None:
+    if args.disable_conservative_research_universe:
+        return None
+    return ConservativeResearchUniverseConfig(
+        common_stocks_only=bool(args.research_common_stocks_only),
+        allowed_exchanges=parse_allowed_exchanges(args.research_allowed_exchanges),
+        min_price=args.research_min_price,
+        min_history_days=args.research_min_history_days,
+        liquidity_short_lookback=args.research_liquidity_short_lookback_days,
+        liquidity_long_lookback=args.research_liquidity_long_lookback_days,
+        min_median_dollar_volume_20d=args.research_min_median_dollar_volume_20d,
+        min_median_dollar_volume_60d=args.research_min_median_dollar_volume_60d,
+        max_zero_volume_day_ratio_60d=args.research_max_zero_volume_day_ratio_60d,
+        min_current_dollar_volume_vs_median_20d=args.research_min_current_dollar_volume_vs_median_20d,
+        trend_lookback_days=args.research_trend_lookback_days,
+        return_6m_lookback_days=args.research_return_6m_lookback_days,
+        sma_short_lookback_days=args.research_sma_short_lookback_days,
+        sma_long_lookback_days=args.research_sma_long_lookback_days,
+        min_return_6m=args.research_min_return_6m,
+        max_drawdown_from_252d_high=args.research_max_drawdown_from_252d_high_pct / 100.0,
+        require_close_above_sma200=not bool(args.research_disable_close_above_sma200),
+        require_sma50_above_sma200=not bool(args.research_disable_sma50_above_sma200),
+        spike_filter_enabled=not bool(args.research_disable_spike_filter),
+        spike_lookback_days=args.research_spike_lookback_days,
+        max_abs_return_1d_60d=args.research_max_abs_return_1d_60d_pct / 100.0,
+        max_true_range_pct_60d=args.research_max_true_range_60d_pct / 100.0,
+    )
+
+
 def _torch_model_kwargs(args: argparse.Namespace, model_name: str) -> dict[str, object]:
     kwargs: dict[str, object] = {}
     if not model_name.startswith("torch_"):
@@ -209,6 +313,13 @@ def _torch_model_kwargs(args: argparse.Namespace, model_name: str) -> dict[str, 
             kwargs["hidden_dim"] = args.torch_hidden_dim
     elif args.torch_hidden_units and args.torch_hidden_units > 0:
         kwargs["hidden_units"] = args.torch_hidden_units
+    return kwargs
+
+
+def _model_kwargs(args: argparse.Namespace, model_name: str, task_type: str) -> dict[str, object]:
+    kwargs = _torch_model_kwargs(args, model_name)
+    if task_type == "classification" and args.classification_event_type == PATH_5PCT_20D_EVENT_TYPE:
+        kwargs["num_classes"] = len(classification_class_labels(args.classification_event_type))
     return kwargs
 
 
@@ -255,6 +366,16 @@ def _prepare_sequence_inputs(
 def _prediction_targets_from_frame(frame: pd.DataFrame, target_columns: list[str], *, task_type: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     if task_type == "classification":
         actual = pd.DataFrame({target: frame[f"actual_{target}"] for target in target_columns})
+        if len(target_columns) == 1:
+            target = target_columns[0]
+            class_cols = [
+                col
+                for col in frame.columns
+                if col.startswith(f"pred_prob_{target}_class_")
+            ]
+            class_cols = sorted(class_cols, key=lambda name: int(name.rsplit("_class_", 1)[1]))
+            if class_cols:
+                return actual, frame[class_cols].copy()
         pred = pd.DataFrame({target: frame[f"pred_prob_{target}"] for target in target_columns})
         return actual, pred
     actual = pd.DataFrame(
@@ -299,6 +420,7 @@ def _build_model_metadata(
     runtime: dict[str, object] | None = None,
     classification_threshold: float | None = None,
     classification_horizon: int | None = None,
+    classification_event_type: str = DEFAULT_CLASSIFICATION_EVENT_TYPE,
 ) -> dict[str, object]:
     input_layout = "sequence_static" if is_sequence_static_model(model_name) else "tabular"
     metadata = {
@@ -313,11 +435,25 @@ def _build_model_metadata(
         "input_layout": input_layout,
     }
     if task_type == "classification":
-        metadata["decision_threshold"] = 0.5
-        metadata["probability_column_names"] = [f"pred_prob_{target}" for target in target_columns]
+        label_kind = classification_label_kind(classification_event_type)
+        class_labels = classification_class_labels(classification_event_type)
+        positive_class = classification_positive_class(classification_event_type)
+        metadata["decision_threshold"] = 0.5 if label_kind == "binary" else None
+        if label_kind == "multiclass" and len(target_columns) == 1:
+            target = target_columns[0]
+            metadata["probability_column_names"] = [
+                *(f"pred_prob_{target}_class_{class_label}" for class_label in class_labels),
+                f"pred_prob_{target}",
+            ]
+            metadata["predicted_class_column_name"] = f"pred_class_{target}"
+        else:
+            metadata["probability_column_names"] = [f"pred_prob_{target}" for target in target_columns]
         metadata["classification_horizon_days"] = classification_horizon
         metadata["classification_threshold"] = classification_threshold
-        metadata["classification_event_type"] = DEFAULT_CLASSIFICATION_EVENT_TYPE
+        metadata["classification_event_type"] = classification_event_type
+        metadata["classification_label_kind"] = label_kind
+        metadata["classification_class_labels"] = class_labels
+        metadata["classification_positive_class"] = positive_class
     if split_summary is not None:
         metadata["split_summary"] = split_summary
     if flat_feature_columns is not None:
@@ -575,9 +711,17 @@ def _train_task_holdout(
         }
     target_columns = _task_target_columns(dataset, task_type)
     realized_col = _realized_return_column(dataset, args.classification_horizon)
-
-    for feature_set, model_name in _build_combo_iterable(feature_sets, model_names):
+    combos = _build_combo_iterable(feature_sets, model_names)
+    combo_total = len(combos)
+    combo_start_time = time.monotonic()
+    for combo_index, (feature_set, model_name) in enumerate(combos, start=1):
         print(f"Training {task_type}::{model_name} on {feature_set} ({args.eval_mode})...", flush=True)
+        _emit_combo_progress(
+            f"{task_type}:{model_name}:{feature_set}",
+            combo_index - 1,
+            combo_total,
+            detail="starting holdout fit",
+        )
         train_rows = split == "train"
         val_rows = split == "val"
         test_rows = split == "test"
@@ -599,7 +743,7 @@ def _train_task_holdout(
             _, x_train, _ = _prepare_flat_inputs(dataset, feature_set, train_rows, task_type=task_type)
             _, x_val, _ = _prepare_flat_inputs(dataset, feature_set, val_rows, task_type=task_type)
             _, x_test, _ = _prepare_flat_inputs(dataset, feature_set, test_rows, task_type=task_type)
-        model_kwargs = _torch_model_kwargs(args, model_name)
+        model_kwargs = _model_kwargs(args, model_name, task_type)
         model = make_model(
             model_name,
             window_length=args.window_length,
@@ -674,9 +818,16 @@ def _train_task_holdout(
             runtime=_model_runtime_metadata(model),
             classification_threshold=args.classification_threshold,
             classification_horizon=args.classification_horizon,
+            classification_event_type=args.classification_event_type,
         )
         save_model_bundle(model_path, model=model, metadata=model_metadata)
         trained_records.append({**model_metadata, "artifact_path": model_path.relative_to(output_dir).as_posix()})
+        _emit_combo_progress(
+            f"{task_type}:{model_name}:{feature_set}",
+            combo_index,
+            combo_total,
+            detail=f"saved holdout artifact elapsed={round(time.monotonic() - combo_start_time, 1)}s",
+        )
 
     metrics = pd.DataFrame(metrics_rows)
     leaderboard = (
@@ -754,11 +905,19 @@ def _train_task_walk_forward(
     all_dates = sorted(dataset.metadata["anchor_date"].dropna().astype(str).unique().tolist())
     target_columns = _task_target_columns(dataset, task_type)
     realized_col = _realized_return_column(dataset, args.classification_horizon)
-
-    for feature_set, model_name in _build_combo_iterable(feature_sets, model_names):
+    combos = _build_combo_iterable(feature_sets, model_names)
+    combo_total = len(combos)
+    run_start_time = time.monotonic()
+    for combo_index, (feature_set, model_name) in enumerate(combos, start=1):
         print(f"Training {task_type}::{model_name} on {feature_set} ({args.eval_mode})...", flush=True)
+        _emit_combo_progress(
+            f"{task_type}:{model_name}:{feature_set}",
+            combo_index - 1,
+            combo_total,
+            detail="starting walk-forward",
+        )
         combo_oos_frames: list[pd.DataFrame] = []
-        for fold in folds:
+        for fold_index, fold in enumerate(folds, start=1):
             print(
                 json.dumps(
                     {
@@ -770,6 +929,12 @@ def _train_task_walk_forward(
                     }
                 ),
                 flush=True,
+            )
+            _emit_combo_progress(
+                f"{task_type}:{model_name}:{feature_set}:folds",
+                fold_index - 1,
+                len(folds) + 1,
+                detail=f"starting fold {fold_index}/{len(folds)} id={fold.fold_id}",
             )
             train_rows = rows_for_dates(dataset.metadata, fold.train_dates)
             val_rows = rows_for_dates(dataset.metadata, fold.val_dates)
@@ -790,7 +955,7 @@ def _train_task_walk_forward(
                 _, x_train, _ = _prepare_flat_inputs(dataset, feature_set, train_rows, task_type=task_type)
                 _, x_val, _ = _prepare_flat_inputs(dataset, feature_set, val_rows, task_type=task_type)
                 _, x_oos, _ = _prepare_flat_inputs(dataset, feature_set, oos_rows, task_type=task_type)
-            model_kwargs = _torch_model_kwargs(args, model_name)
+            model_kwargs = _model_kwargs(args, model_name, task_type)
             model = make_model(
                 model_name,
                 window_length=args.window_length,
@@ -809,6 +974,12 @@ def _train_task_walk_forward(
                     }
                 ),
                 flush=True,
+            )
+            _emit_combo_progress(
+                f"{task_type}:{model_name}:{feature_set}:folds",
+                fold_index,
+                len(folds) + 1,
+                detail=f"fit complete fold {fold_index}/{len(folds)} id={fold.fold_id}",
             )
             for split_name, meta, x_eval, y_eval, rows in (("val", val_meta, x_val, y_val, val_rows), ("oos", oos_meta, x_oos, y_oos, oos_rows)):
                 pred = model.predict(x_eval)
@@ -898,6 +1069,12 @@ def _train_task_walk_forward(
             ),
             flush=True,
         )
+        _emit_combo_progress(
+            f"{task_type}:{model_name}:{feature_set}:folds",
+            len(folds),
+            len(folds) + 1,
+            detail="starting final deploy fit",
+        )
         final_model, final_vocabularies = _fit_final_deploy_model(
             dataset=dataset,
             feature_set=feature_set,
@@ -907,7 +1084,7 @@ def _train_task_walk_forward(
             final_stop_block_size=args.final_stop_block_size,
             sequence_store=sequence_stores.get(feature_set),
             window_length=args.window_length,
-            model_kwargs=_torch_model_kwargs(args, model_name),
+            model_kwargs=_model_kwargs(args, model_name, task_type),
         )
         model_path = models_dir / f"{feature_set}__{model_name}.pkl"
         model_metadata = _build_model_metadata(
@@ -926,6 +1103,7 @@ def _train_task_walk_forward(
             runtime=_model_runtime_metadata(final_model),
             classification_threshold=args.classification_threshold,
             classification_horizon=args.classification_horizon,
+            classification_event_type=args.classification_event_type,
         )
         save_model_bundle(model_path, model=final_model, metadata=model_metadata)
         print(
@@ -941,6 +1119,12 @@ def _train_task_walk_forward(
                 flush=True,
             )
         trained_records.append({**model_metadata, "artifact_path": model_path.relative_to(output_dir).as_posix()})
+        _emit_combo_progress(
+            f"{task_type}:{model_name}:{feature_set}",
+            combo_index,
+            combo_total,
+            detail=f"saved final artifact total_elapsed={round(time.monotonic() - run_start_time, 1)}s",
+        )
 
     fold_metrics = pd.DataFrame(fold_metric_rows)
     oos_metrics = pd.DataFrame(oos_metric_rows)
@@ -990,11 +1174,20 @@ def main() -> None:
     models_dir.mkdir(parents=True, exist_ok=True)
 
     eligibility_config = _episode_eligibility_config(args)
+    research_config = _research_universe_config(args)
     cached_sequence_stores: dict[str, object] | None = None
     if args.episode_cache_dir:
         print("Loading materialized V1 episode cache...", flush=True)
         dataset = load_cached_v1_dataset(args.episode_cache_dir)
         cached_sequence_stores = load_cached_sequence_stores(args.episode_cache_dir)
+        cache_manifest_path = Path(args.episode_cache_dir) / "manifest.json"
+        if cache_manifest_path.exists():
+            cache_manifest = json.loads(cache_manifest_path.read_text(encoding="utf-8"))
+            payload = cache_manifest.get("research_universe")
+            if isinstance(payload, dict) and payload.get("enabled") is not False:
+                research_config = ConservativeResearchUniverseConfig.from_mapping(payload)
+            elif isinstance(payload, dict):
+                research_config = None
         stock_features = pd.DataFrame()
         context_features = pd.DataFrame()
     else:
@@ -1014,8 +1207,17 @@ def main() -> None:
             max_episodes=args.max_episodes or None,
             classification_horizon=args.classification_horizon,
             classification_threshold=args.classification_threshold,
+            classification_event_type=args.classification_event_type,
             eligibility_config=eligibility_config,
+            research_config=research_config,
             feature_set_names=feature_sets,
+        )
+    if dataset.classification_target_columns == [PATH_5PCT_20D_EVENT_TYPE]:
+        args.classification_event_type = PATH_5PCT_20D_EVENT_TYPE
+    elif args.classification_event_type == PATH_5PCT_20D_EVENT_TYPE:
+        raise SystemExit(
+            "Requested classification_event_type=path_5pct_20d, but the loaded dataset/cache "
+            f"has classification_target_columns={dataset.classification_target_columns}."
         )
     dataset.targets.to_csv(output_dir / "episode_targets.csv", index=False)
     generated_utc = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -1030,7 +1232,11 @@ def main() -> None:
         "classification_target_columns": dataset.classification_target_columns,
         "classification_threshold": args.classification_threshold,
         "classification_horizon_days": args.classification_horizon,
-        "classification_event_type": DEFAULT_CLASSIFICATION_EVENT_TYPE,
+        "classification_event_type": args.classification_event_type,
+        "classification_label_kind": classification_label_kind(args.classification_event_type),
+        "classification_class_labels": classification_class_labels(args.classification_event_type),
+        "classification_positive_class": classification_positive_class(args.classification_event_type),
+        "labeling": dataset.labeling_summary,
         "window_length": args.window_length,
         "benchmark_ticker": args.benchmark_ticker.upper(),
         "feature_sets": {
@@ -1051,12 +1257,19 @@ def main() -> None:
             if eligibility_config is not None
             else {"enabled": False}
         ),
+        "research_universe": (
+            research_config.to_dict()
+            if research_config is not None
+            else {"enabled": False}
+        ),
         "notes": [
             "Current default data source is EODHD daily EOD OHLCV.",
             "Regression targets are market-adjusted using the benchmark context table.",
-            "Classification target is positive when pathwise market-adjusted excess return exceeds the threshold within the next horizon window.",
+            "Default binary classification is positive when pathwise market-adjusted excess return exceeds the threshold within the next horizon window.",
+            "path_5pct_20d is an opt-in 3-class close-return path label with class 2 as the ranking class.",
             "Feature summaries are rolling-window last/mean/std values computed from dates <= anchor_date.",
             "Episode eligibility is evaluated as of anchor_date using available history, valid adjusted OHLCV rows, liquidity, price, and exchange filters.",
+            "The conservative research universe is a shared strategy-universe filter used for train/test/live by default.",
             "Walk-forward mode evaluates on aggregated out-of-sample folds and excludes 1-day regression targets from leaderboard ranking.",
             "EODHD sector/industry metadata is not treated as point-in-time fundamentals.",
         ],

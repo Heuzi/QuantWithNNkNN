@@ -41,6 +41,7 @@ from src.data.eodhd_stage1 import (  # noqa: E402
 )
 from src.data.incremental_update import (  # noqa: E402
     compute_latest_prediction_windows,
+    determine_incremental_fetch_start,
     max_bar_date,
     merge_daily_bar_rows,
     min_bar_date,
@@ -195,6 +196,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sentiment-batch-size", type=int, default=25)
     parser.add_argument("--skip-normalization", action="store_true")
     parser.add_argument("--force-refetch", action="store_true", help="Ignore checkpoint status and refetch symbols.")
+    parser.add_argument(
+        "--recent-overlap-days",
+        type=int,
+        default=7,
+        help="When extending an existing root, refetch this many recent calendar days and merge by ticker/date.",
+    )
     parser.add_argument("--rate-limit-calls", type=int, default=200)
     parser.add_argument("--rate-limit-period-seconds", type=float, default=60.0)
     parser.add_argument(
@@ -584,11 +591,12 @@ def _fetch_sentiment_to_checkpoint(
     status_path: Path,
     batch_size: int,
     force_refetch: bool,
+    skip_completed_status: bool = False,
     return_rows: bool = True,
 ) -> list[dict[str, object]]:
     existing_final = load_sentiment_rows(final_path) if return_rows and final_path.exists() else []
     checkpoint_rows = [] if force_refetch or not return_rows else load_sentiment_rows(checkpoint_path)
-    completed = set() if force_refetch else _completed_sentiment_symbols(status_path)
+    completed = set() if (force_refetch or skip_completed_status) else _completed_sentiment_symbols(status_path)
     pending = [row for row in symbols if str(row["eodhd_symbol"]).upper() not in completed]
     batch_size = max(1, batch_size)
 
@@ -664,10 +672,11 @@ def _fetch_bars_to_checkpoint(
     status_path: Path,
     force_refetch: bool,
     fetch_workers: int,
+    skip_completed_status: bool = False,
     return_rows: bool = True,
 ) -> list[dict[str, object]]:
     existing_final = load_daily_bars_csv(final_path) if return_rows and final_path.exists() else []
-    completed = set() if force_refetch else _completed_symbols(
+    completed = set() if (force_refetch or skip_completed_status) else _completed_symbols(
         final_path,
         checkpoint_path,
         status_path=status_path,
@@ -735,6 +744,23 @@ def _context_symbols(benchmark_ticker: str) -> list[dict[str, object]]:
     return symbols
 
 
+def _effective_bar_fetch_start(
+    final_path: Path,
+    *,
+    requested_start_date: date,
+    recent_overlap_days: int,
+    force_refetch: bool,
+) -> date:
+    if force_refetch or not final_path.exists():
+        return requested_start_date
+    existing_rows = load_daily_bars_csv(final_path)
+    return determine_incremental_fetch_start(
+        existing_rows,
+        fallback_start_date=requested_start_date,
+        overlap_days=max(1, recent_overlap_days),
+    )
+
+
 def main() -> None:
     args = parse_args()
     if args.fetch_only and args.skip_fetch:
@@ -743,6 +769,8 @@ def main() -> None:
     end_date = datetime.strptime(args.end_date, "%Y-%m-%d").date()
     if end_date < start_date:
         raise SystemExit("--end-date must be on or after --start-date")
+    if args.recent_overlap_days < 1:
+        raise SystemExit("--recent-overlap-days must be >= 1")
 
     dataset_root = Path(args.dataset_root)
     raw_dir = dataset_root / "raw"
@@ -761,6 +789,10 @@ def main() -> None:
     sentiment_checkpoint_path = raw_dir / "eodhd_sentiment_daily_checkpoint.csv"
     universe_path = raw_dir / "eodhd_common_stock_universe.csv"
     metadata_path = raw_dir / "eodhd_equity_metadata.csv"
+    if not args.skip_fetch:
+        for path in (stock_checkpoint_path, context_checkpoint_path, sentiment_checkpoint_path):
+            if path.exists():
+                path.unlink()
 
     credentials = load_eodhd_credentials(args.credentials_path)
     client = EODHDRESTClient(
@@ -820,48 +852,70 @@ def main() -> None:
         )
         _write_csv_with_headers(metadata_path, metadata_rows, EODHD_METADATA_HEADERS)
     universe_for_fetch = _merge_universe_with_metadata(universe, metadata_rows)
+    stock_fetch_start = _effective_bar_fetch_start(
+        stock_bars_path,
+        requested_start_date=start_date,
+        recent_overlap_days=args.recent_overlap_days,
+        force_refetch=args.force_refetch,
+    )
+    context_fetch_start = _effective_bar_fetch_start(
+        context_bars_path,
+        requested_start_date=start_date,
+        recent_overlap_days=args.recent_overlap_days,
+        force_refetch=args.force_refetch,
+    )
+    skip_completed_status = not args.force_refetch
+    stock_fetch_start_text = stock_fetch_start.isoformat()
+    context_fetch_start_text = context_fetch_start.isoformat()
+    sentiment_fetch_start_text = stock_fetch_start_text
 
     if args.fetch_only:
         try:
-            _fetch_bars_to_checkpoint(
+            stock_bars = _fetch_bars_to_checkpoint(
                 client=client,
                 symbols=universe_for_fetch,
                 role="stock",
-                start_date=args.start_date,
+                start_date=stock_fetch_start_text,
                 end_date=args.end_date,
                 final_path=stock_bars_path,
-                checkpoint_path=stock_bars_path,
+                checkpoint_path=stock_checkpoint_path,
                 status_path=status_path,
                 force_refetch=args.force_refetch,
                 fetch_workers=args.fetch_workers,
-                return_rows=False,
+                skip_completed_status=skip_completed_status,
             )
-            _fetch_bars_to_checkpoint(
+            context_bars = _fetch_bars_to_checkpoint(
                 client=client,
                 symbols=_context_symbols(args.benchmark_ticker),
                 role="context",
-                start_date=args.start_date,
+                start_date=context_fetch_start_text,
                 end_date=args.end_date,
                 final_path=context_bars_path,
-                checkpoint_path=context_bars_path,
+                checkpoint_path=context_checkpoint_path,
                 status_path=status_path,
                 force_refetch=args.force_refetch,
                 fetch_workers=args.fetch_workers,
-                return_rows=False,
+                skip_completed_status=skip_completed_status,
             )
             if not args.skip_sentiment:
-                _fetch_sentiment_to_checkpoint(
+                sentiment_rows = _fetch_sentiment_to_checkpoint(
                     client=client,
                     symbols=universe_for_fetch,
-                    start_date=args.start_date,
+                    start_date=sentiment_fetch_start_text,
                     end_date=args.end_date,
                     final_path=sentiment_path,
-                    checkpoint_path=sentiment_path,
+                    checkpoint_path=sentiment_checkpoint_path,
                     status_path=status_path,
                     batch_size=args.sentiment_batch_size,
                     force_refetch=args.force_refetch,
-                    return_rows=False,
+                    skip_completed_status=skip_completed_status,
                 )
+            else:
+                sentiment_rows = []
+            _write_csv_with_headers(stock_bars_path, stock_bars, EODHD_DAILY_BAR_HEADERS)
+            _write_csv_with_headers(legacy_stock_bars_path, stock_bars, EODHD_DAILY_BAR_HEADERS)
+            _write_csv_with_headers(context_bars_path, context_bars, EODHD_DAILY_BAR_HEADERS)
+            _write_csv_with_headers(sentiment_path, sentiment_rows, SENTIMENT_HEADERS)
             mode = "fetch_only"
             error = None
         except EODHDRateLimitError as exc:
@@ -898,25 +952,27 @@ def main() -> None:
             client=client,
             symbols=universe_for_fetch,
             role="stock",
-            start_date=args.start_date,
+            start_date=stock_fetch_start_text,
             end_date=args.end_date,
             final_path=stock_bars_path,
             checkpoint_path=stock_checkpoint_path,
             status_path=status_path,
             force_refetch=args.force_refetch,
             fetch_workers=args.fetch_workers,
+            skip_completed_status=skip_completed_status,
         )
         context_bars = _fetch_bars_to_checkpoint(
             client=client,
             symbols=_context_symbols(args.benchmark_ticker),
             role="context",
-            start_date=args.start_date,
+            start_date=context_fetch_start_text,
             end_date=args.end_date,
             final_path=context_bars_path,
             checkpoint_path=context_checkpoint_path,
             status_path=status_path,
             force_refetch=args.force_refetch,
             fetch_workers=args.fetch_workers,
+            skip_completed_status=skip_completed_status,
         )
         if args.skip_sentiment:
             sentiment_rows = []
@@ -924,13 +980,14 @@ def main() -> None:
             sentiment_rows = _fetch_sentiment_to_checkpoint(
                 client=client,
                 symbols=universe_for_fetch,
-                start_date=args.start_date,
+                start_date=sentiment_fetch_start_text,
                 end_date=args.end_date,
                 final_path=sentiment_path,
                 checkpoint_path=sentiment_checkpoint_path,
                 status_path=status_path,
                 batch_size=args.sentiment_batch_size,
                 force_refetch=args.force_refetch,
+                skip_completed_status=skip_completed_status,
             )
 
     _write_csv_with_headers(stock_bars_path, stock_bars, EODHD_DAILY_BAR_HEADERS)
@@ -1055,6 +1112,9 @@ def main() -> None:
                 "fundamentals_filter": args.fundamentals_filter if not args.skip_fundamentals else None,
                 "skip_sentiment": bool(args.skip_sentiment),
                 "sentiment_batch_size": args.sentiment_batch_size,
+                "recent_overlap_days": args.recent_overlap_days,
+                "stock_fetch_start_date": stock_fetch_start_text,
+                "context_fetch_start_date": context_fetch_start_text,
             },
             "episode_eligibility": (
                 eligibility_config.to_dict()

@@ -10,10 +10,19 @@ import sys
 import time
 from typing import Iterable, Sequence
 
+import pandas as pd
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from src.data.episode_eligibility import parse_allowed_exchanges  # noqa: E402
+from src.data.research_universe import (  # noqa: E402
+    ConservativeResearchUniverseConfig,
+    add_conservative_research_universe_columns,
+)
+from src.data.v1_dataset import preferred_stock_feature_path  # noqa: E402
 
 
 METADATA_COLUMNS = (
@@ -66,6 +75,33 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--force", action="store_true", help="Overwrite existing materialized processed outputs.")
     parser.add_argument("--progress-every", type=int, default=1_000_000, help="Print progress by written rows.")
+    parser.add_argument(
+        "--disable-conservative-research-universe",
+        action="store_true",
+        help="Disable the shared strategy-universe filter while materializing the bounded training panel.",
+    )
+    parser.add_argument("--research-common-stocks-only", action="store_true", default=True)
+    parser.add_argument("--research-allowed-exchanges", default="NYSE,NASDAQ,AMEX")
+    parser.add_argument("--research-min-price", type=float, default=10.0)
+    parser.add_argument("--research-min-history-days", type=int, default=252)
+    parser.add_argument("--research-min-median-dollar-volume-20d", type=float, default=10_000_000.0)
+    parser.add_argument("--research-min-median-dollar-volume-60d", type=float, default=10_000_000.0)
+    parser.add_argument("--research-max-zero-volume-day-ratio-60d", type=float, default=0.02)
+    parser.add_argument("--research-min-current-dollar-volume-vs-median-20d", type=float, default=0.20)
+    parser.add_argument("--research-liquidity-short-lookback-days", type=int, default=20)
+    parser.add_argument("--research-liquidity-long-lookback-days", type=int, default=60)
+    parser.add_argument("--research-trend-lookback-days", type=int, default=252)
+    parser.add_argument("--research-return-6m-lookback-days", type=int, default=126)
+    parser.add_argument("--research-sma-short-lookback-days", type=int, default=50)
+    parser.add_argument("--research-sma-long-lookback-days", type=int, default=200)
+    parser.add_argument("--research-min-return-6m", type=float, default=-0.15)
+    parser.add_argument("--research-max-drawdown-from-252d-high-pct", type=float, default=35.0)
+    parser.add_argument("--research-disable-close-above-sma200", action="store_true")
+    parser.add_argument("--research-disable-sma50-above-sma200", action="store_true")
+    parser.add_argument("--research-disable-spike-filter", action="store_true")
+    parser.add_argument("--research-spike-lookback-days", type=int, default=60)
+    parser.add_argument("--research-max-abs-return-1d-60d-pct", type=float, default=25.0)
+    parser.add_argument("--research-max-true-range-60d-pct", type=float, default=25.0)
     return parser.parse_args()
 
 
@@ -100,10 +136,37 @@ def _load_metadata(path: Path) -> dict[str, dict[str, str]]:
         }
 
 
+def _research_universe_config(args: argparse.Namespace) -> ConservativeResearchUniverseConfig | None:
+    if args.disable_conservative_research_universe:
+        return None
+    return ConservativeResearchUniverseConfig(
+        common_stocks_only=bool(args.research_common_stocks_only),
+        allowed_exchanges=parse_allowed_exchanges(args.research_allowed_exchanges),
+        min_price=args.research_min_price,
+        min_history_days=args.research_min_history_days,
+        liquidity_short_lookback=args.research_liquidity_short_lookback_days,
+        liquidity_long_lookback=args.research_liquidity_long_lookback_days,
+        min_median_dollar_volume_20d=args.research_min_median_dollar_volume_20d,
+        min_median_dollar_volume_60d=args.research_min_median_dollar_volume_60d,
+        max_zero_volume_day_ratio_60d=args.research_max_zero_volume_day_ratio_60d,
+        min_current_dollar_volume_vs_median_20d=args.research_min_current_dollar_volume_vs_median_20d,
+        trend_lookback_days=args.research_trend_lookback_days,
+        return_6m_lookback_days=args.research_return_6m_lookback_days,
+        sma_short_lookback_days=args.research_sma_short_lookback_days,
+        sma_long_lookback_days=args.research_sma_long_lookback_days,
+        min_return_6m=args.research_min_return_6m,
+        max_drawdown_from_252d_high=args.research_max_drawdown_from_252d_high_pct / 100.0,
+        require_close_above_sma200=not bool(args.research_disable_close_above_sma200),
+        require_sma50_above_sma200=not bool(args.research_disable_sma50_above_sma200),
+        spike_filter_enabled=not bool(args.research_disable_spike_filter),
+        spike_lookback_days=args.research_spike_lookback_days,
+        max_abs_return_1d_60d=args.research_max_abs_return_1d_60d_pct / 100.0,
+        max_true_range_pct_60d=args.research_max_true_range_60d_pct / 100.0,
+    )
+
+
 def _stock_feature_path(dataset_root: Path) -> Path:
-    normalized = dataset_root / "processed" / "daily_features_normalized.csv"
-    processed = dataset_root / "processed" / "daily_features.csv"
-    return normalized if normalized.exists() else processed
+    return preferred_stock_feature_path(dataset_root)
 
 
 def _select_first_tickers(
@@ -203,6 +266,40 @@ def _enriched_row(row: dict[str, str], metadata_by_ticker: dict[str, dict[str, s
     return out
 
 
+def _iter_selected_ticker_groups(
+    path: Path,
+    *,
+    selected_tickers: set[str],
+    start_date: str,
+    end_date: str,
+) -> Iterable[pd.DataFrame]:
+    selected_max = max(selected_tickers) if selected_tickers else ""
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows: list[dict[str, str]] = []
+        current_ticker = ""
+        for row in reader:
+            ticker = str(row.get("ticker") or "").upper()
+            if not ticker:
+                continue
+            if selected_tickers:
+                if selected_max and ticker > selected_max:
+                    break
+                if ticker not in selected_tickers:
+                    continue
+            date_value = str(row.get("date") or "")
+            if not _date_ok(date_value, start_date, end_date):
+                continue
+            row["ticker"] = ticker
+            if rows and ticker != current_ticker:
+                yield pd.DataFrame(rows)
+                rows = []
+            current_ticker = ticker
+            rows.append(row)
+        if rows:
+            yield pd.DataFrame(rows)
+
+
 def _write_filtered_stock_features(
     *,
     source_path: Path,
@@ -212,13 +309,15 @@ def _write_filtered_stock_features(
     start_date: str,
     end_date: str,
     progress_every: int,
+    research_config: ConservativeResearchUniverseConfig | None,
 ) -> dict[str, object]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    selected_max = max(selected_tickers) if selected_tickers else ""
     written_rows = 0
     tickers_written: set[str] = set()
     min_date = ""
     max_date = ""
+    research_input_rows = 0
+    research_passed_rows = 0
     start_time = time.monotonic()
     with source_path.open("r", encoding="utf-8", newline="") as source, output_path.open(
         "w",
@@ -228,23 +327,35 @@ def _write_filtered_stock_features(
         reader = csv.DictReader(source)
         writer = csv.DictWriter(output, fieldnames=_fieldnames(reader.fieldnames))
         writer.writeheader()
-        for row in reader:
-            ticker = str(row.get("ticker") or "").upper()
-            if selected_tickers:
-                # The full processed file is ticker-sorted. This early stop makes explicit smoke panels fast.
-                if selected_max and ticker > selected_max:
-                    break
-                if ticker not in selected_tickers:
-                    continue
-            date_value = str(row.get("date") or "")
-            if not _date_ok(date_value, start_date, end_date):
+        for group in _iter_selected_ticker_groups(
+            source_path,
+            selected_tickers=selected_tickers,
+            start_date=start_date,
+            end_date=end_date,
+        ):
+            if group.empty:
                 continue
-            writer.writerow(_enriched_row(row, metadata_by_ticker))
-            written_rows += 1
-            tickers_written.add(ticker)
-            min_date = date_value if not min_date or date_value < min_date else min_date
-            max_date = date_value if not max_date or date_value > max_date else max_date
-            if progress_every and written_rows % progress_every == 0:
+            rows = [
+                _enriched_row({key: ("" if value is None else str(value)) for key, value in row.items()}, metadata_by_ticker)
+                for row in group.to_dict("records")
+            ]
+            group_frame = pd.DataFrame(rows)
+            if research_config is not None:
+                diagnostics = add_conservative_research_universe_columns(group_frame, research_config)
+                research_input_rows += int(len(diagnostics))
+                mask = diagnostics["research_universe_ok"].fillna(False).astype(bool)
+                research_passed_rows += int(mask.sum())
+                group_frame = diagnostics.loc[mask, writer.fieldnames].reset_index(drop=True)
+            if group_frame.empty:
+                continue
+            for row in group_frame.to_dict("records"):
+                date_value = str(row.get("date") or "")
+                writer.writerow(row)
+                written_rows += 1
+                tickers_written.add(str(row.get("ticker") or "").upper())
+                min_date = date_value if not min_date or date_value < min_date else min_date
+                max_date = date_value if not max_date or date_value > max_date else max_date
+            if progress_every and written_rows and written_rows % progress_every == 0:
                 print(
                     json.dumps(
                         {
@@ -261,6 +372,11 @@ def _write_filtered_stock_features(
         "stock_tickers": len(tickers_written),
         "stock_min_date": min_date or None,
         "stock_max_date": max_date or None,
+        "research_universe_input_rows": research_input_rows if research_config is not None else None,
+        "research_universe_passed_rows": research_passed_rows if research_config is not None else None,
+        "research_universe_removed_rows": (
+            research_input_rows - research_passed_rows if research_config is not None else None
+        ),
     }
 
 
@@ -320,6 +436,7 @@ def main() -> None:
 
     metadata_by_ticker = _load_metadata(source_metadata_path)
     selected_tickers = _selected_tickers(args, source_stock_path)
+    research_config = _research_universe_config(args)
     start_time = time.monotonic()
     stats = _write_filtered_stock_features(
         source_path=source_stock_path,
@@ -329,6 +446,7 @@ def main() -> None:
         start_date=args.start_date,
         end_date=args.end_date,
         progress_every=args.progress_every,
+        research_config=research_config,
     )
     context_rows = _copy_filtered_context(
         source_context_path,
@@ -360,10 +478,12 @@ def main() -> None:
         "max_tickers": args.max_tickers or None,
         "context_rows": context_rows,
         "elapsed_seconds": round(time.monotonic() - start_time, 1),
+        "research_universe": research_config.to_dict() if research_config is not None else {"enabled": False},
         "notes": [
             "This output is a normal dataset root for scripts/train_v1_supervised_baselines.py.",
             "Metadata columns are joined from raw/eodhd_equity_metadata.csv so static encoders do not depend on ticker identifiers.",
             "Use this stage to keep training commands stable while avoiding direct pandas loads of the full 30-year CSV.",
+            "When enabled, the conservative research universe is applied while writing the materialized stock panel.",
         ],
         **stats,
     }

@@ -1,9 +1,6 @@
-report the stats of the results. Accuracy, top decile, etc. and where the stat results are stored
-
-#### chatGPT
-
-give context for ChatGPT
 
 
-build the trade ledger + exit decision dashboard in excel, I plan to create a repo the publicise my trading history and gain/losses. in the hope that I can sell this algorithm in the future.
-I also need to include a description: describing what I am doing, how I trained my model how everything is considered. but not expose the algorithms. Stating that all results will be point-in-time, and I will record as I progress/trade. I will not make changes to the past records, only add new records or close past records by selling the stocks. (GitHub history can prove that).
+
+
+
+11. Ranking uses P(positive) - P(negative) by default.

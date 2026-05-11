@@ -14,20 +14,30 @@ import numpy as np
 import pandas as pd
 
 from src.data.episode_eligibility import (
+    ELIGIBILITY_DIAGNOSTIC_COLUMNS,
     EpisodeEligibilityConfig,
     add_episode_eligibility_columns,
     eligibility_metadata_columns,
 )
 from src.data.eodhd_enrichment import FUNDAMENTAL_FEATURE_COLUMNS, SENTIMENT_FEATURE_COLUMNS
+from src.data.research_universe import (
+    ConservativeResearchUniverseConfig,
+    RESEARCH_UNIVERSE_DIAGNOSTIC_COLUMNS,
+    add_conservative_research_universe_columns,
+    research_universe_metadata_columns,
+)
 from src.data.v1_dataset import (
     BASE_STOCK_FEATURES,
     CONTEXT_FEATURES,
     DEFAULT_BENCHMARK_TICKER,
+    DEFAULT_CLASSIFICATION_EVENT_TYPE,
     DEFAULT_CLASSIFICATION_HORIZON,
     DEFAULT_CLASSIFICATION_THRESHOLD,
     DEFAULT_HORIZONS,
     DEFAULT_WINDOW_LENGTH,
     MARKET_CONTEXT_TICKERS,
+    PATH_5PCT_20D_EVENT_TYPE,
+    PATH_5PCT_20D_NEGATIVE_THRESHOLD,
     SECTOR_ETF_BY_GICS,
     SEQUENCE_FEATURE_SET_NAMES,
     STATIC_CATEGORICAL_COLUMNS,
@@ -37,8 +47,11 @@ from src.data.v1_dataset import (
     classification_target_column,
     load_market_context_features,
     parse_horizons,
+    pathwise_classification_labels,
+    preferred_stock_feature_path,
     sequence_feature_config,
     target_column,
+    validate_classification_event_config,
     validate_model_feature_columns,
 )
 
@@ -205,9 +218,7 @@ def _iter_ticker_groups(path: Path) -> Iterator[pd.DataFrame]:
 
 
 def _stock_feature_path(dataset_root: Path) -> Path:
-    normalized = dataset_root / "processed" / "daily_features_normalized.csv"
-    processed = dataset_root / "processed" / "daily_features.csv"
-    return normalized if normalized.exists() else processed
+    return preferred_stock_feature_path(dataset_root)
 
 
 def _context_tables(
@@ -258,6 +269,7 @@ def _prepare_stock_group(
     numeric_columns: Sequence[str],
     context_tables: dict[str, object],
     eligibility_config: EpisodeEligibilityConfig | None,
+    research_config: ConservativeResearchUniverseConfig | None,
     benchmark_ticker: str,
 ) -> pd.DataFrame:
     group = group.copy()
@@ -290,6 +302,12 @@ def _prepare_stock_group(
         group = add_episode_eligibility_columns(group, eligibility_config, benchmark_ticker=benchmark_ticker)
     else:
         group["window_row_count"] = np.arange(len(group), dtype=np.int64) + 1
+    if research_config is not None:
+        group = add_conservative_research_universe_columns(
+            group,
+            research_config,
+            benchmark_ticker=benchmark_ticker,
+        )
     return group
 
 
@@ -299,10 +317,11 @@ def _add_targets(
     horizons: Sequence[int],
     classification_horizon: int,
     classification_threshold: float,
+    classification_event_type: str,
     benchmark_close_by_date: dict[str, float],
 ) -> pd.DataFrame:
     out = group.copy()
-    max_horizon = max(horizons)
+    max_horizon = max(max(horizons), int(classification_horizon))
     anchor_close = out["close"].astype(float)
     benchmark_anchor = out["date"].map(benchmark_close_by_date).astype(float)
     for horizon in horizons:
@@ -317,13 +336,25 @@ def _add_targets(
         future_close = out["close"].shift(-step).astype(float)
         future_date = out["date"].shift(-step)
         stock_return = future_close / anchor_close - 1.0
-        benchmark_future = future_date.map(benchmark_close_by_date).astype(float)
-        benchmark_return = benchmark_future / benchmark_anchor - 1.0
-        path_col = f"_market_adjusted_return_path_{step}d"
-        out[path_col] = stock_return - benchmark_return
+        if classification_event_type == PATH_5PCT_20D_EVENT_TYPE:
+            path_col = f"_forward_return_path_{step}d"
+            out[path_col] = stock_return
+        else:
+            benchmark_future = future_date.map(benchmark_close_by_date).astype(float)
+            benchmark_return = benchmark_future / benchmark_anchor - 1.0
+            path_col = f"_market_adjusted_return_path_{step}d"
+            out[path_col] = stock_return - benchmark_return
         path_columns.append(path_col)
-    class_col = classification_target_column(horizon=classification_horizon, threshold=classification_threshold)
-    out[class_col] = (out[path_columns].max(axis=1) > float(classification_threshold)).astype(float)
+    class_col = classification_target_column(
+        horizon=classification_horizon,
+        threshold=classification_threshold,
+        event_type=classification_event_type,
+    )
+    out[class_col] = pathwise_classification_labels(
+        out[path_columns],
+        threshold=classification_threshold,
+        event_type=classification_event_type,
+    )
     out["_has_all_future_horizons"] = np.arange(len(out)) <= len(out) - max_horizon - 1
     return out.drop(columns=path_columns)
 
@@ -335,16 +366,103 @@ def _eligible_episode_rows(
     window_length: int,
     classification_horizon: int,
     classification_threshold: float,
+    classification_event_type: str,
     eligibility_enabled: bool,
+    research_enabled: bool,
 ) -> pd.DataFrame:
     target_cols = [target_column(horizon) for horizon in horizons]
-    class_col = classification_target_column(horizon=classification_horizon, threshold=classification_threshold)
+    class_col = classification_target_column(
+        horizon=classification_horizon,
+        threshold=classification_threshold,
+        event_type=classification_event_type,
+    )
     mask = group["window_row_count"].astype(int) >= window_length
     if eligibility_enabled and "episode_eligible" in group.columns:
         mask &= group["episode_eligible"].astype(bool)
+    if research_enabled and "research_universe_ok" in group.columns:
+        mask &= group["research_universe_ok"].astype(bool)
     mask &= group["_has_all_future_horizons"].astype(bool)
     rows = group.loc[mask].dropna(subset=target_cols).dropna(subset=[class_col])
     return rows.reset_index(drop=True)
+
+
+def _labeling_summary_seed(
+    *,
+    classification_event_type: str,
+    classification_horizon: int,
+    classification_threshold: float,
+) -> dict[str, object]:
+    return {
+        "mode": classification_event_type,
+        "horizon_days": int(classification_horizon),
+        "positive_threshold": float(classification_threshold),
+        "negative_threshold": (
+            PATH_5PCT_20D_NEGATIVE_THRESHOLD
+            if classification_event_type == PATH_5PCT_20D_EVENT_TYPE
+            else None
+        ),
+        "use_close_only": classification_event_type == PATH_5PCT_20D_EVENT_TYPE,
+        "require_full_forward_window": True,
+        "negative_overrides_positive": classification_event_type == PATH_5PCT_20D_EVENT_TYPE,
+        "research_universe_enabled": False,
+        "research_universe_excluded_rows": 0,
+        "candidate_row_count": 0,
+        "unlabeled_missing_forward_window_rows": 0,
+        "unlabeled_invalid_price_rows": 0,
+        "unlabeled_missing_regression_target_rows": 0,
+        "labeled_row_count": 0,
+        "class_counts": {},
+    }
+
+
+def _accumulate_labeling_summary(
+    summary: dict[str, object],
+    group: pd.DataFrame,
+    *,
+    horizons: Sequence[int],
+    window_length: int,
+    classification_horizon: int,
+    classification_threshold: float,
+    classification_event_type: str,
+    eligibility_enabled: bool,
+    research_enabled: bool,
+) -> None:
+    target_cols = [target_column(horizon) for horizon in horizons]
+    class_col = classification_target_column(
+        horizon=classification_horizon,
+        threshold=classification_threshold,
+        event_type=classification_event_type,
+    )
+    candidate_mask = group["window_row_count"].astype(int) >= window_length
+    if eligibility_enabled and "episode_eligible" in group.columns:
+        candidate_mask &= group["episode_eligible"].fillna(False).astype(bool)
+    pre_research_mask = candidate_mask.copy()
+    if research_enabled and "research_universe_ok" in group.columns:
+        candidate_mask &= group["research_universe_ok"].fillna(False).astype(bool)
+    full_forward_mask = group["_has_all_future_horizons"].fillna(False).astype(bool)
+    target_complete_mask = group[target_cols].notna().all(axis=1)
+    label_complete_mask = group[class_col].notna()
+    final_mask = candidate_mask & full_forward_mask & target_complete_mask & label_complete_mask
+
+    summary["candidate_row_count"] = int(summary["candidate_row_count"]) + int(candidate_mask.sum())
+    summary["research_universe_excluded_rows"] = int(summary.get("research_universe_excluded_rows", 0)) + int(
+        (pre_research_mask & ~candidate_mask).sum()
+    )
+    summary["unlabeled_missing_forward_window_rows"] = int(
+        summary["unlabeled_missing_forward_window_rows"]
+    ) + int((candidate_mask & ~full_forward_mask).sum())
+    summary["unlabeled_invalid_price_rows"] = int(summary["unlabeled_invalid_price_rows"]) + int(
+        (candidate_mask & full_forward_mask & ~label_complete_mask).sum()
+    )
+    summary["unlabeled_missing_regression_target_rows"] = int(
+        summary["unlabeled_missing_regression_target_rows"]
+    ) + int((candidate_mask & full_forward_mask & label_complete_mask & ~target_complete_mask).sum())
+    summary["labeled_row_count"] = int(summary["labeled_row_count"]) + int(final_mask.sum())
+    class_counts = dict(summary.get("class_counts") or {})
+    for key, value in group.loc[final_mask, class_col].astype(int).value_counts().sort_index().items():
+        str_key = str(int(key))
+        class_counts[str_key] = int(class_counts.get(str_key, 0)) + int(value)
+    summary["class_counts"] = class_counts
 
 
 def _maintain_episode_heap(
@@ -577,6 +695,7 @@ def load_cached_v1_dataset(cache_dir: str | Path) -> CachedV1Dataset:
         classification_target_columns=list(manifest["classification_target_columns"]),
         feature_columns=feature_columns,
         split_by_date={},
+        labeling_summary=manifest.get("labeling"),
         cache_dir=root,
     )
 
@@ -610,10 +729,17 @@ def build_episode_cache(
     max_episodes: int | None = None,
     classification_horizon: int = DEFAULT_CLASSIFICATION_HORIZON,
     classification_threshold: float = DEFAULT_CLASSIFICATION_THRESHOLD,
+    classification_event_type: str = DEFAULT_CLASSIFICATION_EVENT_TYPE,
     eligibility_config: EpisodeEligibilityConfig | None = None,
+    research_config: ConservativeResearchUniverseConfig | None = None,
     force: bool = False,
     progress_every: int = 250,
 ) -> dict[str, object]:
+    validate_classification_event_config(
+        event_type=classification_event_type,
+        horizon=classification_horizon,
+        threshold=classification_threshold,
+    )
     dataset_root = Path(dataset_root)
     cache_dir = Path(cache_dir)
     stock_path = _stock_feature_path(dataset_root)
@@ -644,7 +770,11 @@ def build_episode_cache(
     horizons = tuple(int(horizon) for horizon in horizons)
     target_columns = [target_column(horizon) for horizon in horizons]
     classification_columns = [
-        classification_target_column(horizon=classification_horizon, threshold=classification_threshold)
+        classification_target_column(
+            horizon=classification_horizon,
+            threshold=classification_threshold,
+            event_type=classification_event_type,
+        )
     ]
 
     tabular_sets = [feature_set for feature_set in feature_sets if feature_set not in SEQUENCE_FEATURE_SET_NAMES]
@@ -690,6 +820,12 @@ def build_episode_cache(
     stock_row_count = 0
     eligible_count = 0
     ticker_count = 0
+    labeling_summary = _labeling_summary_seed(
+        classification_event_type=classification_event_type,
+        classification_horizon=classification_horizon,
+        classification_threshold=classification_threshold,
+    )
+    labeling_summary["research_universe_enabled"] = bool(research_config is not None and research_config.enabled)
     for group in _iter_ticker_groups(stock_path):
         ticker = str(group["ticker"].iloc[0]).upper()
         if ticker in set(MARKET_CONTEXT_TICKERS) or ticker == benchmark_ticker.upper():
@@ -700,6 +836,7 @@ def build_episode_cache(
             numeric_columns=numeric_columns,
             context_tables=context_tables,
             eligibility_config=eligibility_config,
+            research_config=research_config,
             benchmark_ticker=benchmark_ticker,
         )
         with_targets = _add_targets(
@@ -707,6 +844,7 @@ def build_episode_cache(
             horizons=horizons,
             classification_horizon=classification_horizon,
             classification_threshold=classification_threshold,
+            classification_event_type=classification_event_type,
             benchmark_close_by_date=context_tables["benchmark_close"],
         )
         eligible = _eligible_episode_rows(
@@ -715,10 +853,23 @@ def build_episode_cache(
             window_length=window_length,
             classification_horizon=classification_horizon,
             classification_threshold=classification_threshold,
+            classification_event_type=classification_event_type,
             eligibility_enabled=eligibility_config is not None,
+            research_enabled=research_config is not None,
         )
         stock_row_count += len(prepared)
         eligible_count += len(eligible)
+        _accumulate_labeling_summary(
+            labeling_summary,
+            with_targets,
+            horizons=horizons,
+            window_length=window_length,
+            classification_horizon=classification_horizon,
+            classification_threshold=classification_threshold,
+            classification_event_type=classification_event_type,
+            eligibility_enabled=eligibility_config is not None,
+            research_enabled=research_config is not None,
+        )
         if max_episodes and max_episodes > 0:
             _maintain_episode_heap(heap, eligible, max_episodes=max_episodes)
         if progress_every and ticker_count % progress_every == 0:
@@ -729,6 +880,9 @@ def build_episode_cache(
                         "tickers": ticker_count,
                         "stock_rows": stock_row_count,
                         "eligible_episodes": eligible_count,
+                        "unlabeled_missing_forward_window_rows": labeling_summary[
+                            "unlabeled_missing_forward_window_rows"
+                        ],
                         "selected_heap_size": len(heap) if max_episodes else None,
                         "elapsed_seconds": round(time.monotonic() - start_time, 1),
                     }
@@ -776,6 +930,8 @@ def build_episode_cache(
         "gics_sub_industry",
         "sector_etf",
         "window_row_count",
+        *ELIGIBILITY_DIAGNOSTIC_COLUMNS,
+        *RESEARCH_UNIVERSE_DIAGNOSTIC_COLUMNS,
     ]
     target_csv_columns = ["ticker", "anchor_date", *target_columns, *classification_columns]
     episode_idx = 0
@@ -800,6 +956,7 @@ def build_episode_cache(
                 numeric_columns=numeric_columns,
                 context_tables=context_tables,
                 eligibility_config=eligibility_config,
+                research_config=research_config,
                 benchmark_ticker=benchmark_ticker,
             )
             with_targets = _add_targets(
@@ -807,6 +964,7 @@ def build_episode_cache(
                 horizons=horizons,
                 classification_horizon=classification_horizon,
                 classification_threshold=classification_threshold,
+                classification_event_type=classification_event_type,
                 benchmark_close_by_date=context_tables["benchmark_close"],
             )
             ticker_offsets[ticker] = sequence_idx
@@ -837,7 +995,9 @@ def build_episode_cache(
                 window_length=window_length,
                 classification_horizon=classification_horizon,
                 classification_threshold=classification_threshold,
+                classification_event_type=classification_event_type,
                 eligibility_enabled=eligibility_config is not None,
+                research_enabled=research_config is not None,
             )
             if selected_keys is not None:
                 eligible = eligible[
@@ -892,6 +1052,10 @@ def build_episode_cache(
                             "gics_sub_industry": row.get("gics_sub_industry", "Unknown") or "Unknown",
                             "sector_etf": row.get("sector_etf", ""),
                             "window_row_count": int(row["window_row_count"]),
+                            **{
+                                column: row.get(column, "")
+                                for column in [*eligibility_metadata_columns(eligible), *research_universe_metadata_columns(eligible)]
+                            },
                         }
                     )
                     target_writer.writerow(
@@ -952,6 +1116,8 @@ def build_episode_cache(
         "horizons": list(horizons),
         "classification_horizon": classification_horizon,
         "classification_threshold": classification_threshold,
+        "classification_event_type": classification_event_type,
+        "labeling": labeling_summary,
         "window_length": window_length,
         "benchmark_ticker": benchmark_ticker.upper(),
         "max_episodes": max_episodes,
@@ -961,6 +1127,7 @@ def build_episode_cache(
         "ticker_count": len(ticker_offsets),
         "elapsed_seconds": round(time.monotonic() - start_time, 1),
         "episode_eligibility": eligibility_config.to_dict() if eligibility_config is not None else {"enabled": False},
+        "research_universe": research_config.to_dict() if research_config is not None else {"enabled": False},
         "notes": [
             "Feature engineering is materialized once into float32 arrays.",
             "Torch tabular and sequence models can train from these arrays without rebuilding pandas feature frames per fold.",

@@ -14,6 +14,12 @@ from src.data.episode_eligibility import (
     eligibility_metadata_columns,
 )
 from src.data.eodhd_enrichment import FUNDAMENTAL_FEATURE_COLUMNS, SENTIMENT_FEATURE_COLUMNS
+from src.data.research_universe import (
+    ConservativeResearchUniverseConfig,
+    add_conservative_research_universe_columns,
+    latest_research_universe_diagnostics,
+    research_universe_metadata_columns,
+)
 
 
 DEFAULT_HORIZONS = (1, 5, 10, 20)
@@ -22,6 +28,16 @@ DEFAULT_BENCHMARK_TICKER = "SPY"
 DEFAULT_CLASSIFICATION_HORIZON = 20
 DEFAULT_CLASSIFICATION_THRESHOLD = 0.05
 DEFAULT_CLASSIFICATION_EVENT_TYPE = "anytime_pathwise_outperform"
+SUSTAINED_CLASSIFICATION_EVENT_TYPE = "sustained_pathwise_outperform"
+PATH_5PCT_20D_EVENT_TYPE = "path_5pct_20d"
+PATH_5PCT_20D_HORIZON = 20
+PATH_5PCT_20D_POSITIVE_THRESHOLD = 0.05
+PATH_5PCT_20D_NEGATIVE_THRESHOLD = -0.05
+CLASSIFICATION_EVENT_TYPES = (
+    DEFAULT_CLASSIFICATION_EVENT_TYPE,
+    SUSTAINED_CLASSIFICATION_EVENT_TYPE,
+    PATH_5PCT_20D_EVENT_TYPE,
+)
 
 SECTOR_ETF_BY_GICS = {
     "Communication Services": "XLC",
@@ -253,6 +269,7 @@ class V1Dataset:
     classification_target_columns: list[str]
     feature_columns: dict[str, list[str]]
     split_by_date: dict[str, tuple[str, str]]
+    labeling_summary: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -363,9 +380,81 @@ def target_column(horizon: int) -> str:
     return f"market_adjusted_return_{horizon}d"
 
 
-def classification_target_column(*, horizon: int = DEFAULT_CLASSIFICATION_HORIZON, threshold: float = DEFAULT_CLASSIFICATION_THRESHOLD) -> str:
+def classification_target_column(
+    *,
+    horizon: int = DEFAULT_CLASSIFICATION_HORIZON,
+    threshold: float = DEFAULT_CLASSIFICATION_THRESHOLD,
+    event_type: str = DEFAULT_CLASSIFICATION_EVENT_TYPE,
+) -> str:
+    if event_type == PATH_5PCT_20D_EVENT_TYPE:
+        return PATH_5PCT_20D_EVENT_TYPE
     threshold_pct = int(round(float(threshold) * 100))
-    return f"market_outperform_any_{int(horizon)}d_gt_{threshold_pct}pct"
+    if event_type == DEFAULT_CLASSIFICATION_EVENT_TYPE:
+        return f"market_outperform_any_{int(horizon)}d_gt_{threshold_pct}pct"
+    if event_type == SUSTAINED_CLASSIFICATION_EVENT_TYPE:
+        return f"market_outperform_sustained_{int(horizon)}d_gt_{threshold_pct}pct"
+    raise ValueError(f"Unsupported classification_event_type: {event_type!r}")
+
+
+def classification_label_kind(event_type: str = DEFAULT_CLASSIFICATION_EVENT_TYPE) -> str:
+    return "multiclass" if event_type == PATH_5PCT_20D_EVENT_TYPE else "binary"
+
+
+def classification_class_labels(event_type: str = DEFAULT_CLASSIFICATION_EVENT_TYPE) -> list[int]:
+    return [0, 1, 2] if event_type == PATH_5PCT_20D_EVENT_TYPE else [0, 1]
+
+
+def classification_positive_class(event_type: str = DEFAULT_CLASSIFICATION_EVENT_TYPE) -> int:
+    return 2 if event_type == PATH_5PCT_20D_EVENT_TYPE else 1
+
+
+def validate_classification_event_config(
+    *,
+    event_type: str,
+    horizon: int,
+    threshold: float,
+) -> None:
+    if event_type not in CLASSIFICATION_EVENT_TYPES:
+        raise ValueError(f"Unsupported classification_event_type: {event_type!r}")
+    if event_type == PATH_5PCT_20D_EVENT_TYPE:
+        if int(horizon) != PATH_5PCT_20D_HORIZON:
+            raise ValueError("path_5pct_20d requires classification_horizon=20.")
+        if not np.isclose(float(threshold), PATH_5PCT_20D_POSITIVE_THRESHOLD):
+            raise ValueError("path_5pct_20d requires classification_threshold=0.05.")
+
+
+def pathwise_classification_labels(
+    path_returns: pd.DataFrame,
+    *,
+    threshold: float,
+    event_type: str = DEFAULT_CLASSIFICATION_EVENT_TYPE,
+) -> pd.Series:
+    if event_type == DEFAULT_CLASSIFICATION_EVENT_TYPE:
+        return (path_returns.max(axis=1) > float(threshold)).astype(float)
+    if event_type == SUSTAINED_CLASSIFICATION_EVENT_TYPE:
+        tail_width = min(5, max(path_returns.shape[1], 1))
+        tail_mean = path_returns.iloc[:, -tail_width:].mean(axis=1)
+        terminal = path_returns.iloc[:, -1]
+        label = (
+            (path_returns.max(axis=1) > float(threshold))
+            & (terminal > 0.0)
+            & (tail_mean > 0.0)
+        )
+        return label.astype(float)
+    if event_type == PATH_5PCT_20D_EVENT_TYPE:
+        values = path_returns.astype(float)
+        valid = pd.Series(np.isfinite(values.to_numpy(dtype=float)).all(axis=1), index=values.index)
+        max_return = values.max(axis=1)
+        min_return = values.min(axis=1)
+        labels = pd.Series(np.nan, index=values.index, dtype="float64")
+        negative = valid & (min_return <= PATH_5PCT_20D_NEGATIVE_THRESHOLD)
+        positive = valid & ~negative & (max_return >= PATH_5PCT_20D_POSITIVE_THRESHOLD)
+        neutral = valid & ~negative & ~positive
+        labels.loc[negative] = 0.0
+        labels.loc[positive] = 2.0
+        labels.loc[neutral] = 1.0
+        return labels
+    raise ValueError(f"Unsupported classification_event_type: {event_type!r}")
 
 
 def _read_csv(path: Path) -> pd.DataFrame:
@@ -374,11 +463,19 @@ def _read_csv(path: Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-def load_daily_features(dataset_root: str | Path) -> pd.DataFrame:
+def preferred_stock_feature_path(dataset_root: str | Path) -> Path:
     root = Path(dataset_root)
     normalized = root / "processed" / "daily_features_normalized.csv"
     processed = root / "processed" / "daily_features.csv"
-    path = normalized if normalized.exists() else processed
+    if normalized.exists() and processed.exists():
+        return normalized if normalized.stat().st_mtime >= processed.stat().st_mtime else processed
+    if normalized.exists():
+        return normalized
+    return processed
+
+
+def load_daily_features(dataset_root: str | Path) -> pd.DataFrame:
+    path = preferred_stock_feature_path(dataset_root)
     df = _read_csv(path)
     df["ticker"] = df["ticker"].astype(str).str.upper()
     df["date"] = df["date"].astype(str)
@@ -839,8 +936,15 @@ def build_multi_horizon_targets(
     benchmark_ticker: str = DEFAULT_BENCHMARK_TICKER,
     classification_horizon: int = DEFAULT_CLASSIFICATION_HORIZON,
     classification_threshold: float = DEFAULT_CLASSIFICATION_THRESHOLD,
+    classification_event_type: str = DEFAULT_CLASSIFICATION_EVENT_TYPE,
     eligibility_config: EpisodeEligibilityConfig | None = None,
+    research_config: ConservativeResearchUniverseConfig | None = None,
 ) -> pd.DataFrame:
+    validate_classification_event_config(
+        event_type=classification_event_type,
+        horizon=classification_horizon,
+        threshold=classification_threshold,
+    )
     benchmark = context_features[context_features["ticker"] == benchmark_ticker.upper()].copy()
     if benchmark.empty:
         raise ValueError(
@@ -856,12 +960,19 @@ def build_multi_horizon_targets(
             eligibility_config,
             benchmark_ticker=benchmark_ticker,
         )
+    if research_config is not None:
+        stocks = add_conservative_research_universe_columns(
+            stocks,
+            research_config,
+            benchmark_ticker=benchmark_ticker,
+        )
 
     target_frames: list[pd.DataFrame] = []
-    max_horizon = max(horizons)
+    max_horizon = max(max(horizons), classification_horizon)
     classification_col = classification_target_column(
         horizon=classification_horizon,
         threshold=classification_threshold,
+        event_type=classification_event_type,
     )
     for _, group in stocks.groupby("ticker", sort=False):
         group = group.copy()
@@ -881,12 +992,20 @@ def build_multi_horizon_targets(
             future_close = group["close"].shift(-path_step).astype(float)
             future_date = group["date"].shift(-path_step)
             stock_return = future_close / anchor_close - 1.0
-            benchmark_future = future_date.map(benchmark_close_by_date)
-            benchmark_return = benchmark_future / benchmark_anchor - 1.0
-            path_col = f"market_adjusted_return_path_{path_step}d"
-            group[path_col] = stock_return - benchmark_return
+            if classification_event_type == PATH_5PCT_20D_EVENT_TYPE:
+                path_col = f"forward_return_path_{path_step}d"
+                group[path_col] = stock_return
+            else:
+                benchmark_future = future_date.map(benchmark_close_by_date)
+                benchmark_return = benchmark_future / benchmark_anchor - 1.0
+                path_col = f"market_adjusted_return_path_{path_step}d"
+                group[path_col] = stock_return - benchmark_return
             path_excess_cols.append(path_col)
-        group[classification_col] = (group[path_excess_cols].max(axis=1) > float(classification_threshold)).astype(float)
+        group[classification_col] = pathwise_classification_labels(
+            group[path_excess_cols],
+            threshold=classification_threshold,
+            event_type=classification_event_type,
+        )
         group["has_all_future_horizons"] = group.groupby("ticker").cumcount() <= len(group) - max_horizon - 1
         target_frames.append(group)
 
@@ -899,18 +1018,67 @@ def build_multi_horizon_targets(
         "gics_sub_industry",
         "window_row_count",
         *eligibility_metadata_columns(targets),
+        *research_universe_metadata_columns(targets),
         *target_cols,
         classification_col,
+        "has_all_future_horizons",
     ]
     targets = targets[keep_cols]
-    targets = targets[targets["window_row_count"] >= window_length]
+    candidate_mask = targets["window_row_count"] >= window_length
     if eligibility_config is not None and "episode_eligible" in targets.columns:
-        targets = targets[targets["episode_eligible"]]
-    targets = targets.dropna(subset=target_cols)
-    targets = targets.dropna(subset=[classification_col])
+        candidate_mask &= targets["episode_eligible"].fillna(False).astype(bool)
+    if research_config is not None and "research_universe_ok" in targets.columns:
+        candidate_mask &= targets["research_universe_ok"].fillna(False).astype(bool)
+    full_forward_mask = targets["has_all_future_horizons"].fillna(False).astype(bool)
+    target_complete_mask = targets[target_cols].notna().all(axis=1)
+    label_complete_mask = targets[classification_col].notna()
+    final_mask = candidate_mask & full_forward_mask & target_complete_mask & label_complete_mask
+    class_counts = (
+        targets.loc[final_mask, classification_col].astype(int).value_counts().sort_index().to_dict()
+    )
+    labeling_summary = {
+        "mode": classification_event_type,
+        "horizon_days": int(classification_horizon),
+        "positive_threshold": float(classification_threshold),
+        "negative_threshold": (
+            PATH_5PCT_20D_NEGATIVE_THRESHOLD
+            if classification_event_type == PATH_5PCT_20D_EVENT_TYPE
+            else None
+        ),
+        "use_close_only": classification_event_type == PATH_5PCT_20D_EVENT_TYPE,
+        "require_full_forward_window": True,
+        "negative_overrides_positive": classification_event_type == PATH_5PCT_20D_EVENT_TYPE,
+        "research_universe_enabled": bool(research_config.enabled) if research_config is not None else False,
+        "candidate_row_count": int(candidate_mask.sum()),
+        "research_universe_excluded_rows": int(
+            (
+                (targets["window_row_count"] >= window_length)
+                & (
+                    targets["episode_eligible"].fillna(False).astype(bool)
+                    if eligibility_config is not None and "episode_eligible" in targets.columns
+                    else True
+                )
+                & ~(
+                    targets["research_universe_ok"].fillna(False).astype(bool)
+                    if research_config is not None and "research_universe_ok" in targets.columns
+                    else True
+                )
+            ).sum()
+        ),
+        "unlabeled_missing_forward_window_rows": int((candidate_mask & ~full_forward_mask).sum()),
+        "unlabeled_invalid_price_rows": int((candidate_mask & full_forward_mask & ~label_complete_mask).sum()),
+        "unlabeled_missing_regression_target_rows": int(
+            (candidate_mask & full_forward_mask & label_complete_mask & ~target_complete_mask).sum()
+        ),
+        "labeled_row_count": int(final_mask.sum()),
+        "class_counts": {str(key): int(value) for key, value in class_counts.items()},
+    }
+    targets = targets.loc[final_mask].drop(columns=["has_all_future_horizons"])
     targets = targets.rename(columns={"date": "anchor_date"})
     targets["sector_etf"] = targets["gics_sector"].map(SECTOR_ETF_BY_GICS)
-    return targets.reset_index(drop=True)
+    out = targets.reset_index(drop=True)
+    out.attrs["labeling_summary"] = labeling_summary
+    return out
 
 
 def _merge_context(
@@ -956,7 +1124,9 @@ def build_v1_dataset(
     max_episodes: int | None = None,
     classification_horizon: int = DEFAULT_CLASSIFICATION_HORIZON,
     classification_threshold: float = DEFAULT_CLASSIFICATION_THRESHOLD,
+    classification_event_type: str = DEFAULT_CLASSIFICATION_EVENT_TYPE,
     eligibility_config: EpisodeEligibilityConfig | None = None,
+    research_config: ConservativeResearchUniverseConfig | None = None,
     feature_set_names: Sequence[str] | None = None,
 ) -> V1Dataset:
     stock_features = add_context_relative_return_features(
@@ -968,7 +1138,11 @@ def build_v1_dataset(
     horizons = tuple(horizons)
     target_cols = [target_column(horizon) for horizon in horizons]
     classification_cols = [
-        classification_target_column(horizon=classification_horizon, threshold=classification_threshold)
+        classification_target_column(
+            horizon=classification_horizon,
+            threshold=classification_threshold,
+            event_type=classification_event_type,
+        )
     ]
     targets = build_multi_horizon_targets(
         stock_features,
@@ -978,7 +1152,9 @@ def build_v1_dataset(
         benchmark_ticker=benchmark_ticker,
         classification_horizon=classification_horizon,
         classification_threshold=classification_threshold,
+        classification_event_type=classification_event_type,
         eligibility_config=eligibility_config,
+        research_config=research_config,
     )
     if max_episodes is not None and len(targets) > max_episodes:
         targets = targets.sort_values(["anchor_date", "ticker"]).tail(max_episodes).reset_index(drop=True)
@@ -991,6 +1167,7 @@ def build_v1_dataset(
         "sector_etf",
         "window_row_count",
         *eligibility_metadata_columns(targets),
+        *research_universe_metadata_columns(targets),
     ]
     metadata = targets[metadata_columns].copy()
 
@@ -1112,6 +1289,7 @@ def build_v1_dataset(
         "sector_etf",
         "window_row_count",
         *eligibility_metadata_columns(targets),
+        *research_universe_metadata_columns(targets),
         *target_cols,
         *classification_cols,
     }
@@ -1147,6 +1325,7 @@ def build_v1_dataset(
         classification_target_columns=classification_cols,
         feature_columns=feature_columns,
         split_by_date={},
+        labeling_summary=targets.attrs.get("labeling_summary"),
     )
 
 
@@ -1158,6 +1337,7 @@ def build_latest_v1_feature_sets(
     benchmark_ticker: str = DEFAULT_BENCHMARK_TICKER,
     anchor_date: str | None = None,
     eligibility_config: EpisodeEligibilityConfig | None = None,
+    research_config: ConservativeResearchUniverseConfig | None = None,
 ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], dict[str, list[str]]]:
     cutoff = anchor_date
     stocks = stock_features.copy()
@@ -1197,6 +1377,13 @@ def build_latest_v1_feature_sets(
         *eligibility_metadata_columns(latest),
     ]
     metadata = latest[metadata_columns].reset_index(drop=True)
+    if research_config is not None:
+        metadata = latest_research_universe_diagnostics(
+            stocks,
+            metadata,
+            research_config,
+            benchmark_ticker=benchmark_ticker,
+        )
 
     stock_only_cols = select_stock_feature_columns(stocks, include_relative=False)
     stock_relative_cols = select_stock_feature_columns(stocks, include_relative=True)

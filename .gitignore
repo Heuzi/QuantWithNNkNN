@@ -9,33 +9,6 @@ EODHD_api_key
 artifacts/*
 !artifacts/v1_baselines/
 artifacts/v1_baselines/*
-!artifacts/v1_baselines/eodhd_true_full_xgboost/
-artifacts/v1_baselines/eodhd_true_full_xgboost/*
-!artifacts/v1_baselines/eodhd_true_full_xgboost/models/
-artifacts/v1_baselines/eodhd_true_full_xgboost/models/*
-!artifacts/v1_baselines/eodhd_true_full_xgboost/models/*.pkl
-!artifacts/v1_baselines/eodhd_true_full_xgboost/final_models.json
-!artifacts/v1_baselines/eodhd_true_full_xgboost/final_classification_models.json
-!artifacts/v1_baselines/eodhd_true_full_xgboost/classification_oos_leaderboard.csv
-!artifacts/v1_baselines/eodhd_true_full_xgboost/classification_fold_metrics.csv
-!artifacts/v1_baselines/eodhd_true_full_torch_mlp/
-artifacts/v1_baselines/eodhd_true_full_torch_mlp/*
-!artifacts/v1_baselines/eodhd_true_full_torch_mlp/models/
-artifacts/v1_baselines/eodhd_true_full_torch_mlp/models/*
-!artifacts/v1_baselines/eodhd_true_full_torch_mlp/models/*.pkl
-!artifacts/v1_baselines/eodhd_true_full_torch_mlp/final_models.json
-!artifacts/v1_baselines/eodhd_true_full_torch_mlp/final_classification_models.json
-!artifacts/v1_baselines/eodhd_true_full_torch_mlp/classification_oos_leaderboard.csv
-!artifacts/v1_baselines/eodhd_true_full_torch_mlp/classification_fold_metrics.csv
-!artifacts/v1_baselines/eodhd_true_full_torch_seq_static/
-artifacts/v1_baselines/eodhd_true_full_torch_seq_static/*
-!artifacts/v1_baselines/eodhd_true_full_torch_seq_static/models/
-artifacts/v1_baselines/eodhd_true_full_torch_seq_static/models/*
-!artifacts/v1_baselines/eodhd_true_full_torch_seq_static/models/*.pkl
-!artifacts/v1_baselines/eodhd_true_full_torch_seq_static/final_models.json
-!artifacts/v1_baselines/eodhd_true_full_torch_seq_static/final_classification_models.json
-!artifacts/v1_baselines/eodhd_true_full_torch_seq_static/classification_oos_leaderboard.csv
-!artifacts/v1_baselines/eodhd_true_full_torch_seq_static/classification_fold_metrics.csv
 logs/
 
 # Generated EODHD datasets

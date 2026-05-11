@@ -120,15 +120,41 @@ def _as_array(frame: pd.DataFrame | np.ndarray) -> np.ndarray:
     return np.asarray(frame, dtype=np.float64)
 
 
-def _as_2d_prediction_array(values: np.ndarray, *, expected_columns: int) -> np.ndarray:
+def _as_2d_prediction_array(
+    values: np.ndarray,
+    *,
+    expected_columns: int,
+    allow_extra_columns: bool = False,
+) -> np.ndarray:
     arr = np.asarray(values, dtype=np.float64)
     if arr.ndim == 1:
         arr = arr.reshape(-1, 1)
     if arr.ndim != 2:
         raise ValueError(f"Expected 1-D or 2-D prediction array, got shape {arr.shape}.")
     if arr.shape[1] != expected_columns:
+        if allow_extra_columns and expected_columns == 1 and arr.shape[1] > expected_columns:
+            return arr
         raise ValueError(f"Expected {expected_columns} prediction columns, got {arr.shape[1]}.")
     return arr
+
+
+def _softmax_numpy(values: np.ndarray) -> np.ndarray:
+    logits = np.asarray(values, dtype=np.float64)
+    if logits.ndim == 1:
+        logits = logits.reshape(-1, 1)
+    shifted = logits - np.nanmax(logits, axis=1, keepdims=True)
+    exp = np.exp(shifted)
+    denom = np.sum(exp, axis=1, keepdims=True)
+    return np.divide(exp, denom, out=np.zeros_like(exp), where=denom > 0)
+
+
+def _multiclass_log_loss_from_logits(logits: np.ndarray, labels: np.ndarray) -> float:
+    labels = np.asarray(labels, dtype=np.int64).reshape(-1)
+    prob = np.clip(_softmax_numpy(logits), EPS, 1.0)
+    if len(labels) == 0:
+        return np.inf
+    row_idx = np.arange(len(labels))
+    return float(-np.mean(np.log(prob[row_idx, labels])))
 
 
 def _hstack_static_arrays(static_categorical: dict[str, np.ndarray], columns: Sequence[str]) -> np.ndarray:
@@ -173,7 +199,8 @@ def _xgboost_device(prefer_gpu: bool) -> str:
 def _xgboost_nthread(default: int = 1) -> int:
     raw = os.environ.get("V1_XGBOOST_NTHREAD", "").strip()
     if not raw:
-        return default
+        cpu_count = os.cpu_count() or default
+        return max(int(cpu_count), 1)
     try:
         return max(int(raw), 1)
     except ValueError:
@@ -219,11 +246,13 @@ def _torch_loader_kwargs(*, device: str, shuffle: bool, batch_size: int) -> dict
         "shuffle": shuffle,
         "pin_memory": device == "cuda",
     }
-    workers_raw = os.environ.get("V1_TORCH_NUM_WORKERS", "0").strip()
+    cpu_count = os.cpu_count() or 1
+    default_workers = max(min(cpu_count // 2, 8), 1)
+    workers_raw = os.environ.get("V1_TORCH_NUM_WORKERS", str(default_workers)).strip()
     try:
         workers = max(int(workers_raw), 0)
     except ValueError:
-        workers = 0
+        workers = default_workers
     if workers:
         kwargs["num_workers"] = workers
         kwargs["persistent_workers"] = True
@@ -245,6 +274,73 @@ def _torch_progress_every(total_batches: int) -> int:
     if total_batches <= 100:
         return 1
     return max(min(total_batches // 100, 500), 25)
+
+
+def _xgboost_progress_every(total_rounds: int) -> int:
+    raw = os.environ.get("V1_XGBOOST_PROGRESS_EVERY_ROUNDS", "").strip()
+    if raw:
+        try:
+            return max(int(raw), 1)
+        except ValueError:
+            pass
+    if total_rounds <= 200:
+        return 5
+    return max(min(total_rounds // 100, 50), 10)
+
+
+def _progress_bar(completed: int, total: int, *, width: int = 24) -> str:
+    safe_total = max(int(total), 1)
+    safe_completed = min(max(int(completed), 0), safe_total)
+    filled = int(round((safe_completed / safe_total) * width))
+    return "[" + "#" * filled + "-" * (width - filled) + f"] {safe_completed}/{safe_total}"
+
+
+def _emit_progress_line(prefix: str, completed: int, total: int, *, detail: str = "") -> None:
+    message = f"{prefix} {_progress_bar(completed, total)}"
+    if detail:
+        message += f" {detail}"
+    print(message, flush=True)
+
+
+def _make_xgboost_progress_callback(xgb, *, model_name: str, phase: str, total_rounds: int):
+    total_rounds = max(int(total_rounds), 1)
+    progress_every = _xgboost_progress_every(total_rounds)
+
+    class _Callback(xgb.callback.TrainingCallback):
+        def __init__(self) -> None:
+            self.start_time = time.monotonic()
+
+        def after_iteration(self, model, epoch: int, evals_log) -> bool:
+            round_number = int(epoch) + 1
+            if (
+                round_number != 1
+                and round_number % progress_every != 0
+                and round_number < total_rounds
+            ):
+                return False
+            metric_tail = ""
+            if evals_log:
+                parts: list[str] = []
+                for dataset_name, metric_map in evals_log.items():
+                    if not metric_map:
+                        continue
+                    metric_name, metric_values = next(iter(metric_map.items()))
+                    if metric_values:
+                        parts.append(f"{dataset_name}.{metric_name}={float(metric_values[-1]):.5f}")
+                metric_tail = " ".join(parts)
+            elapsed = round(time.monotonic() - self.start_time, 1)
+            detail = f"rounds elapsed={elapsed}s"
+            if metric_tail:
+                detail += f" {metric_tail}"
+            _emit_progress_line(
+                f"{model_name}:{phase}",
+                round_number,
+                total_rounds,
+                detail=detail,
+            )
+            return False
+
+    return _Callback()
 
 
 def _sequence_standardizer_batches(store: Any, cutoff_date: str) -> Iterable[np.ndarray]:
@@ -479,6 +575,22 @@ class _ConstantProbabilityClassifier:
 
     def predict(self, x):
         return (self.predict_proba(x)[:, 1] >= 0.5).astype(float)
+
+
+class _ConstantClassProbabilityClassifier:
+    def __init__(self, class_label: int, num_classes: int) -> None:
+        self.class_label = int(class_label)
+        self.num_classes = max(int(num_classes), self.class_label + 1, 1)
+
+    def predict_proba(self, x):
+        count = len(x)
+        out = np.zeros((count, self.num_classes), dtype=np.float64)
+        if count:
+            out[:, self.class_label] = 1.0
+        return out
+
+    def predict(self, x):
+        return np.full(len(x), self.class_label, dtype=np.int64)
 
 
 class ZeroPredictor:
@@ -868,6 +980,15 @@ class LightGBMRegressor:
                     ),
                     flush=True,
                 )
+                _emit_progress_line(
+                    "xgboost_classifier:chunk_fit",
+                    rounds_done,
+                    rounds_total,
+                    detail=(
+                        f"epoch={epoch + 1}/{epochs} chunk={chunks_done}/{total_chunks} "
+                        f"rows={int(len(batch))} elapsed={round(time.monotonic() - start, 1)}s"
+                    ),
+                )
                 del dtrain, values, labels, batch
                 gc.collect()
             if rounds_remaining <= 0:
@@ -887,6 +1008,12 @@ class LightGBMRegressor:
             ),
             flush=True,
         )
+        _emit_progress_line(
+            "xgboost_classifier:chunk_fit",
+            rounds_done,
+            rounds_total,
+            detail=f"complete device={params.get('device')} nthread={params.get('nthread')}",
+        )
         return booster, rounds_done
 
     def _fit_lazy(
@@ -899,31 +1026,18 @@ class LightGBMRegressor:
     ) -> "XGBoostClassifier":
         import xgboost as xgb
 
-        y_train = _as_array(y).reshape(-1).astype(np.float32)
+        y_train = self._target_values(y)
         if np.unique(y_train).size < 2:
-            self.model_ = _ConstantProbabilityClassifier(float(y_train[0]) if len(y_train) else 0.0)
+            self.model_ = self._constant_model(y_train)
             self.best_iteration_ = 1
             self.device_ = "cpu"
             self.gpu_fallback_error_ = ""
             return self
-        y_val_arr = _as_array(val_y).reshape(-1).astype(np.float32) if val_y is not None else None
-        scale_pos_weight = float((len(y_train) - y_train.sum()) / max(y_train.sum(), 1.0))
+        y_val_arr = self._target_values(val_y) if val_y is not None else None
         self.gpu_fallback_error_ = ""
         self.device_ = _xgboost_device(self.prefer_gpu)
         nthread = _xgboost_nthread()
-        params = {
-            "learning_rate": 0.03,
-            "max_depth": 4,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "objective": "binary:logistic",
-            "tree_method": "hist",
-            "device": self.device_,
-            "eval_metric": "logloss",
-            "scale_pos_weight": max(scale_pos_weight, 1.0),
-            "seed": self.random_state,
-            "nthread": nthread,
-        }
+        params = self._training_params(y_values=y_train, nthread=nthread)
         if _xgboost_training_mode(len(x)) == "chunked":
             self.model_, self.best_iteration_ = self._train_lazy_chunks(
                 x,
@@ -964,6 +1078,7 @@ class LightGBMRegressor:
                 evals=evals,
                 early_stopping_rounds=self.patience if evals else None,
                 verbose_eval=25 if evals else False,
+                callbacks=[_make_xgboost_progress_callback(xgb, model_name="xgboost_classifier", phase="fit", total_rounds=self.n_estimators)],
             )
         except Exception as exc:
             if self.device_ != "cuda":
@@ -978,9 +1093,16 @@ class LightGBMRegressor:
                 evals=evals,
                 early_stopping_rounds=self.patience if evals else None,
                 verbose_eval=25 if evals else False,
+                callbacks=[_make_xgboost_progress_callback(xgb, model_name="xgboost_classifier", phase="fit", total_rounds=self.n_estimators)],
             )
         best_iteration = getattr(self.model_, "best_iteration", None)
         self.best_iteration_ = int(best_iteration + 1) if best_iteration is not None else self.n_estimators
+        _emit_progress_line(
+            "xgboost_classifier:fit",
+            self.best_iteration_,
+            self.n_estimators,
+            detail=f"device={self.device_}",
+        )
         print(
             json.dumps(
                 {
@@ -1585,7 +1707,7 @@ class TorchMLPRegressor:
 
         dataset = torch.utils.data.TensorDataset(
             torch.from_numpy(x_values.astype(np.float32)),
-            torch.from_numpy(y_values.astype(np.float32)),
+            torch.from_numpy(y_values.astype(np.int64 if self._is_multiclass() else np.float32)),
         )
         loader = torch.utils.data.DataLoader(
             dataset,
@@ -2413,11 +2535,99 @@ class XGBoostClassifier:
         patience: int = 25,
         random_state: int = 47,
         prefer_gpu: bool = True,
+        num_classes: int = 2,
     ) -> None:
         self.n_estimators = n_estimators
         self.patience = patience
         self.random_state = random_state
         self.prefer_gpu = prefer_gpu
+        self.num_classes = int(num_classes)
+
+    def _is_multiclass(self) -> bool:
+        return int(getattr(self, "num_classes", 2)) > 2
+
+    def _target_values(self, y: pd.DataFrame, *, dtype=np.float32) -> np.ndarray:
+        values = _as_array(y).reshape(-1)
+        if self._is_multiclass():
+            return values.astype(np.int32)
+        return values.astype(dtype)
+
+    def _constant_model(self, y_values: np.ndarray):
+        if self._is_multiclass():
+            label = int(y_values[0]) if len(y_values) else 0
+            return _ConstantClassProbabilityClassifier(label, int(self.num_classes))
+        return _ConstantProbabilityClassifier(float(y_values[0]) if len(y_values) else 0.0)
+
+    def _training_params(self, *, y_values: np.ndarray, nthread: int) -> dict[str, object]:
+        params: dict[str, object] = {
+            "learning_rate": 0.03,
+            "max_depth": 4,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "tree_method": "hist",
+            "device": self.device_,
+            "seed": self.random_state,
+            "nthread": nthread,
+        }
+        if self._is_multiclass():
+            params.update(
+                {
+                    "objective": "multi:softprob",
+                    "num_class": int(self.num_classes),
+                    "eval_metric": "mlogloss",
+                }
+            )
+        else:
+            scale_pos_weight = float((len(y_values) - y_values.sum()) / max(y_values.sum(), 1.0))
+            params.update(
+                {
+                    "objective": "binary:logistic",
+                    "eval_metric": "logloss",
+                    "scale_pos_weight": max(scale_pos_weight, 1.0),
+                }
+            )
+        return params
+
+    def _estimator_kwargs(self, *, y_values: np.ndarray, n_estimators: int, nthread: int) -> dict[str, object]:
+        kwargs: dict[str, object] = {
+            "n_estimators": int(n_estimators),
+            "learning_rate": 0.03,
+            "max_depth": 4,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "random_state": self.random_state,
+            "n_jobs": nthread,
+            "tree_method": "hist",
+            "device": getattr(self, "device_", "cpu"),
+        }
+        if self._is_multiclass():
+            kwargs.update(
+                {
+                    "objective": "multi:softprob",
+                    "num_class": int(self.num_classes),
+                    "eval_metric": "mlogloss",
+                }
+            )
+        else:
+            scale_pos_weight = float((len(y_values) - y_values.sum()) / max(y_values.sum(), 1.0))
+            kwargs.update(
+                {
+                    "objective": "binary:logistic",
+                    "eval_metric": "logloss",
+                    "scale_pos_weight": max(scale_pos_weight, 1.0),
+                }
+            )
+        return kwargs
+
+    def _format_prediction(self, values: np.ndarray) -> np.ndarray:
+        arr = np.asarray(values, dtype=np.float64)
+        if self._is_multiclass():
+            if arr.ndim == 1:
+                arr = arr.reshape(-1, int(self.num_classes))
+            return arr[:, : int(self.num_classes)]
+        if arr.ndim == 2 and arr.shape[1] >= 2:
+            return arr[:, 1:2]
+        return arr.reshape(-1, 1)
 
     def _preprocess(self, x: pd.DataFrame, *, fit: bool) -> np.ndarray:
         from sklearn.impute import SimpleImputer
@@ -2693,33 +2903,19 @@ class XGBoostClassifier:
             return self._fit_lazy(x, y, val_x=val_x, val_y=val_y)
         x_train = self._preprocess(x, fit=True)
         x_val = self._preprocess(val_x, fit=False) if val_x is not None else None
-        y_train = _as_array(y).reshape(-1)
+        y_train = self._target_values(y, dtype=np.float64)
         if np.unique(y_train).size < 2:
-            self.model_ = _ConstantProbabilityClassifier(float(y_train[0]) if len(y_train) else 0.0)
+            self.model_ = self._constant_model(y_train)
             self.best_iteration_ = 1
             self.device_ = "cpu"
             self.gpu_fallback_error_ = ""
             return self
-        y_val_arr = _as_array(val_y).reshape(-1) if val_y is not None else None
-        scale_pos_weight = float((len(y_train) - y_train.sum()) / max(y_train.sum(), 1.0))
+        y_val_arr = self._target_values(val_y, dtype=np.float64) if val_y is not None else None
         self.gpu_fallback_error_ = ""
         self.device_ = _xgboost_device(self.prefer_gpu)
         nthread = _xgboost_nthread()
-        estimator_kwargs = {
-            "n_estimators": self.n_estimators,
-            "learning_rate": 0.03,
-            "max_depth": 4,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "objective": "binary:logistic",
-            "random_state": self.random_state,
-            "n_jobs": nthread,
-            "tree_method": "hist",
-            "device": self.device_,
-            "eval_metric": "logloss",
-            "scale_pos_weight": max(scale_pos_weight, 1.0),
-            "early_stopping_rounds": self.patience if x_val is not None and y_val_arr is not None else None,
-        }
+        estimator_kwargs = self._estimator_kwargs(y_values=y_train, n_estimators=self.n_estimators, nthread=nthread)
+        estimator_kwargs["early_stopping_rounds"] = self.patience if x_val is not None and y_val_arr is not None else None
         estimator = XGBClassifier(**estimator_kwargs)
         try:
             if x_val is not None and y_val_arr is not None:
@@ -2748,25 +2944,13 @@ class XGBoostClassifier:
         import xgboost as xgb
 
         if hasattr(x, "iter_numpy_batches"):
-            y_full = _as_array(y).reshape(-1).astype(np.float32)
+            y_full = self._target_values(y)
             if np.unique(y_full).size < 2:
-                self.model_ = _ConstantProbabilityClassifier(float(y_full[0]) if len(y_full) else 0.0)
+                self.model_ = self._constant_model(y_full)
                 return self
-            scale_pos_weight = float((len(y_full) - y_full.sum()) / max(y_full.sum(), 1.0))
             nthread = _xgboost_nthread()
-            params = {
-                "learning_rate": 0.03,
-                "max_depth": 4,
-                "subsample": 0.8,
-                "colsample_bytree": 0.8,
-                "objective": "binary:logistic",
-                "tree_method": "hist",
-                "device": getattr(self, "device_", "cpu"),
-                "eval_metric": "logloss",
-                "scale_pos_weight": max(scale_pos_weight, 1.0),
-                "seed": self.random_state,
-                "nthread": nthread,
-            }
+            self.device_ = getattr(self, "device_", "cpu")
+            params = self._training_params(y_values=y_full, nthread=nthread)
             rounds = int(getattr(self, "best_iteration_", self.n_estimators))
             if _xgboost_training_mode(len(x)) == "chunked":
                 self.model_, self.best_iteration_ = self._train_lazy_chunks(
@@ -2794,7 +2978,19 @@ class XGBoostClassifier:
                 ),
                 flush=True,
             )
-            self.model_ = xgb.train(params, dtrain, num_boost_round=rounds, verbose_eval=False)
+            self.model_ = xgb.train(
+                params,
+                dtrain,
+                num_boost_round=rounds,
+                verbose_eval=False,
+                callbacks=[_make_xgboost_progress_callback(xgb, model_name="xgboost_classifier", phase="refit_full", total_rounds=rounds)],
+            )
+            _emit_progress_line(
+                "xgboost_classifier:refit_full",
+                rounds,
+                rounds,
+                detail=f"device={params['device']}",
+            )
             print(
                 json.dumps(
                     {
@@ -2806,26 +3002,17 @@ class XGBoostClassifier:
             )
             return self
         x_full = self._preprocess(x, fit=True)
-        y_full = _as_array(y).reshape(-1)
+        y_full = self._target_values(y, dtype=np.float64)
         if np.unique(y_full).size < 2:
-            self.model_ = _ConstantProbabilityClassifier(float(y_full[0]) if len(y_full) else 0.0)
+            self.model_ = self._constant_model(y_full)
             return self
-        scale_pos_weight = float((len(y_full) - y_full.sum()) / max(y_full.sum(), 1.0))
         nthread = _xgboost_nthread()
-        estimator_kwargs = {
-            "n_estimators": int(getattr(self, "best_iteration_", self.n_estimators)),
-            "learning_rate": 0.03,
-            "max_depth": 4,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "objective": "binary:logistic",
-            "random_state": self.random_state,
-            "n_jobs": nthread,
-            "tree_method": "hist",
-            "device": getattr(self, "device_", "cpu"),
-            "eval_metric": "logloss",
-            "scale_pos_weight": max(scale_pos_weight, 1.0),
-        }
+        self.device_ = getattr(self, "device_", "cpu")
+        estimator_kwargs = self._estimator_kwargs(
+            y_values=y_full,
+            n_estimators=int(getattr(self, "best_iteration_", self.n_estimators)),
+            nthread=nthread,
+        )
         self.model_ = XGBClassifier(**estimator_kwargs)
         try:
             self.model_.fit(x_full, y_full, verbose=False)
@@ -2849,15 +3036,15 @@ class XGBoostClassifier:
                 batch_size = 262_144
             for _, batch in x.iter_numpy_batches(batch_size=batch_size, shuffle=False):
                 values = np.nan_to_num(batch.astype(np.float32, copy=False), nan=0.0, posinf=0.0, neginf=0.0)
-                outputs.append(np.asarray(self.model_.predict(xgb.DMatrix(values)), dtype=np.float64).reshape(-1, 1))
+                outputs.append(self._format_prediction(self.model_.predict(xgb.DMatrix(values))))
             if not outputs:
-                return np.empty((0, 1), dtype=np.float64)
+                return np.empty((0, int(self.num_classes) if self._is_multiclass() else 1), dtype=np.float64)
             return np.vstack(outputs)
         x_values = self._preprocess(x, fit=False)
         if not hasattr(self.model_, "predict_proba"):
             values = np.nan_to_num(x_values.astype(np.float32, copy=False), nan=0.0, posinf=0.0, neginf=0.0)
-            return np.asarray(self.model_.predict(xgb.DMatrix(values)), dtype=np.float64).reshape(-1, 1)
-        return self.model_.predict_proba(x_values)[:, 1:2].astype(np.float64)
+            return self._format_prediction(self.model_.predict(xgb.DMatrix(values)))
+        return self._format_prediction(self.model_.predict_proba(x_values)).astype(np.float64)
 
 
 class SklearnMLPClassifier:
@@ -2982,6 +3169,7 @@ class TorchMLPClassifier:
         patience: int = 10,
         batch_size: int = 512,
         random_state: int = 59,
+        num_classes: int = 2,
     ) -> None:
         self.hidden_units = hidden_units
         self.learning_rate = learning_rate
@@ -2989,8 +3177,34 @@ class TorchMLPClassifier:
         self.patience = patience
         self.batch_size = batch_size
         self.random_state = random_state
+        self.num_classes = int(num_classes)
         self.device = _default_torch_device()
         self.x_scaler = Standardizer()
+
+    def _is_multiclass(self) -> bool:
+        return int(getattr(self, "num_classes", 2)) > 2
+
+    def _output_dim(self) -> int:
+        return int(self.num_classes) if self._is_multiclass() else 1
+
+    def _target_values(self, y: pd.DataFrame) -> np.ndarray:
+        values = _as_array(y).reshape(-1)
+        if self._is_multiclass():
+            return values.astype(np.int64)
+        return values.reshape(-1, 1).astype(np.float32)
+
+    def _constant_prediction(self, count: int) -> np.ndarray:
+        if hasattr(self, "constant_class_"):
+            out = np.zeros((count, int(self.num_classes)), dtype=np.float64)
+            if count:
+                out[:, int(self.constant_class_)] = 1.0
+            return out
+        return np.full((count, 1), float(self.constant_probability_), dtype=np.float64)
+
+    def _clear_constant_state(self) -> None:
+        for name in ("constant_probability_", "constant_class_"):
+            if hasattr(self, name):
+                delattr(self, name)
 
     def _resolve_device(self):
         import torch
@@ -3012,7 +3226,7 @@ class TorchMLPClassifier:
             torch.nn.Dropout(0.05),
             torch.nn.Linear(self.hidden_units, max(self.hidden_units // 2, 16)),
             torch.nn.ReLU(),
-            torch.nn.Linear(max(self.hidden_units // 2, 16), 1),
+            torch.nn.Linear(max(self.hidden_units // 2, 16), self._output_dim()),
         )
 
     def _fit_fixed_epochs(self, x_values: np.ndarray, y_values: np.ndarray, epochs: int) -> None:
@@ -3027,7 +3241,7 @@ class TorchMLPClassifier:
             **_torch_loader_kwargs(device=self.device_.type, shuffle=True, batch_size=min(self.batch_size, len(dataset))),
         )
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
-        loss_fn = torch.nn.BCEWithLogitsLoss()
+        loss_fn = torch.nn.CrossEntropyLoss() if self._is_multiclass() else torch.nn.BCEWithLogitsLoss()
         self.model_.train()
         total_batches = len(loader)
         progress_every = _torch_progress_every(total_batches)
@@ -3035,7 +3249,10 @@ class TorchMLPClassifier:
         for epoch in range(max(epochs, 1)):
             for batch_index, (batch_x, batch_y) in enumerate(loader, start=1):
                 pred = self.model_(_move_tensor(batch_x, self.device_))
-                loss = loss_fn(pred, _move_tensor(batch_y, self.device_))
+                if self._is_multiclass():
+                    loss = loss_fn(pred, _move_tensor(batch_y.long(), self.device_))
+                else:
+                    loss = loss_fn(pred, _move_tensor(batch_y, self.device_))
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -3058,11 +3275,31 @@ class TorchMLPClassifier:
                         ),
                         flush=True,
                     )
+                    _emit_progress_line(
+                        "torch_seq_static_classifier:refit_full",
+                        batch_index,
+                        total_batches,
+                        detail=(
+                            f"epoch={epoch + 1}/{max(epochs, 1)} "
+                            f"loss={float(loss.detach().cpu().item()):.5f} "
+                            f"device={self.device_}"
+                        ),
+                    )
+                    _emit_progress_line(
+                        "torch_mlp_classifier:refit_full",
+                        batch_index,
+                        total_batches,
+                        detail=(
+                            f"epoch={epoch + 1}/{max(epochs, 1)} "
+                            f"loss={float(loss.detach().cpu().item()):.5f} "
+                            f"device={self.device_}"
+                        ),
+                    )
 
     def _lazy_logloss(self, x, y_values: np.ndarray, mean_t, scale_t) -> float:
         import torch
 
-        loss_fn = torch.nn.BCEWithLogitsLoss()
+        loss_fn = torch.nn.CrossEntropyLoss() if self._is_multiclass() else torch.nn.BCEWithLogitsLoss()
         losses: list[float] = []
         self.model_.eval()
         with torch.no_grad():
@@ -3070,7 +3307,11 @@ class TorchMLPClassifier:
                 xb = torch.from_numpy(batch.astype(np.float32)).to(self.device_)
                 xb = (torch.nan_to_num(xb, nan=0.0) - mean_t) / scale_t
                 yb = torch.from_numpy(y_values[local_rows]).to(self.device_)
-                losses.append(float(loss_fn(self.model_(xb), yb).item()))
+                logits = self.model_(xb)
+                if self._is_multiclass():
+                    losses.append(float(loss_fn(logits, yb.long()).item()))
+                else:
+                    losses.append(float(loss_fn(logits, yb).item()))
         return float(np.mean(losses)) if losses else np.inf
 
     def _fit_lazy(
@@ -3087,16 +3328,20 @@ class TorchMLPClassifier:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.random_state)
         self._resolve_device()
-        y_train = _as_array(y).reshape(-1, 1).astype(np.float32)
+        self._clear_constant_state()
+        y_train = self._target_values(y)
         if np.unique(y_train).size < 2:
-            self.constant_probability_ = float(y_train[0, 0]) if len(y_train) else 0.0
+            if self._is_multiclass():
+                self.constant_class_ = int(y_train[0]) if len(y_train) else 0
+            else:
+                self.constant_probability_ = float(y_train[0, 0]) if len(y_train) else 0.0
             self.best_epoch_ = 1
             return self
         self.x_scaler.fit_batches(_tabular_scaler_batches(x, phase="fit"), width=x.shape[1])
-        y_val_arr = _as_array(val_y).reshape(-1, 1).astype(np.float32) if val_y is not None else None
+        y_val_arr = self._target_values(val_y) if val_y is not None else None
         self.model_ = self._build_model(x.shape[1]).to(self.device_)
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
-        loss_fn = torch.nn.BCEWithLogitsLoss()
+        loss_fn = torch.nn.CrossEntropyLoss() if self._is_multiclass() else torch.nn.BCEWithLogitsLoss()
         mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32)).to(self.device_)
         scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32)).to(self.device_)
         best_state = copy.deepcopy(self.model_.state_dict())
@@ -3120,7 +3365,10 @@ class TorchMLPClassifier:
                 xb = (torch.nan_to_num(xb, nan=0.0) - mean_t) / scale_t
                 yb = torch.from_numpy(y_train[local_rows]).to(self.device_)
                 logits = self.model_(xb)
-                loss = loss_fn(logits, yb)
+                if self._is_multiclass():
+                    loss = loss_fn(logits, yb.long())
+                else:
+                    loss = loss_fn(logits, yb)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -3142,6 +3390,26 @@ class TorchMLPClassifier:
                             }
                         ),
                         flush=True,
+                    )
+                    _emit_progress_line(
+                        "torch_seq_static_classifier:fit",
+                        batch_index,
+                        total_batches,
+                        detail=(
+                            f"epoch={epoch + 1}/{self.max_epochs} "
+                            f"loss={float(loss.detach().cpu().item()):.5f} "
+                            f"device={self.device_}"
+                        ),
+                    )
+                    _emit_progress_line(
+                        "torch_mlp_classifier:fit",
+                        batch_index,
+                        total_batches,
+                        detail=(
+                            f"epoch={epoch + 1}/{self.max_epochs} "
+                            f"loss={float(loss.detach().cpu().item()):.5f} "
+                            f"device={self.device_}"
+                        ),
                     )
             metric = (
                 self._lazy_logloss(val_x, y_val_arr, mean_t, scale_t)
@@ -3168,6 +3436,12 @@ class TorchMLPClassifier:
                 ),
                 flush=True,
             )
+            _emit_progress_line(
+                "torch_mlp_classifier:epoch",
+                epoch + 1,
+                self.max_epochs,
+                detail=f"best_epoch={best_epoch} metric={best_metric:.5f} device={self.device_}",
+            )
             if val_x is not None and epochs_without_improvement >= self.patience:
                 break
         self.model_.load_state_dict(best_state)
@@ -3190,14 +3464,18 @@ class TorchMLPClassifier:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.random_state)
         self._resolve_device()
+        self._clear_constant_state()
         x_train = self.x_scaler.fit(_as_array(x)).transform(_as_array(x)).astype(np.float32)
-        y_train = _as_array(y).reshape(-1, 1).astype(np.float32)
+        y_train = self._target_values(y)
         if np.unique(y_train).size < 2:
-            self.constant_probability_ = float(y_train[0, 0]) if len(y_train) else 0.0
+            if self._is_multiclass():
+                self.constant_class_ = int(y_train[0]) if len(y_train) else 0
+            else:
+                self.constant_probability_ = float(y_train[0, 0]) if len(y_train) else 0.0
             self.best_epoch_ = 1
             return self
         x_val = self.x_scaler.transform(_as_array(val_x)).astype(np.float32) if val_x is not None else None
-        y_val_arr = _as_array(val_y).reshape(-1, 1).astype(np.float32) if val_y is not None else None
+        y_val_arr = self._target_values(val_y) if val_y is not None else None
         self.model_ = self._build_model(x_train.shape[1]).to(self.device_)
         dataset = torch.utils.data.TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train))
         loader = torch.utils.data.DataLoader(
@@ -3205,7 +3483,7 @@ class TorchMLPClassifier:
             **_torch_loader_kwargs(device=self.device_.type, shuffle=True, batch_size=min(self.batch_size, len(dataset))),
         )
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
-        loss_fn = torch.nn.BCEWithLogitsLoss()
+        loss_fn = torch.nn.CrossEntropyLoss() if self._is_multiclass() else torch.nn.BCEWithLogitsLoss()
         best_state = copy.deepcopy(self.model_.state_dict())
         best_metric = np.inf
         best_epoch = 1
@@ -3214,7 +3492,10 @@ class TorchMLPClassifier:
             self.model_.train()
             for batch_x, batch_y in loader:
                 pred = self.model_(_move_tensor(batch_x, self.device_))
-                loss = loss_fn(pred, _move_tensor(batch_y, self.device_))
+                if self._is_multiclass():
+                    loss = loss_fn(pred, _move_tensor(batch_y.long(), self.device_))
+                else:
+                    loss = loss_fn(pred, _move_tensor(batch_y, self.device_))
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -3223,8 +3504,11 @@ class TorchMLPClassifier:
             self.model_.eval()
             with torch.no_grad():
                 logits = self.model_(_move_tensor(torch.from_numpy(metric_x), self.device_)).detach().cpu().numpy()
-            prob = 1.0 / (1.0 + np.exp(-logits))
-            metric = float(np.nanmean(-(metric_y * np.log(np.clip(prob, EPS, 1.0 - EPS)) + (1.0 - metric_y) * np.log(np.clip(1.0 - prob, EPS, 1.0 - EPS)))))
+            if self._is_multiclass():
+                metric = _multiclass_log_loss_from_logits(logits, metric_y)
+            else:
+                prob = 1.0 / (1.0 + np.exp(-logits))
+                metric = float(np.nanmean(-(metric_y * np.log(np.clip(prob, EPS, 1.0 - EPS)) + (1.0 - metric_y) * np.log(np.clip(1.0 - prob, EPS, 1.0 - EPS)))))
             if metric + 1e-6 < best_metric:
                 best_metric = metric
                 best_state = copy.deepcopy(self.model_.state_dict())
@@ -3251,9 +3535,13 @@ class TorchMLPClassifier:
                 self.max_epochs = old_max_epochs
                 self.patience = old_patience
         x_full = self.x_scaler.fit(_as_array(x)).transform(_as_array(x)).astype(np.float32)
-        y_full = _as_array(y).reshape(-1, 1).astype(np.float32)
+        y_full = self._target_values(y)
+        self._clear_constant_state()
         if np.unique(y_full).size < 2:
-            self.constant_probability_ = float(y_full[0, 0]) if len(y_full) else 0.0
+            if self._is_multiclass():
+                self.constant_class_ = int(y_full[0]) if len(y_full) else 0
+            else:
+                self.constant_probability_ = float(y_full[0, 0]) if len(y_full) else 0.0
             return self
         self._resolve_device()
         self.model_ = self._build_model(x_full.shape[1]).to(self.device_)
@@ -3263,8 +3551,8 @@ class TorchMLPClassifier:
     def predict(self, x: pd.DataFrame) -> np.ndarray:
         import torch
 
-        if hasattr(self, "constant_probability_"):
-            return np.full((len(x), 1), float(self.constant_probability_), dtype=np.float64)
+        if hasattr(self, "constant_probability_") or hasattr(self, "constant_class_"):
+            return self._constant_prediction(len(x))
         self._resolve_device()
         self.model_ = self.model_.to(self.device_)
         self.model_.eval()
@@ -3277,13 +3565,18 @@ class TorchMLPClassifier:
                     xb = torch.from_numpy(batch.astype(np.float32)).to(self.device_)
                     xb = (torch.nan_to_num(xb, nan=0.0) - mean_t) / scale_t
                     logits = self.model_(xb).detach().cpu().numpy()
-                    outputs.append(1.0 / (1.0 + np.exp(-logits)))
+                    if self._is_multiclass():
+                        outputs.append(_softmax_numpy(logits))
+                    else:
+                        outputs.append(1.0 / (1.0 + np.exp(-logits)))
             if not outputs:
-                return np.empty((0, 1), dtype=np.float64)
+                return np.empty((0, self._output_dim()), dtype=np.float64)
             return np.vstack(outputs).astype(np.float64)
         x_values = self.x_scaler.transform(_as_array(x)).astype(np.float32)
         with torch.no_grad():
             logits = self.model_(_move_tensor(torch.from_numpy(x_values), self.device_)).detach().cpu().numpy()
+        if self._is_multiclass():
+            return _softmax_numpy(logits).astype(np.float64)
         return (1.0 / (1.0 + np.exp(-logits))).astype(np.float64)
 
     def __getstate__(self) -> dict[str, object]:
@@ -3311,6 +3604,7 @@ class TorchSequenceStaticClassifier:
         patience: int = 4,
         batch_size: int = 512,
         random_state: int = 61,
+        num_classes: int = 2,
     ) -> None:
         self.window_length = window_length
         self.hidden_dim = hidden_dim
@@ -3319,8 +3613,37 @@ class TorchSequenceStaticClassifier:
         self.patience = patience
         self.batch_size = batch_size
         self.random_state = random_state
+        self.num_classes = int(num_classes)
         self.device = _default_torch_device()
         self.x_scaler = Standardizer()
+
+    def _is_multiclass(self) -> bool:
+        return int(getattr(self, "num_classes", 2)) > 2
+
+    def _output_dim(self) -> int:
+        return int(self.num_classes) if self._is_multiclass() else 1
+
+    def _target_values(self, y: pd.DataFrame) -> np.ndarray:
+        values = _as_array(y).reshape(-1)
+        if self._is_multiclass():
+            return values.astype(np.int64)
+        return values.reshape(-1, 1).astype(np.float32)
+
+    def _target_frame(self, values: np.ndarray, columns: Sequence[str]) -> pd.DataFrame:
+        return pd.DataFrame(np.asarray(values).reshape(-1, 1), columns=columns)
+
+    def _constant_prediction(self, count: int) -> np.ndarray:
+        if hasattr(self, "constant_class_"):
+            out = np.zeros((count, int(self.num_classes)), dtype=np.float64)
+            if count:
+                out[:, int(self.constant_class_)] = 1.0
+            return out
+        return np.full((count, 1), float(self.constant_probability_), dtype=np.float64)
+
+    def _clear_constant_state(self) -> None:
+        for name in ("constant_probability_", "constant_class_"):
+            if hasattr(self, name):
+                delattr(self, name)
 
     def _resolve_device(self):
         import torch
@@ -3352,7 +3675,7 @@ class TorchSequenceStaticClassifier:
         return _SequenceStaticNet(
             sequence_dim=sequence_dim,
             static_cardinalities=static_cardinalities,
-            output_dim=1,
+            output_dim=self._output_dim(),
             window_length=self.window_length,
             hidden_dim=self.hidden_dim,
         )
@@ -3366,7 +3689,7 @@ class TorchSequenceStaticClassifier:
             shuffle=False,
             batch_size=self.batch_size,
         )
-        loss_fn = torch.nn.BCEWithLogitsLoss()
+        loss_fn = torch.nn.CrossEntropyLoss() if self._is_multiclass() else torch.nn.BCEWithLogitsLoss()
         mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32)).to(self.device_)
         scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32)).to(self.device_)
         self.model_.eval()
@@ -3375,7 +3698,10 @@ class TorchSequenceStaticClassifier:
             for sequence, static_ids, target in loader:
                 sequence = self._prepare_sequence_tensor(_move_tensor(sequence, self.device_), mean_t, scale_t)
                 logits = self.model_(sequence, _move_tensor(static_ids.long(), self.device_))
-                losses.append(float(loss_fn(logits, _move_tensor(target.float(), self.device_)).item()))
+                if self._is_multiclass():
+                    losses.append(float(loss_fn(logits, _move_tensor(target.long().view(-1), self.device_)).item()))
+                else:
+                    losses.append(float(loss_fn(logits, _move_tensor(target.float(), self.device_)).item()))
         return float(np.mean(losses)) if losses else np.inf
 
     def _train_epochs(self, dataset: _SequenceStaticDataset, epochs: int) -> None:
@@ -3389,7 +3715,7 @@ class TorchSequenceStaticClassifier:
             random_state=self.random_state,
         )
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
-        loss_fn = torch.nn.BCEWithLogitsLoss()
+        loss_fn = torch.nn.CrossEntropyLoss() if self._is_multiclass() else torch.nn.BCEWithLogitsLoss()
         mean_t = torch.from_numpy(self.x_scaler.mean_.astype(np.float32)).to(self.device_)
         scale_t = torch.from_numpy(self.x_scaler.scale_.astype(np.float32)).to(self.device_)
         self.model_.train()
@@ -3400,7 +3726,10 @@ class TorchSequenceStaticClassifier:
             for batch_index, (sequence, static_ids, target) in enumerate(loader, start=1):
                 sequence = self._prepare_sequence_tensor(_move_tensor(sequence, self.device_), mean_t, scale_t)
                 logits = self.model_(sequence, _move_tensor(static_ids.long(), self.device_))
-                loss = loss_fn(logits, _move_tensor(target.float(), self.device_))
+                if self._is_multiclass():
+                    loss = loss_fn(logits, _move_tensor(target.long().view(-1), self.device_))
+                else:
+                    loss = loss_fn(logits, _move_tensor(target.float(), self.device_))
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -3449,17 +3778,21 @@ class TorchSequenceStaticClassifier:
             self._train_cutoff_date(x["metadata"]),
             width=len(x["store"].feature_columns),
         )
-        y_train = _as_array(y).reshape(-1, 1).astype(np.float32)
+        self._clear_constant_state()
+        y_train = self._target_values(y)
         if np.unique(y_train).size < 2:
-            self.constant_probability_ = float(y_train[0, 0]) if len(y_train) else 0.0
+            if self._is_multiclass():
+                self.constant_class_ = int(y_train[0]) if len(y_train) else 0
+            else:
+                self.constant_probability_ = float(y_train[0, 0]) if len(y_train) else 0.0
             self.best_epoch_ = 1
             return self
-        y_val_arr = _as_array(val_y).reshape(-1, 1).astype(np.float32) if val_y is not None else None
+        y_val_arr = self._target_values(val_y) if val_y is not None else None
         train_dataset = _SequenceStaticDataset(
             store=x["store"],
             metadata=x["metadata"],
             static_categorical=x["static_categorical"],
-            target_frame=pd.DataFrame(y_train, columns=y.columns),
+            target_frame=self._target_frame(y_train, y.columns),
             window_length=self.window_length,
             static_columns=self.static_columns_,
         )
@@ -3469,7 +3802,7 @@ class TorchSequenceStaticClassifier:
                 store=val_x["store"],
                 metadata=val_x["metadata"],
                 static_categorical=val_x["static_categorical"],
-                target_frame=pd.DataFrame(y_val_arr, columns=val_y.columns),
+                target_frame=self._target_frame(y_val_arr, val_y.columns),
                 window_length=self.window_length,
                 static_columns=self.static_columns_,
             )
@@ -3478,7 +3811,7 @@ class TorchSequenceStaticClassifier:
             static_cardinalities=self.static_vocab_sizes_,
         ).to(self.device_)
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate, weight_decay=1e-4)
-        loss_fn = torch.nn.BCEWithLogitsLoss()
+        loss_fn = torch.nn.CrossEntropyLoss() if self._is_multiclass() else torch.nn.BCEWithLogitsLoss()
         train_loader = _sequence_data_loader(
             train_dataset,
             device=self.device_.type,
@@ -3500,7 +3833,10 @@ class TorchSequenceStaticClassifier:
             for batch_index, (sequence, static_ids, target) in enumerate(train_loader, start=1):
                 sequence = self._prepare_sequence_tensor(_move_tensor(sequence, self.device_), mean_t, scale_t)
                 logits = self.model_(sequence, _move_tensor(static_ids.long(), self.device_))
-                loss = loss_fn(logits, _move_tensor(target.float(), self.device_))
+                if self._is_multiclass():
+                    loss = loss_fn(logits, _move_tensor(target.long().view(-1), self.device_))
+                else:
+                    loss = loss_fn(logits, _move_tensor(target.float(), self.device_))
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -3544,6 +3880,12 @@ class TorchSequenceStaticClassifier:
                 ),
                 flush=True,
             )
+            _emit_progress_line(
+                "torch_seq_static_classifier:epoch",
+                epoch + 1,
+                self.max_epochs,
+                detail=f"best_epoch={best_epoch} metric={best_metric:.5f} device={self.device_}",
+            )
             if val_dataset is not None and epochs_without_improvement >= self.patience:
                 break
         self.model_.load_state_dict(best_state)
@@ -3558,15 +3900,19 @@ class TorchSequenceStaticClassifier:
             self._train_cutoff_date(x["metadata"]),
             width=len(x["store"].feature_columns),
         )
-        y_train = _as_array(y).reshape(-1, 1).astype(np.float32)
+        self._clear_constant_state()
+        y_train = self._target_values(y)
         if np.unique(y_train).size < 2:
-            self.constant_probability_ = float(y_train[0, 0]) if len(y_train) else 0.0
+            if self._is_multiclass():
+                self.constant_class_ = int(y_train[0]) if len(y_train) else 0
+            else:
+                self.constant_probability_ = float(y_train[0, 0]) if len(y_train) else 0.0
             return self
         train_dataset = _SequenceStaticDataset(
             store=x["store"],
             metadata=x["metadata"],
             static_categorical=x["static_categorical"],
-            target_frame=pd.DataFrame(y_train, columns=y.columns),
+            target_frame=self._target_frame(y_train, y.columns),
             window_length=self.window_length,
             static_columns=self.static_columns_,
         )
@@ -3588,8 +3934,8 @@ class TorchSequenceStaticClassifier:
             window_length=self.window_length,
             static_columns=self.static_columns_,
         )
-        if hasattr(self, "constant_probability_"):
-            return np.full((len(dataset), 1), float(self.constant_probability_), dtype=np.float64)
+        if hasattr(self, "constant_probability_") or hasattr(self, "constant_class_"):
+            return self._constant_prediction(len(dataset))
         self._resolve_device()
         self.model_ = self.model_.to(self.device_)
         loader = _sequence_data_loader(
@@ -3606,9 +3952,12 @@ class TorchSequenceStaticClassifier:
             for sequence, static_ids in loader:
                 sequence = self._prepare_sequence_tensor(_move_tensor(sequence, self.device_), mean_t, scale_t)
                 logits = self.model_(sequence, _move_tensor(static_ids.long(), self.device_)).detach().cpu().numpy()
-                outputs.append(1.0 / (1.0 + np.exp(-logits)))
+                if self._is_multiclass():
+                    outputs.append(_softmax_numpy(logits))
+                else:
+                    outputs.append(1.0 / (1.0 + np.exp(-logits)))
         if not outputs:
-            return np.empty((0, 1), dtype=np.float64)
+            return np.empty((0, self._output_dim()), dtype=np.float64)
         return np.vstack(outputs).astype(np.float64)
 
     def __getstate__(self) -> dict[str, object]:
@@ -3664,7 +4013,7 @@ def make_model(
         if model_name == "lightgbm_classifier":
             return LightGBMClassifier()
         if model_name == "xgboost_classifier":
-            return XGBoostClassifier()
+            return XGBoostClassifier(**kwargs)
         if model_name == "sklearn_mlp_classifier":
             return SklearnMLPClassifier()
         if model_name == "torch_mlp_classifier":
@@ -3785,14 +4134,88 @@ def evaluate_classification_predictions(
     realized_returns: pd.DataFrame | None = None,
     realized_return_column: str | None = None,
 ) -> list[dict[str, object]]:
-    from sklearn.metrics import average_precision_score, roc_auc_score
+    from sklearn.metrics import average_precision_score, f1_score, log_loss, roc_auc_score
 
     rows: list[dict[str, object]] = []
     true_values = y_true[target_columns].astype(float).to_numpy()
-    y_score = _as_2d_prediction_array(y_score, expected_columns=len(target_columns))
+    y_score = _as_2d_prediction_array(
+        y_score,
+        expected_columns=len(target_columns),
+        allow_extra_columns=len(target_columns) == 1,
+    )
     realized = None
     if realized_returns is not None and realized_return_column and realized_return_column in realized_returns.columns:
         realized = realized_returns[realized_return_column].astype(float).to_numpy()
+    if len(target_columns) == 1 and y_score.shape[1] > 1:
+        target = target_columns[0]
+        actual = true_values[:, 0].astype(int)
+        num_classes = int(y_score.shape[1])
+        positive_class = num_classes - 1
+        prob = np.clip(y_score, EPS, 1.0 - EPS)
+        prob = prob / prob.sum(axis=1, keepdims=True)
+        score = prob[:, positive_class]
+        pred_label = np.argmax(prob, axis=1)
+        positive_actual = (actual == positive_class).astype(float)
+        try:
+            pr_auc = float(average_precision_score(positive_actual, score))
+        except Exception:
+            pr_auc = None
+        if np.unique(positive_actual[np.isfinite(positive_actual)]).size >= 2:
+            try:
+                roc_auc = float(roc_auc_score(positive_actual, score))
+            except Exception:
+                roc_auc = None
+        else:
+            roc_auc = None
+        try:
+            multiclass_log_loss = float(log_loss(actual, prob, labels=list(range(num_classes))))
+        except Exception:
+            multiclass_log_loss = None
+        try:
+            macro_f1 = float(f1_score(actual, pred_label, labels=list(range(num_classes)), average="macro"))
+        except Exception:
+            macro_f1 = None
+        top_precisions: list[float] = []
+        spreads: list[float] = []
+        event_rate_spreads: list[float] = []
+        for _, group_idx in metadata.groupby("anchor_date").indices.items():
+            group_idx = np.asarray(group_idx)
+            if len(group_idx) < 10:
+                continue
+            q = max(1, int(np.ceil(len(group_idx) * 0.1)))
+            order = np.argsort(score[group_idx])
+            top_idx = group_idx[order[-q:]]
+            bottom_idx = group_idx[order[:q]]
+            top_precisions.append(float(np.nanmean(positive_actual[top_idx])))
+            event_rate_spreads.append(
+                float(np.nanmean(positive_actual[top_idx]) - np.nanmean(positive_actual[bottom_idx]))
+            )
+            if realized is not None:
+                spreads.append(float(np.nanmean(realized[top_idx]) - np.nanmean(realized[bottom_idx])))
+        row = {
+            "model_name": model_name,
+            "feature_set": feature_set,
+            "split": split_name,
+            "target": target,
+            "pr_auc": pr_auc,
+            "roc_auc": roc_auc,
+            "top_decile_precision": float(np.nanmean(top_precisions)) if top_precisions else None,
+            "top_bottom_spread": float(np.nanmean(spreads)) if spreads else None,
+            "top_bottom_event_rate_spread": float(np.nanmean(event_rate_spreads)) if event_rate_spreads else None,
+            "accuracy": float(np.nanmean(pred_label == actual)),
+            "positive_rate": float(np.nanmean(positive_actual)),
+            "macro_f1": macro_f1,
+            "multiclass_log_loss": multiclass_log_loss,
+            "positive_class": positive_class,
+            "row_count": int(len(actual)),
+            "date_count": int(metadata["anchor_date"].nunique()),
+            "realized_return_column": realized_return_column,
+        }
+        for class_idx in range(num_classes):
+            row[f"class_{class_idx}_rate"] = float(np.nanmean(actual == class_idx))
+            row[f"pred_class_{class_idx}_rate"] = float(np.nanmean(pred_label == class_idx))
+        rows.append(row)
+        return rows
     for idx, target in enumerate(target_columns):
         actual = true_values[:, idx]
         score = np.clip(y_score[:, idx], EPS, 1.0 - EPS)
@@ -3857,7 +4280,11 @@ def prediction_frame(
     task_type: str = "regression",
 ) -> pd.DataFrame:
     metadata_columns = ["ticker", "anchor_date"]
-    y_pred = _as_2d_prediction_array(y_pred, expected_columns=len(target_columns))
+    y_pred = _as_2d_prediction_array(
+        y_pred,
+        expected_columns=len(target_columns),
+        allow_extra_columns=task_type == "classification" and len(target_columns) == 1,
+    )
     if "anchor_close" in metadata.columns:
         metadata_columns.append("anchor_close")
     out = metadata[metadata_columns].copy()
@@ -3866,6 +4293,18 @@ def prediction_frame(
     out["task_type"] = task_type
     out["leaderboard_rank"] = leaderboard_rank
     out["recommended"] = recommended
+    if task_type == "classification" and len(target_columns) == 1 and y_pred.shape[1] > 1:
+        target = target_columns[0]
+        positive_class = y_pred.shape[1] - 1
+        for class_idx in range(y_pred.shape[1]):
+            out[f"pred_prob_{target}_class_{class_idx}"] = y_pred[:, class_idx]
+        out[f"pred_class_{target}"] = np.argmax(y_pred, axis=1).astype(int)
+        out[f"pred_prob_{target}"] = y_pred[:, positive_class]
+        out[f"pred_score_{target}"] = y_pred[:, positive_class] - y_pred[:, 0]
+        out[f"pred_flag_{target}"] = out[f"pred_class_{target}"] == positive_class
+        if y_true is not None:
+            out[f"actual_{target}"] = y_true[target].to_numpy()
+        return out
     for idx, target in enumerate(target_columns):
         if task_type == "classification":
             pred_col = f"pred_prob_{target}"

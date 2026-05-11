@@ -237,6 +237,11 @@ def main() -> None:
     sentiment_path = raw_dir / "eodhd_sentiment_daily.csv"
     features_path = processed_dir / "daily_features.csv"
     context_features_path = processed_dir / "market_context_features.csv"
+    normalized_path = processed_dir / "daily_features_normalized.csv"
+    normalized_manifest_path = processed_dir / "daily_features_normalized_manifest.json"
+    prediction_windows_path = processed_dir / "prediction_windows.csv"
+    episode_index_path = processed_dir / "episode_index.csv"
+    update_manifest_path = processed_dir / "eodhd_update_manifest.json"
     manifest_path = processed_dir / "daily_features_chunked_manifest.json"
     checkpoint_path = processed_dir / "daily_features_chunked_checkpoint.json"
 
@@ -256,6 +261,16 @@ def main() -> None:
     if context_features_path.exists():
         if args.force:
             context_features_path.unlink()
+    if args.force:
+        for path in (
+            normalized_path,
+            normalized_manifest_path,
+            prediction_windows_path,
+            episode_index_path,
+            update_manifest_path,
+        ):
+            if path.exists():
+                path.unlink()
     if checkpoint_path.exists() and args.force:
         checkpoint_path.unlink()
 
@@ -328,6 +343,7 @@ def main() -> None:
             "notes": [
                 "Rows are processed one contiguous raw ticker block at a time.",
                 "Full-panel cross-sectional normalization is intentionally not computed here.",
+                "Stale normalized and prediction-window artifacts are removed on force rebuild so newer processed rows are not shadowed by older downstream files.",
             ],
         },
     )

@@ -333,29 +333,27 @@ def add_fundamental_features(feature_rows: Sequence[dict[str, object]], fundamen
     fundamentals = pd.DataFrame(fundamental_rows).copy()
     fundamentals["ticker"] = fundamentals["ticker"].astype(str).str.upper()
     fundamentals["availability_date"] = pd.to_datetime(fundamentals["availability_date"].astype(str), errors="coerce")
-    fundamentals = fundamentals.dropna(subset=["ticker", "availability_date"]).sort_values(["ticker", "availability_date"])
-
-    pieces: list[pd.DataFrame] = []
-    for ticker, group in features.sort_values(["ticker", "date"]).groupby("ticker", sort=False):
-        right = fundamentals[fundamentals["ticker"] == ticker].sort_values("availability_date")
-        left = group.sort_values("date")
-        if right.empty:
-            merged = left.copy()
-            for column in FUNDAMENTAL_FEATURE_COLUMNS:
-                merged[column] = 1.0 if column == "fundamental_missing" else np.nan
-        else:
-            merged = pd.merge_asof(
-                left,
-                right.drop(columns=["ticker", "eodhd_symbol"], errors="ignore"),
-                left_on="date",
-                right_on="availability_date",
-                direction="backward",
-            )
-            merged["fundamental_missing"] = merged["availability_date"].isna().astype(float)
-            merged["fundamental_staleness_days"] = (merged["date"] - merged["availability_date"]).dt.days
-        pieces.append(merged)
-
-    out = pd.concat(pieces, ignore_index=True) if pieces else features
+    fundamentals = fundamentals.dropna(subset=["ticker", "availability_date"])
+    fundamentals = fundamentals.drop(columns=["eodhd_symbol"], errors="ignore")
+    if fundamentals.empty:
+        out = features.copy()
+        for column in FUNDAMENTAL_FEATURE_COLUMNS:
+            out[column] = 1.0 if column == "fundamental_missing" else np.nan
+        out["fundamental_staleness_days"] = np.nan
+    else:
+        left = features.sort_values(["date", "ticker"]).reset_index(drop=True)
+        right = fundamentals.sort_values(["availability_date", "ticker"]).reset_index(drop=True)
+        out = pd.merge_asof(
+            left,
+            right,
+            left_on="date",
+            right_on="availability_date",
+            by="ticker",
+            direction="backward",
+        )
+        out["fundamental_missing"] = out["availability_date"].isna().astype(float)
+        out["fundamental_staleness_days"] = (out["date"] - out["availability_date"]).dt.days
+        out = out.sort_values(["ticker", "date"]).reset_index(drop=True)
     for column in FUNDAMENTAL_FEATURE_COLUMNS:
         if column not in out.columns:
             out[column] = 1.0 if column == "fundamental_missing" else np.nan

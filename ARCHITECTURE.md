@@ -72,11 +72,17 @@ Current implementation snapshot:
 - Massive-era datasets and model artifacts are legacy and should not be compared directly against EODHD full-universe results.
 - Full-universe EODHD raw collection uses `scripts/update_eodhd_daily_dataset.py --fetch-only --max-tickers 0`; per-ticker daily features can be generated through the standard profile runner: `py -3.11 scripts/run_v1_pipeline.py --profile eodhd_full_walk_forward --stage build_features`. The existing in-memory processed rebuild path is reserved for smoke/pilot panels, and full-panel cross-sectional normalization still needs an out-of-core path.
 - Standard walk-forward experiments should use JSON profiles under `configs/v1_runs/` through `scripts/run_v1_pipeline.py`, rather than ad hoc long command strings. Profiles can include a `materialize_panel` stage so the trainer consumes a bounded dataset root under `data/eodhd_training_panels/` instead of loading the full 34GB feature CSV.
+- `scripts/run_v1_pipeline.py` now writes stage state under `logs/v1_pipeline_state/`, supports `--resume` to skip stages already marked completed, and requests Windows keep-awake by default during non-dry-run execution so long jobs are less likely to die from sleep/power-saving behavior.
 - Full and near-full EODHD experiments should also use the `materialize_cache` stage. It creates an episode-level cache with float32 tabular matrices and memmapped sequence arrays so feature engineering runs once and model/fold training reads cached arrays.
 - `scripts/train_v1_supervised_baselines.py` now defaults to expanding-window walk-forward evaluation.
 - The code still supports regression and event classification, but the current V1 production direction is classification-only.
 - Regression targets are retained for diagnostics and research ablations, not for the standard full EODHD walk-forward run.
-- The production classification label is `market_outperform_any_20d_gt_5pct`, a PIT-safe label that is positive when pathwise benchmark-relative excess return exceeds `5%` at any point in the next 20 trading days.
+- The intended production classification label is `path_5pct_20d`.
+- `path_5pct_20d` is a 3-class path label over the next 20 trading days using close-to-close forward returns from `anchor_date`:
+  - class `0`: any forward path drawdown is `<= -5%`
+  - class `2`: the path reaches `>= +5%` without ever breaching `-5%`
+  - class `1`: otherwise neutral
+- The full 20-trading-day forward window is required. Rows without it are unlabeled and excluded from supervised training and evaluation.
 - The standard full profile `configs/v1_runs/eodhd_full_walk_forward.json` trains only the selected classifier candidates from model selection:
   - `torch_seq_static_classifier` with `stock_relative_market_sector_sentiment_sequence`
   - `torch_mlp_classifier` with `stock_relative_market_sector_fundamentals_sentiment`
@@ -92,12 +98,38 @@ Current implementation snapshot:
 - Sequence inputs have shape `[batch_size, window_length, features_per_day]`. The default `window_length` is 60 trading days, but training can override it with `--window-length`.
 - Tabular inputs have shape `[episode_count, flattened_feature_count]` and use rolling-window summary columns such as `__last`, `__mean60`, and `__std60`.
 - `torch`, `xgboost`, and `lightgbm` now prefer GPU execution when available and fall back to CPU otherwise; torch models require the local PyTorch build to report `torch.cuda.is_available()`, while XGBoost/LightGBM may attempt vendor GPU paths and record any fallback error.
-- V1 training and latest inference apply the shared broad episode eligibility filter: listed common-stock universe upstream, then as-of 60-day default history, at least 55 valid adjusted OHLCV rows, 60-day average dollar volume, adjusted close price, and exchange allowlist checks at `anchor_date`.
+- Full-run training now also uses more CPU by default when no explicit overrides are set:
+  - XGBoost defaults `V1_XGBOOST_NTHREAD` to the host CPU count instead of `1`
+  - torch dataloaders default `V1_TORCH_NUM_WORKERS` to a small positive worker count instead of `0`
+- Training logs now include human-readable progress bars in addition to JSON events:
+  - trainer-level bars across model combos, folds, and final deploy fits
+  - batch/epoch bars for `torch_mlp_classifier` and `torch_seq_static_classifier`
+  - round/chunk bars for cache-backed `xgboost_classifier`
+- V1 training, walk-forward testing, latest inference, and trading reports apply the shared broad episode eligibility filter first: listed common-stock universe upstream, then as-of 60-day default history, at least 55 valid adjusted OHLCV rows, 60-day average dollar volume, adjusted close price, and exchange allowlist checks at `anchor_date`.
+- A stricter conservative research universe then defines the actual strategy universe used for train/test/live by default. This shared gate keeps the recommendation universe focused on larger, more stable, more tradable names:
+  - major exchanges only: `NYSE`, `NASDAQ`, `AMEX`
+  - common stocks only
+  - at least `252` trading rows of history
+  - adjusted close at least `$10`
+  - 20-day and 60-day median dollar volume at least `$10M`
+  - at most `2%` zero-volume days over the last `60` trading days
+  - current dollar volume at least `20%` of the 20-day median dollar volume
+  - close above the 200-day moving average
+  - 50-day moving average above the 200-day moving average
+  - 6-month return no worse than `-15%`
+  - no worse than `35%` below the trailing 252-day high
+  - optional recent spike filter on 60-day max 1-day return and true-range behavior
+- Training and testing mechanics otherwise stay the same under `path_5pct_20d`: the same stock-window episode construction, the same cache-backed materialization path, the same expanding-window walk-forward protocol with purge gap, the same final refit flow, and the same latest-inference construction. The universe policy now applies at panel materialization, cache construction, train/test fold membership, and latest inference; it changes which rows enter the dataset but does not change fold construction or label-generation mechanics beyond removing out-of-universe rows.
+- Only `xgboost_classifier`, `torch_mlp_classifier`, and `torch_seq_static_classifier` support `path_5pct_20d`. Other classification baselines remain binary-only and are unsupported for this label mode.
+- For `path_5pct_20d`, only the output layer and prediction surface change:
+  - `xgboost_classifier` returns 3-class probabilities via `multi:softprob`
+  - `torch_mlp_classifier` and `torch_seq_static_classifier` use 3-logit output heads with cross-entropy training
+  - prediction outputs include `pred_prob_path_5pct_20d_class_0`, `pred_prob_path_5pct_20d_class_1`, `pred_prob_path_5pct_20d_class_2`, `pred_class_path_5pct_20d`, `pred_prob_path_5pct_20d` for class-2 probability, and `pred_score_path_5pct_20d = P(class 2) - P(class 0)` for default ranking
 - EODHD Fundamentals v1.1 and daily sentiment are supported as optional enrichment sources. For each `anchor_date`, fundamentals use the latest filing/public record with `availability_date <= anchor_date`; fiscal period end alone is not enough. Sentiment is lagged one trading row by default.
 - Raw identifiers such as `ticker`, `eodhd_symbol`, ISIN, CIK/CUSIP/FIGI, and company name are metadata only and are rejected from model feature columns.
 - Latest inference uses final deployment bundles saved after the walk-forward run completes. Scoring a new target-pending stock-window episode does not require retraining as long as the required features can be built.
 - Raw identifiers remain metadata at inference time. A novel ticker can be scored if it exists in the prediction dataset root, passes the same episode eligibility filter, and has enough prior window data. Unseen sector or industry categories map to unknown id `0` in static categorical encoders.
-- Current deployable full-universe classifiers, OOS metrics, and last trained/saved timestamps are tracked in `PRODUCTION_MODELS.md`.
+- `PRODUCTION_MODELS.md` tracks production promotion state. The previous binary classifier set is deprecated, and no promoted multiclass production set exists until the three supported classifiers are retrained under `path_5pct_20d`.
 - Routine data refreshes should score latest target-pending windows with saved final bundles. Do not retrain just because a new daily bar arrived.
 - Production retraining cadence is every 2 to 4 weeks, with monthly as the default. Retrain immediately only after target, feature schema, universe policy, vendor semantics, leakage, or material live/OOS monitoring changes.
 - Future training indexes write `trained_at_utc`; existing May 2026 production artifacts should use the model file save timestamp recorded in `PRODUCTION_MODELS.md`.

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import argparse
 from datetime import date, timedelta
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -13,9 +15,11 @@ import numpy as np
 import pandas as pd
 
 from src.data.episode_eligibility import EpisodeEligibilityConfig
+from src.data.research_universe import ConservativeResearchUniverseConfig
 from src.data.massive_stage1 import compute_daily_features
 from src.data.normalization import compute_normalized_feature_rows
 from src.data.v1_dataset import (
+    PATH_5PCT_20D_EVENT_TYPE,
     STATIC_CATEGORICAL_COLUMNS,
     build_category_vocabularies,
     build_latest_v1_feature_sets,
@@ -26,7 +30,9 @@ from src.data.v1_dataset import (
     chronological_split,
     encode_static_categories,
     identifier_model_input_columns,
+    pathwise_classification_labels,
     prepare_xy,
+    preferred_stock_feature_path,
     raw_level_model_input_columns,
     rows_for_dates,
 )
@@ -36,6 +42,7 @@ from src.data.v1_episode_cache import (
     load_cached_v1_dataset,
 )
 from src.models.v1_baselines import (
+    evaluate_classification_predictions,
     build_leaderboard,
     evaluate_predictions,
     load_model_bundle,
@@ -131,6 +138,149 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         self.assertLess(len(compact_sector_cols), len(sector_cols))
         self.assertGreater(len(dataset.targets), 0)
         self.assertIn("window_row_count", dataset.metadata.columns)
+
+    def test_sustained_pathwise_label_is_explicit_opt_in(self) -> None:
+        path_returns = pd.DataFrame(
+            {
+                "path_1": [0.07, 0.07, 0.02],
+                "path_2": [-0.01, 0.04, 0.03],
+                "path_3": [-0.04, 0.02, 0.04],
+                "path_4": [-0.03, 0.03, 0.04],
+                "path_5": [-0.02, 0.04, 0.04],
+            }
+        )
+
+        anytime = pathwise_classification_labels(
+            path_returns,
+            threshold=0.05,
+            event_type="anytime_pathwise_outperform",
+        )
+        sustained = pathwise_classification_labels(
+            path_returns,
+            threshold=0.05,
+            event_type="sustained_pathwise_outperform",
+        )
+
+        self.assertEqual(anytime.tolist(), [1.0, 1.0, 0.0])
+        self.assertEqual(sustained.tolist(), [0.0, 1.0, 0.0])
+        self.assertEqual(
+            classification_target_column(event_type="sustained_pathwise_outperform"),
+            "market_outperform_sustained_20d_gt_5pct",
+        )
+
+    def test_path_5pct_20d_label_boundaries_and_missing_path(self) -> None:
+        path_returns = pd.DataFrame(
+            [
+                [0.050, 0.010, 0.000],
+                [0.120, -0.050, 0.060],
+                [0.049, -0.049, 0.010],
+                [0.100, -0.051, 0.020],
+                [0.060, np.nan, 0.020],
+            ]
+        )
+
+        labels = pathwise_classification_labels(
+            path_returns,
+            threshold=0.05,
+            event_type=PATH_5PCT_20D_EVENT_TYPE,
+        )
+
+        self.assertEqual(labels.iloc[:4].tolist(), [2.0, 0.0, 1.0, 0.0])
+        self.assertTrue(np.isnan(labels.iloc[4]))
+        self.assertEqual(
+            classification_target_column(event_type=PATH_5PCT_20D_EVENT_TYPE),
+            PATH_5PCT_20D_EVENT_TYPE,
+        )
+
+    def test_path_5pct_20d_requires_full_forward_window(self) -> None:
+        stock_features, context_features = _stock_and_context_frames(ticker_count=2, days=35)
+        dataset = build_v1_dataset(
+            stock_features,
+            context_features,
+            horizons=(5,),
+            window_length=5,
+            benchmark_ticker="SPY",
+            classification_horizon=20,
+            classification_threshold=0.05,
+            classification_event_type=PATH_5PCT_20D_EVENT_TYPE,
+        )
+
+        self.assertEqual(dataset.classification_target_columns, [PATH_5PCT_20D_EVENT_TYPE])
+        self.assertTrue(set(dataset.targets[PATH_5PCT_20D_EVENT_TYPE].unique()).issubset({0.0, 1.0, 2.0}))
+        self.assertIsNotNone(dataset.labeling_summary)
+        self.assertGreater(int(dataset.labeling_summary["unlabeled_missing_forward_window_rows"]), 0)
+        self.assertEqual(dataset.labeling_summary["mode"], PATH_5PCT_20D_EVENT_TYPE)
+
+    def test_multiclass_prediction_frame_and_metrics_use_class_2_alias(self) -> None:
+        from scripts.run_trading_strategy import _prediction_column
+
+        metadata = pd.DataFrame(
+            {
+                "ticker": ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"],
+                "anchor_date": ["2024-01-02"] * 10,
+                "anchor_close": np.arange(10.0, 20.0),
+            }
+        )
+        y_true = pd.DataFrame({PATH_5PCT_20D_EVENT_TYPE: [2, 1, 0, 2, 1, 0, 2, 1, 0, 2]})
+        y_pred = np.array(
+            [
+                [0.05, 0.10, 0.85],
+                [0.10, 0.80, 0.10],
+                [0.80, 0.10, 0.10],
+                [0.10, 0.20, 0.70],
+                [0.30, 0.60, 0.10],
+                [0.70, 0.20, 0.10],
+                [0.20, 0.20, 0.60],
+                [0.20, 0.70, 0.10],
+                [0.60, 0.30, 0.10],
+                [0.20, 0.30, 0.50],
+            ]
+        )
+
+        frame = prediction_frame(
+            metadata,
+            y_pred,
+            target_columns=[PATH_5PCT_20D_EVENT_TYPE],
+            model_name="torch_mlp_classifier",
+            feature_set="stock_only",
+            y_true=y_true,
+            task_type="classification",
+        )
+        metrics = evaluate_classification_predictions(
+            metadata,
+            y_true,
+            y_pred,
+            target_columns=[PATH_5PCT_20D_EVENT_TYPE],
+            model_name="torch_mlp_classifier",
+            feature_set="stock_only",
+            split_name="val",
+        )
+
+        self.assertIn("pred_prob_path_5pct_20d_class_0", frame.columns)
+        self.assertIn("pred_prob_path_5pct_20d_class_1", frame.columns)
+        self.assertIn("pred_prob_path_5pct_20d_class_2", frame.columns)
+        self.assertIn("pred_class_path_5pct_20d", frame.columns)
+        self.assertIn("pred_score_path_5pct_20d", frame.columns)
+        self.assertTrue(np.allclose(frame["pred_prob_path_5pct_20d"], y_pred[:, 2]))
+        self.assertTrue(np.allclose(frame["pred_score_path_5pct_20d"], y_pred[:, 2] - y_pred[:, 0]))
+        self.assertEqual(_prediction_column(frame), "pred_score_path_5pct_20d")
+        self.assertEqual(frame["pred_class_path_5pct_20d"].tolist()[:3], [2, 1, 0])
+        self.assertEqual(metrics[0]["positive_class"], 2)
+        self.assertEqual(metrics[0]["row_count"], 10)
+
+    def test_path_5pct_20d_rejects_unsupported_classifier_request(self) -> None:
+        from scripts.train_v1_supervised_baselines import _resolve_model_names
+
+        args = argparse.Namespace(
+            classification_models="logistic_regression",
+            models="",
+            eval_mode="walk_forward",
+            classification_event_type=PATH_5PCT_20D_EVENT_TYPE,
+        )
+
+        with self.assertRaises(SystemExit) as raised:
+            _resolve_model_names(args, "classification")
+        self.assertIn("path_5pct_20d supports only", str(raised.exception))
 
     def test_train_evaluate_save_and_reload_model(self) -> None:
         stock_features, context_features = _stock_and_context_frames()
@@ -319,6 +469,76 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         self.assertEqual(pred.shape, (len(val_meta), 1))
         self.assertTrue(np.all((pred >= 0.0) & (pred <= 1.0)))
 
+    def test_torch_multiclass_classifiers_smoke(self) -> None:
+        x = pd.DataFrame(
+            {
+                "a": np.linspace(0.0, 1.0, 12),
+                "b": np.tile([0.0, 1.0, 2.0], 4),
+                "c": np.tile([2.0, 1.0, 0.0], 4),
+            }
+        )
+        y = pd.DataFrame({PATH_5PCT_20D_EVENT_TYPE: np.tile([0, 1, 2], 4)})
+        mlp = make_model(
+            "torch_mlp_classifier",
+            task_type="classification",
+            model_kwargs={
+                "num_classes": 3,
+                "max_epochs": 2,
+                "patience": 2,
+                "batch_size": 6,
+                "hidden_units": 8,
+            },
+        )
+        mlp.fit(x, y)
+        mlp_pred = mlp.predict(x)
+        self.assertEqual(mlp_pred.shape, (len(x), 3))
+        self.assertTrue(np.allclose(mlp_pred.sum(axis=1), 1.0, atol=1e-5))
+
+        stock_features, context_features = _stock_and_context_frames(ticker_count=3, days=28)
+        store = build_sequence_feature_store(
+            stock_features,
+            "stock_only_sequence",
+            context_features=context_features,
+            benchmark_ticker="SPY",
+        )
+        rows = []
+        for ticker in ["T00", "T01", "T02"]:
+            ticker_dates = stock_features[stock_features["ticker"] == ticker]["date"].astype(str).tolist()
+            for window_row_count in range(10, 14):
+                rows.append(
+                    {
+                        "ticker": ticker,
+                        "anchor_date": ticker_dates[window_row_count - 1],
+                        "window_row_count": window_row_count,
+                        "gics_sector": "Information Technology",
+                        "gics_sub_industry": "Software",
+                    }
+                )
+        metadata = pd.DataFrame(rows)
+        seq_y = pd.DataFrame({PATH_5PCT_20D_EVENT_TYPE: np.tile([0, 1, 2], 4)})
+        vocabularies = build_category_vocabularies(metadata, columns=STATIC_CATEGORICAL_COLUMNS)
+        seq_x = {
+            "store": store,
+            "metadata": metadata,
+            "static_categorical": encode_static_categories(metadata, vocabularies, columns=STATIC_CATEGORICAL_COLUMNS),
+        }
+        seq = make_model(
+            "torch_seq_static_classifier",
+            task_type="classification",
+            window_length=10,
+            model_kwargs={
+                "num_classes": 3,
+                "max_epochs": 1,
+                "patience": 1,
+                "batch_size": 6,
+                "hidden_dim": 16,
+            },
+        )
+        seq.fit(seq_x, seq_y, val_x=seq_x, val_y=seq_y)
+        seq_pred = seq.predict(seq_x)
+        self.assertEqual(seq_pred.shape, (len(metadata), 3))
+        self.assertTrue(np.allclose(seq_pred.sum(axis=1), 1.0, atol=1e-5))
+
     def test_latest_feature_sets_use_target_pending_windows(self) -> None:
         stock_features, context_features = _stock_and_context_frames()
 
@@ -365,6 +585,92 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         self.assertEqual(set(dataset.metadata["ticker"].unique()), {"T00"})
         self.assertIn("episode_eligible", dataset.metadata.columns)
         self.assertTrue(dataset.metadata["episode_eligible"].all())
+
+    def test_research_universe_filter_removes_small_illiquid_or_falling_windows(self) -> None:
+        stock_features, context_features = _stock_and_context_frames(ticker_count=3, days=300)
+        stock_features["exchange"] = "NASDAQ"
+        stock_features["type"] = "Common Stock"
+        stock_features.loc[stock_features["ticker"] == "T00", "dollar_volume"] = 20_000_000.0
+        stock_features.loc[stock_features["ticker"] == "T01", "dollar_volume"] = 2_000_000.0
+        stock_features.loc[stock_features["ticker"] == "T02", "close"] = np.linspace(90.0, 30.0, len(stock_features.loc[stock_features["ticker"] == "T02"]))
+        stock_features.loc[stock_features["ticker"] == "T02", "open"] = stock_features.loc[stock_features["ticker"] == "T02", "close"]
+        stock_features.loc[stock_features["ticker"] == "T02", "high"] = stock_features.loc[stock_features["ticker"] == "T02", "close"] * 1.01
+        stock_features.loc[stock_features["ticker"] == "T02", "low"] = stock_features.loc[stock_features["ticker"] == "T02", "close"] * 0.99
+        stock_features.loc[stock_features["ticker"] == "T02", "dollar_volume"] = 20_000_000.0
+        stock_features = stock_features.sort_values(["ticker", "date"]).reset_index(drop=True)
+
+        dataset = build_v1_dataset(
+            stock_features,
+            context_features,
+            horizons=(1, 5),
+            window_length=20,
+            benchmark_ticker="SPY",
+            research_config=ConservativeResearchUniverseConfig(),
+        )
+
+        self.assertEqual(set(dataset.metadata["ticker"].unique()), {"T00"})
+        self.assertIn("research_universe_ok", dataset.metadata.columns)
+        self.assertTrue(dataset.metadata["research_universe_ok"].all())
+
+    def test_materialized_panel_applies_research_universe_before_cache_build(self) -> None:
+        stock_features, context_features = _stock_and_context_frames(ticker_count=3, days=300)
+        stock_features["exchange"] = "NASDAQ"
+        stock_features["type"] = "Common Stock"
+        stock_features.loc[stock_features["ticker"] == "T00", "dollar_volume"] = 20_000_000.0
+        stock_features.loc[stock_features["ticker"] == "T01", "dollar_volume"] = 2_000_000.0
+        falling_mask = stock_features["ticker"] == "T02"
+        stock_features.loc[falling_mask, "close"] = np.linspace(90.0, 30.0, int(falling_mask.sum()))
+        stock_features.loc[falling_mask, "open"] = stock_features.loc[falling_mask, "close"]
+        stock_features.loc[falling_mask, "high"] = stock_features.loc[falling_mask, "close"] * 1.01
+        stock_features.loc[falling_mask, "low"] = stock_features.loc[falling_mask, "close"] * 0.99
+        stock_features.loc[falling_mask, "dollar_volume"] = 20_000_000.0
+        stock_features = stock_features.sort_values(["ticker", "date"]).reset_index(drop=True)
+        context_features = context_features.sort_values(["ticker", "date"]).reset_index(drop=True)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_root = Path(tmpdir)
+            dataset_root = temp_root / "dataset"
+            output_root = temp_root / "panel"
+            _write_dataset_root(dataset_root, stock_features, context_features)
+            script = REPO_ROOT / "scripts" / "materialize_v1_training_panel.py"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(script),
+                    "--source-dataset-root",
+                    str(dataset_root),
+                    "--output-dataset-root",
+                    str(output_root),
+                    "--force",
+                ],
+                cwd=REPO_ROOT,
+                check=True,
+            )
+
+            filtered = pd.read_csv(output_root / "processed" / "daily_features.csv")
+            manifest = json.loads((output_root / "processed" / "materialized_panel_manifest.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(set(filtered["ticker"].unique()), {"T00"})
+        self.assertEqual(manifest["research_universe"]["min_price"], 10.0)
+        self.assertGreater(manifest["research_universe_removed_rows"], 0)
+
+    def test_preferred_stock_feature_path_uses_newer_processed_file_when_normalized_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            processed_dir = root / "processed"
+            processed_dir.mkdir(parents=True, exist_ok=True)
+            normalized_path = processed_dir / "daily_features_normalized.csv"
+            processed_path = processed_dir / "daily_features.csv"
+            normalized_path.write_text("ticker,date,close\nAAA,2024-01-01,10\n", encoding="utf-8")
+            processed_path.write_text("ticker,date,close\nAAA,2024-01-02,11\n", encoding="utf-8")
+            old_time = normalized_path.stat().st_mtime - 10
+            new_time = processed_path.stat().st_mtime + 10
+            os.utime(normalized_path, (old_time, old_time))
+            os.utime(processed_path, (new_time, new_time))
+
+            chosen = preferred_stock_feature_path(root)
+
+        self.assertEqual(chosen.name, "daily_features.csv")
 
     def test_sequence_feature_store_can_include_market_and_sector_context(self) -> None:
         stock_features, context_features = _stock_and_context_frames(days=75)
@@ -539,6 +845,7 @@ class V1SupervisedBaselineTests(unittest.TestCase):
                     "--val-fraction",
                     "0.2",
                     "--disable-episode-eligibility-filter",
+                    "--disable-conservative-research-universe",
                 ],
                 check=True,
                 cwd=REPO_ROOT,
@@ -580,6 +887,7 @@ class V1SupervisedBaselineTests(unittest.TestCase):
                     "--compare-against-run",
                     str(legacy_run),
                     "--disable-episode-eligibility-filter",
+                    "--disable-conservative-research-universe",
                 ],
                 check=True,
                 cwd=REPO_ROOT,
@@ -653,6 +961,32 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         model = make_model("xgboost").fit(x_train, y_train, val_x=x_val, val_y=y_val)
         pred = model.predict(x_val)
         self.assertEqual(pred.shape, (len(x_val), len(dataset.target_columns)))
+
+    @unittest.skipUnless(importlib.util.find_spec("xgboost") is not None, "xgboost is not installed")
+    def test_xgboost_multiclass_classifier_smoke(self) -> None:
+        x = pd.DataFrame(
+            {
+                "a": np.linspace(0.0, 1.0, 12),
+                "b": np.tile([0.0, 1.0, 2.0], 4),
+                "c": np.tile([2.0, 1.0, 0.0], 4),
+            }
+        )
+        y = pd.DataFrame({PATH_5PCT_20D_EVENT_TYPE: np.tile([0, 1, 2], 4)})
+        model = make_model(
+            "xgboost_classifier",
+            task_type="classification",
+            model_kwargs={
+                "num_classes": 3,
+                "n_estimators": 5,
+                "patience": 2,
+                "prefer_gpu": False,
+            },
+        )
+        model.fit(x, y)
+        pred = model.predict(x)
+
+        self.assertEqual(pred.shape, (len(x), 3))
+        self.assertTrue(np.allclose(pred.sum(axis=1), 1.0, atol=1e-5))
 
 
 if __name__ == "__main__":

@@ -164,9 +164,20 @@ Suggested columns:
 V1 supervised targets:
 - Regression targets are continuous market-adjusted future returns, named `market_adjusted_return_{horizon}d`.
 - Default regression horizons are `1`, `5`, `10`, and `20` trading days.
-- The current event-classification target is `market_outperform_any_20d_gt_5pct`.
-- `market_outperform_any_20d_gt_5pct` is positive when the pathwise stock excess return over `SPY` exceeds `5%` at any point in the next 20 trading days.
+- The intended production event-classification target is `path_5pct_20d`.
+- `path_5pct_20d` uses close-to-close forward returns from `anchor_date` over the next 20 trading days:
+  - class `0`: any forward path drawdown is `<= -5%`
+  - class `2`: the path reaches `>= +5%` without ever breaching `-5%`
+  - class `1`: otherwise neutral
+- The full 20-trading-day forward window is required. Rows without it remain unlabeled and are dropped from supervised training and evaluation.
 - Targets are labels only and must not be included in model input feature columns.
+
+V1 strategy-universe policy:
+- The standard train/test/live pipeline uses two stacked filters at `anchor_date`:
+  - episode eligibility for basic data-quality and tradability checks
+  - conservative research universe for the actual strategy universe
+- The conservative research universe is shared across supervised training, walk-forward evaluation, and latest prediction ranking by default.
+- Its default purpose is to exclude small, illiquid, structurally weak, or recently unstable names before they enter the supervised classification dataset.
 
 ### Prediction window index table
 One row per latest target-pending `(ticker, anchor_date)` used for production-style inference.
@@ -185,6 +196,7 @@ Rules:
 - rows must not include realized future returns
 - use only feature rows with `date <= anchor_date`
 - keep this table separate from completed supervised episode rows
+- apply the same strategy-universe policy used by training unless a run explicitly opts out
 
 ### Daily sequence table
 One row per `(ticker, date)` for aligned daily features.
@@ -432,6 +444,7 @@ Full-universe storage policy:
 - The current pandas trainer should not point directly at the 34GB full `processed/daily_features.csv`. Use `scripts/materialize_v1_training_panel.py` through the profile runner to create a bounded dataset root under `data/eodhd_training_panels/`, with sector/industry metadata joined from `raw/eodhd_equity_metadata.csv`.
 - Full-profile training should then use `scripts/materialize_v1_episode_cache.py` through the `materialize_cache` profile stage. The cache writes episode metadata/targets, float32 tabular `.npy` matrices, and memmapped sequence row arrays so expensive feature engineering is done once before model/fold training.
 - Cache-backed training is the required path for full or near-full universe experiments. Torch sequence models read windows lazily from the memmapped sequence store; torch MLP classifiers batch from cached tabular matrices; XGBoost classifiers consume the cached float32 tabular matrix instead of rebuilding pandas feature frames per fold.
+- `path_5pct_20d` does not change that training/evaluation pipeline shape. The same panel materialization, episode cache flow, walk-forward splitting, purge gap, and final refit process remain in place; the change is the label semantics plus the supported classifier output heads.
 
 Standard dataset/run sizes:
 - Smoke runs are plumbing checks. They use very small ticker/date/episode limits and short model budgets. They should prove that feature construction, cache materialization, and training execute, but their metrics should not be used for model selection.
@@ -443,7 +456,10 @@ Production refresh, prediction, and retraining policy:
 - V1 production is classification-first. The standard full run trains `torch_seq_static_classifier`, `torch_mlp_classifier`, and `xgboost_classifier`; regression is retained only for explicit research ablations.
 - Refresh EODHD OHLCV, market context, and sentiment daily or weekly after market close when fresh predictions are needed.
 - Refresh fundamentals monthly by default, and more often around earnings/filing seasons if API quota allows. Only records with verified availability dates can become historical model features.
-- After each data refresh, build or update the prediction dataset root and score latest target-pending windows with saved final classifier bundles. Prediction does not require retraining.
+- After each data refresh, build or update the prediction dataset root and score latest target-pending windows with saved final classifier bundles. Under the intended production policy, those promoted bundles should be the three `path_5pct_20d` classifiers. Prediction does not require retraining.
+- Before producing daily trading recommendations, apply the conservative research universe filter to the latest prediction universe. The same shared filter policy is also applied during bounded/full panel materialization, episode-cache construction, and walk-forward dataset assembly so train, test, and live scoring use the same conservative universe.
+- Conservative research universe filtering is stricter than episode eligibility and screens price, liquidity, long-history availability, structural downtrends/falling knives, and recent spike-dominated paths.
+- `path_5pct_20d` is the intended production target policy, but the codebase default event type may still require explicit configuration until the retrain/promotion cycle is completed and the new run manifests are produced.
 - Retrain monthly or quarterly by default, and immediately after changes to feature schema, target definition, universe policy, vendor semantics, or clear OOS performance drift.
 - Novel tickers do not require model retraining if they pass episode eligibility and have enough prior window data in the prediction dataset. Ticker and vendor symbol identifiers remain metadata only; unseen static sector/industry categories map to unknown id `0`.
 
@@ -504,10 +520,16 @@ V1 supervised split semantics:
 - Training, validation, and OOS test splits are assigned by `anchor_date`, not by randomly shuffling episodes.
 - Current default input window is `60` trading days ending on `anchor_date`.
 - Regression labels are future market-adjusted returns measured after `anchor_date`, such as 5, 10, and 20 trading days forward, but they are no longer part of the standard full V1 run.
-- The standard classification label is `market_outperform_any_20d_gt_5pct`, positive when pathwise market-adjusted outperformance exceeds `5%` within the next 20 trading days.
+- The standard production classification label is `path_5pct_20d`.
+- `path_5pct_20d` is assigned from the next 20 trading days using close-to-close forward returns from `anchor_date`:
+  - class `0` if any forward return is `<= -5%`
+  - class `2` if the path reaches `>= +5%` and never breaches `-5%`
+  - class `1` otherwise
+- Negative overrides positive, and the full 20-day forward window is required before the row can be labeled.
 - Walk-forward folds use an expanding training date range, then a later validation block, then a purge gap, then a later OOS test block.
 - The default purge gap is the maximum forward target horizon, currently `20` trading days, to avoid validation target windows bleeding into OOS scoring windows.
 - Later folds have more training episodes because scored history is allowed to join the expanding training range.
+- `path_5pct_20d` does not otherwise change the train/validation/OOS split semantics.
 
 Final deploy fit semantics:
 - The final deploy fit is separate from reported OOS performance.

@@ -20,6 +20,7 @@ from src.data.v1_dataset import (  # noqa: E402
     load_market_context_features,
 )
 from src.data.episode_eligibility import EpisodeEligibilityConfig  # noqa: E402
+from src.data.research_universe import ConservativeResearchUniverseConfig  # noqa: E402
 from src.models.v1_baselines import load_model_bundle, prediction_frame  # noqa: E402
 
 
@@ -138,6 +139,17 @@ def _episode_eligibility_config_from_run(run_dir: Path) -> EpisodeEligibilityCon
     return EpisodeEligibilityConfig.from_mapping(payload)
 
 
+def _research_universe_config_from_run(run_dir: Path) -> ConservativeResearchUniverseConfig | None:
+    manifest_path = run_dir / "dataset_manifest.json"
+    if not manifest_path.exists():
+        return None
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload = manifest.get("research_universe")
+    if not isinstance(payload, dict) or payload.get("enabled") is False:
+        return None
+    return ConservativeResearchUniverseConfig.from_mapping(payload)
+
+
 def main() -> None:
     args = parse_args()
     run_dir = Path(args.run_dir)
@@ -151,6 +163,7 @@ def main() -> None:
     if context_features.empty:
         raise SystemExit("Market context features are missing. Run scripts/update_eodhd_daily_dataset.py first.")
     eligibility_config = _episode_eligibility_config_from_run(run_dir)
+    research_config = _research_universe_config_from_run(run_dir)
 
     regression_records = [record for record in model_index["models"] if record.get("task_type", "regression") == "regression"]
     first_model = model_index["models"][0]
@@ -161,7 +174,15 @@ def main() -> None:
         benchmark_ticker=str(first_model["benchmark_ticker"]),
         anchor_date=args.anchor_date or None,
         eligibility_config=eligibility_config,
+        research_config=research_config,
     )
+    if research_config is not None and "research_universe_ok" in metadata.columns:
+        research_mask = metadata["research_universe_ok"].fillna(False).astype(bool)
+        metadata = metadata.loc[research_mask].reset_index(drop=True)
+        for feature_set, frame in list(feature_sets.items()):
+            feature_sets[feature_set] = frame.loc[research_mask.to_numpy(dtype=bool)].reset_index(drop=True)
+    if metadata.empty:
+        raise SystemExit("No latest prediction windows passed the shared strategy-universe filter.")
     metadata = _add_anchor_close(metadata, stock_features)
     sequence_stores: dict[tuple[str, tuple[str, ...]], object] = {}
     leaderboards = {

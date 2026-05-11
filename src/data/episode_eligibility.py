@@ -52,7 +52,7 @@ _NON_COMMON_MARKERS = (
 )
 
 
-def _canonical_exchange(value: object) -> str:
+def canonical_exchange(value: object) -> str:
     exchange = str(value or "").strip().upper()
     return _EXCHANGE_ALIASES.get(exchange, exchange)
 
@@ -64,7 +64,7 @@ def parse_allowed_exchanges(value: str | Sequence[str] | None) -> tuple[str, ...
         parts = [item.strip() for item in value.split(",")]
     else:
         parts = [str(item).strip() for item in value]
-    return tuple(dict.fromkeys(_canonical_exchange(item) for item in parts if item.strip()))
+    return tuple(dict.fromkeys(canonical_exchange(item) for item in parts if item.strip()))
 
 
 @dataclass(frozen=True)
@@ -129,7 +129,7 @@ def _numeric_column(frame: pd.DataFrame, column: str) -> pd.Series:
     return pd.to_numeric(frame[column], errors="coerce")
 
 
-def _common_equity_mask(frame: pd.DataFrame) -> pd.Series:
+def common_equity_mask(frame: pd.DataFrame) -> pd.Series:
     type_columns = [
         col
         for col in ("type", "security_type", "asset_type", "eodhd_type")
@@ -220,12 +220,12 @@ def add_episode_eligibility_columns(
     )
 
     if "exchange" in out.columns:
-        exchanges = out["exchange"].apply(_canonical_exchange)
+        exchanges = out["exchange"].apply(canonical_exchange)
         out["eligibility_exchange_ok"] = exchanges.isin(config.allowed_exchanges)
     else:
         out["eligibility_exchange_ok"] = not bool(config.allowed_exchanges)
 
-    out["eligibility_common_equity_ok"] = _common_equity_mask(out)
+    out["eligibility_common_equity_ok"] = common_equity_mask(out)
     out["eligibility_history_ok"] = out["window_row_count"] >= config.min_history_days
     out["eligibility_valid_ohlcv_ok"] = out["eligibility_valid_ohlcv_rows"].fillna(0) >= config.min_valid_ohlcv_days
     out["eligibility_liquidity_ok"] = (

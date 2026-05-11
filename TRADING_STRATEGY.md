@@ -27,30 +27,33 @@ Each run should do the following:
 3. Prefer EODHD's bulk EOD endpoint for whole-exchange daily bars. Fall back to per-symbol EOD only for missing context tickers or endpoint failures.
 4. Do not refresh fundamentals or sentiment during the normal daily run. Existing saved fundamentals and sentiment are joined from local raw files.
 5. Build/update the compact latest-inference cache under `data/eodhd_us_equities_30y/processed/latest_inference/`.
-6. Load the saved final deployment model bundles.
+6. Load the promoted final deployment `path_5pct_20d` model bundles.
 7. Generate latest predictions for all eligible target-pending stock-window episodes.
-8. Rank all eligible stocks by model confidence.
-9. Identify top-ranked candidates.
-10. Check agreement across available production models.
-11. Produce entry-candidate, watchlist, ranked-prediction, and model-agreement reports.
-12. Load the current open-position ledger, if present.
-13. Review previously entered positions against updated model rank and trade-management rules.
-14. Produce a position-review report.
+8. Apply the conservative research universe filter to the latest prediction universe.
+9. Rank only stocks that pass the conservative research universe by the default multiclass score `pred_score_path_5pct_20d = P(class 2) - P(class 0)`.
+10. Identify top-ranked candidates.
+11. Check agreement across available production models.
+12. Produce entry-candidate, watchlist, ranked-prediction, model-agreement, and research-universe diagnostics reports.
+13. Load the current open-position ledger, if present.
+14. Review previously entered positions against updated model rank and trade-management rules.
+15. Produce a position-review report.
 
 ## Data and Model Assumptions
 
 Follow all existing project MD instructions and repo conventions.
 
-Use the current production classification setup.
+Use the intended production classification setup based on `path_5pct_20d`.
 
-The current production model registry is `PRODUCTION_MODELS.md`. It lists the deployed classifier bundles, their OOS metrics, and their last trained/saved timestamps.
+`PRODUCTION_MODELS.md` is the source of truth for promotion status. Under the current repo state, there is no active promoted multiclass production set until the three supported classifiers are retrained and promoted under `path_5pct_20d`.
 
 Refreshing data is separate from retraining models:
 
-- Prediction refresh: update latest data and score target-pending windows with saved final model bundles.
+- Prediction refresh: update latest data and score target-pending windows with promoted final `path_5pct_20d` model bundles.
 - Model retrain: rebuild training panels/caches and fit new deployable bundles.
 
-Do not retrain models every time new market data arrives. Use saved models for normal daily or every-few-days prediction refreshes as long as the target, feature schema, eligibility filter, and vendor semantics are unchanged.
+Do not retrain models every time new market data arrives. After the multiclass retrain/promotion step is complete, use the saved promoted models for normal daily or every-few-days prediction refreshes as long as the target, feature schema, eligibility filter, and vendor semantics are unchanged.
+
+Conservative research universe filtering is part of the standard strategy-universe policy. By default it is applied to train/test/live so the classifiers are fit and evaluated on the same larger-cap, more tradable, more stable name set that the trading reports rank.
 
 Default retrain cadence:
 
@@ -62,21 +65,23 @@ Do not expose proprietary model internals in output reports. Reports should only
 
 Do not print or save sensitive algorithm details, full feature vectors, model architecture internals, or raw proprietary scoring logic in user-facing trading reports.
 
-## Current Production Models
+## Promotion State
 
-Use these full-universe classifier bundles until a new retrained set is promoted:
+No active promoted multiclass production set exists yet.
 
-| Model | Run directory | Last trained/saved local time | OOS PR AUC | OOS ROC AUC | Top-decile precision | OOS accuracy |
-|---|---|---|---:|---:|---:|---:|
-| `xgboost_classifier` | `artifacts/v1_baselines/eodhd_true_full_xgboost` | `2026-05-08 11:39:31 America/New_York` | `0.6048` | `0.6371` | `0.6411` | `0.5974` |
-| `torch_mlp_classifier` | `artifacts/v1_baselines/eodhd_true_full_torch_mlp` | `2026-05-07 16:27:54 America/New_York` | `0.5934` | `0.6172` | `0.6221` | `0.5700` |
-| `torch_seq_static_classifier` | `artifacts/v1_baselines/eodhd_true_full_torch_seq_static` | `2026-05-06 23:42:46 America/New_York` | `0.5711` | `0.6095` | `0.6066` | `0.5666` |
+The previous binary promoted set is deprecated and must not be used as the production recommendation set. The intended promoted set after retraining remains:
 
-The OOS positive baseline for the current full-run test folds is `50.25%`. Treat model output primarily as a ranking signal, with extra emphasis on top-decile precision and cross-model agreement.
+- `xgboost_classifier`
+- `torch_mlp_classifier`
+- `torch_seq_static_classifier`
+
+Those three models are the only supported `path_5pct_20d` production classifiers. They must be retrained and promoted before this strategy is used as the active production workflow.
+
+The daily strategy commands remain the same after retraining and promotion. The default production ranking score is `pred_score_path_5pct_20d = P(class 2) - P(class 0)`, while `pred_prob_path_5pct_20d` remains the raw class-2 probability column.
 
 ### Prediction Refresh
 
-After a data refresh, run predictions from the saved bundles. This does not retrain the models and should not scan the full 34GB `processed/daily_features.csv`.
+After a data refresh, run predictions from the promoted multiclass bundles. This does not retrain the models and should not scan the full 34GB `processed/daily_features.csv`.
 
 Default daily command:
 
@@ -100,6 +105,7 @@ The report folder is timestamped under `artifacts/production_reports/` and inclu
 - `entry_candidates.csv`
 - `watchlist.csv`
 - `all_ranked_predictions.csv`
+- `research_universe_diagnostics.csv`
 - `model_agreement_summary.csv`
 - `position_review.csv`
 - `all_model_predictions.csv`
@@ -145,23 +151,33 @@ Daily API-efficiency rule:
 - Use whole-exchange EODHD bulk EOD calls first. EODHD documents whole-exchange bulk EOD as 100 API-call units per date, while symbol-filtered bulk adds 1 unit per ticker.
 - Fetch only missing dates after the local latest-inference date.
 - Rank only current windows by default. The runner keeps tickers whose latest anchor is within 3 calendar days of the newest available anchor date, which avoids stale/delisted symbols appearing as current trading candidates.
+- The conservative research universe defaults to common stocks on `NYSE`, `NASDAQ`, or `AMEX`, at least `$10` adjusted close, at least `252` recent trading rows, at least `$10M` 20-day and 60-day median dollar volume, at most `2%` zero-volume days over the last `60` sessions, current dollar volume at least `20%` of the 20-day median, close above the 200-day SMA, 50-day SMA above the 200-day SMA, 6-month return no worse than `-15%`, no worse than `35%` below the trailing 252-day high, and no recent 60-day spike beyond configured limits.
 - Exclude exchange test symbols such as `ZVZZT`, `ZWZZT`, and `NTEST` by default.
 - Reuse the bounded latest-inference feature cache when no new EOD bars are fetched. Use `--force-rebuild-latest-inference` only when the cache needs to be rebuilt.
 - Do not refetch the full universe, full history, fundamentals, or sentiment during normal prediction refresh.
 
 ### Retrain And Promote
 
-When retraining is due, rerun the full classifier profiles, compare the new OOS metrics with `PRODUCTION_MODELS.md`, and promote only if the new artifacts are complete and metrics are acceptable.
+When retraining is due, rerun the full classifier profiles under `path_5pct_20d`, compare the new OOS metrics with the accepted benchmark or review threshold, and promote only if the new artifacts are complete and metrics are acceptable.
 
-Future training manifests write `trained_at_utc`. Existing May 2026 artifacts did not have that field, so `PRODUCTION_MODELS.md` records their model file save timestamps.
+Future training manifests should write `trained_at_utc` and record `classification_event_type=path_5pct_20d` in the run metadata before promotion.
 
 ## Entry Candidate Logic
 
 For each latest prediction date:
 
 1. Score all eligible stocks.
-2. Rank stocks by model confidence.
-3. Determine rank percentile or rank bucket.
+2. Keep only stocks that pass the conservative research universe.
+3. Rank stocks by `pred_score_path_5pct_20d = P(class 2) - P(class 0)`.
+4. Determine rank percentile or rank bucket.
+
+For `path_5pct_20d`, rank by `pred_score_path_5pct_20d = P(class 2) - P(class 0)`. Keep `pred_prob_path_5pct_20d` as the raw class-2 probability for inspection. The multiclass prediction surface may also include:
+
+- `pred_prob_path_5pct_20d_class_0`
+- `pred_prob_path_5pct_20d_class_1`
+- `pred_prob_path_5pct_20d_class_2`
+- `pred_class_path_5pct_20d`
+- `pred_score_path_5pct_20d`
 
 Preferred entry universe:
 

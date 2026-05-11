@@ -22,12 +22,19 @@ from scripts.predict_v1_supervised_baselines import (  # noqa: E402
     _add_anchor_close,
     _aligned_features,
     _episode_eligibility_config_from_run,
+    _research_universe_config_from_run,
     _resolve_artifact_path,
     _resolve_model_index_path,
 )
 from src.data.episode_eligibility import (  # noqa: E402
     add_episode_eligibility_columns,
     eligibility_metadata_columns,
+    parse_allowed_exchanges,
+)
+from src.data.research_universe import (  # noqa: E402
+    ConservativeResearchUniverseConfig,
+    conservative_research_universe_summary,
+    latest_research_universe_diagnostics,
 )
 from src.data.eodhd_enrichment import (  # noqa: E402
     add_fundamental_features,
@@ -60,6 +67,7 @@ from src.data.v1_dataset import (  # noqa: E402
     load_market_context_features,
     select_augmented_stock_feature_columns,
     select_context_feature_columns,
+    preferred_stock_feature_path,
     validate_model_feature_columns,
     _filtered_stock_universe,
     _merge_context,
@@ -115,7 +123,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--recent-raw-rows-per-ticker",
         type=int,
-        default=140,
+        default=320,
         help="Raw bars retained per ticker before computing latest inference features.",
     )
     parser.add_argument("--max-tickers", type=int, default=0, help="Optional smoke cap for stock tickers.")
@@ -155,6 +163,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--position-ledger", default="data/open_positions.csv")
     parser.add_argument("--entry-top-percent", type=float, default=5.0)
     parser.add_argument("--watchlist-top-percent", type=float, default=10.0)
+    parser.add_argument(
+        "--disable-conservative-research-universe",
+        action="store_true",
+        help="Disable the shared strategy-universe filter for latest recommendations.",
+    )
+    parser.add_argument("--research-allowed-exchanges", default="")
+    parser.add_argument("--research-min-price", type=float, default=None)
+    parser.add_argument("--research-min-history-days", type=int, default=None)
+    parser.add_argument("--research-min-median-dollar-volume-20d", type=float, default=None)
+    parser.add_argument("--research-min-median-dollar-volume-60d", type=float, default=None)
+    parser.add_argument("--research-max-zero-volume-day-ratio-60d", type=float, default=None)
+    parser.add_argument("--research-min-current-dollar-volume-vs-median-20d", type=float, default=None)
+    parser.add_argument("--research-liquidity-short-lookback-days", type=int, default=None)
+    parser.add_argument("--research-liquidity-long-lookback-days", type=int, default=None)
+    parser.add_argument("--research-trend-lookback-days", type=int, default=None)
+    parser.add_argument("--research-return-6m-lookback-days", type=int, default=None)
+    parser.add_argument("--research-sma-short-lookback-days", type=int, default=None)
+    parser.add_argument("--research-sma-long-lookback-days", type=int, default=None)
+    parser.add_argument("--research-min-return-6m", type=float, default=None)
+    parser.add_argument("--research-max-drawdown-from-252d-high-pct", type=float, default=None)
+    parser.add_argument("--research-disable-close-above-sma200", action="store_true")
+    parser.add_argument("--research-disable-sma50-above-sma200", action="store_true")
+    parser.add_argument("--research-disable-spike-filter", action="store_true")
+    parser.add_argument("--research-spike-lookback-days", type=int, default=None)
+    parser.add_argument("--research-max-abs-return-1d-60d-pct", type=float, default=None)
+    parser.add_argument("--research-max-true-range-60d-pct", type=float, default=None)
     parser.add_argument("--review-rank-threshold-percent", type=float, default=20.0)
     parser.add_argument("--strong-review-rank-threshold-percent", type=float, default=30.0)
     parser.add_argument("--target-profit-pct", type=float, default=5.0)
@@ -170,6 +204,99 @@ def _utc_now_label() -> str:
 
 def _run_date() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _research_universe_config(
+    args: argparse.Namespace,
+    *,
+    base_config: ConservativeResearchUniverseConfig | None = None,
+) -> ConservativeResearchUniverseConfig:
+    base = base_config or ConservativeResearchUniverseConfig()
+    return ConservativeResearchUniverseConfig(
+        enabled=not bool(args.disable_conservative_research_universe),
+        common_stocks_only=base.common_stocks_only,
+        allowed_exchanges=parse_allowed_exchanges(args.research_allowed_exchanges) if args.research_allowed_exchanges else base.allowed_exchanges,
+        min_price=args.research_min_price if args.research_min_price is not None else base.min_price,
+        min_history_days=args.research_min_history_days if args.research_min_history_days is not None else base.min_history_days,
+        liquidity_short_lookback=(
+            args.research_liquidity_short_lookback_days
+            if args.research_liquidity_short_lookback_days is not None
+            else base.liquidity_short_lookback
+        ),
+        liquidity_long_lookback=(
+            args.research_liquidity_long_lookback_days
+            if args.research_liquidity_long_lookback_days is not None
+            else base.liquidity_long_lookback
+        ),
+        min_median_dollar_volume_20d=(
+            args.research_min_median_dollar_volume_20d
+            if args.research_min_median_dollar_volume_20d is not None
+            else base.min_median_dollar_volume_20d
+        ),
+        min_median_dollar_volume_60d=(
+            args.research_min_median_dollar_volume_60d
+            if args.research_min_median_dollar_volume_60d is not None
+            else base.min_median_dollar_volume_60d
+        ),
+        max_zero_volume_day_ratio_60d=(
+            args.research_max_zero_volume_day_ratio_60d
+            if args.research_max_zero_volume_day_ratio_60d is not None
+            else base.max_zero_volume_day_ratio_60d
+        ),
+        min_current_dollar_volume_vs_median_20d=(
+            args.research_min_current_dollar_volume_vs_median_20d
+            if args.research_min_current_dollar_volume_vs_median_20d is not None
+            else base.min_current_dollar_volume_vs_median_20d
+        ),
+        trend_lookback_days=(
+            args.research_trend_lookback_days
+            if args.research_trend_lookback_days is not None
+            else base.trend_lookback_days
+        ),
+        return_6m_lookback_days=(
+            args.research_return_6m_lookback_days
+            if args.research_return_6m_lookback_days is not None
+            else base.return_6m_lookback_days
+        ),
+        sma_short_lookback_days=(
+            args.research_sma_short_lookback_days
+            if args.research_sma_short_lookback_days is not None
+            else base.sma_short_lookback_days
+        ),
+        sma_long_lookback_days=(
+            args.research_sma_long_lookback_days
+            if args.research_sma_long_lookback_days is not None
+            else base.sma_long_lookback_days
+        ),
+        min_return_6m=args.research_min_return_6m if args.research_min_return_6m is not None else base.min_return_6m,
+        max_drawdown_from_252d_high=(
+            args.research_max_drawdown_from_252d_high_pct / 100.0
+            if args.research_max_drawdown_from_252d_high_pct is not None
+            else base.max_drawdown_from_252d_high
+        ),
+        require_close_above_sma200=(
+            False if args.research_disable_close_above_sma200 else base.require_close_above_sma200
+        ),
+        require_sma50_above_sma200=(
+            False if args.research_disable_sma50_above_sma200 else base.require_sma50_above_sma200
+        ),
+        spike_filter_enabled=False if args.research_disable_spike_filter else base.spike_filter_enabled,
+        spike_lookback_days=(
+            args.research_spike_lookback_days
+            if args.research_spike_lookback_days is not None
+            else base.spike_lookback_days
+        ),
+        max_abs_return_1d_60d=(
+            args.research_max_abs_return_1d_60d_pct / 100.0
+            if args.research_max_abs_return_1d_60d_pct is not None
+            else base.max_abs_return_1d_60d
+        ),
+        max_true_range_pct_60d=(
+            args.research_max_true_range_60d_pct / 100.0
+            if args.research_max_true_range_60d_pct is not None
+            else base.max_true_range_pct_60d
+        ),
+    )
 
 
 def _log(message: str) -> None:
@@ -233,9 +360,7 @@ def _report_progress(
 
 
 def _daily_features_path(dataset_root: Path) -> Path:
-    normalized = dataset_root / "processed" / "daily_features_normalized.csv"
-    processed = dataset_root / "processed" / "daily_features.csv"
-    return normalized if normalized.exists() else processed
+    return preferred_stock_feature_path(dataset_root)
 
 
 def _add_static_metadata(stock_features: pd.DataFrame, dataset_root: Path) -> pd.DataFrame:
@@ -397,6 +522,17 @@ def _tail_bar_rows(rows: Sequence[dict[str, object]], rows_per_ticker: int) -> l
     for _, group in pd.DataFrame(merged).groupby("ticker", sort=False):
         out.extend(group.sort_values("date").tail(rows_per_ticker).to_dict("records"))
     return sorted(out, key=lambda item: (str(item["ticker"]), str(item["date"])))
+
+
+def _max_rows_per_ticker(rows: Sequence[dict[str, object]]) -> int:
+    if not rows:
+        return 0
+    counts: dict[str, int] = {}
+    for row in rows:
+        ticker = str(row.get("ticker") or "").upper()
+        if ticker:
+            counts[ticker] = counts.get(ticker, 0) + 1
+    return max(counts.values()) if counts else 0
 
 
 def _stream_recent_bar_rows(
@@ -729,6 +865,20 @@ def _build_recent_raw_cache(
             width=progress_width,
         )
         stock_source = _load_bar_csv(stock_cache_path)
+        if _max_rows_per_ticker(stock_source) < rows_per_ticker:
+            _log(
+                f"{stock_cache_path.name} has fewer than {rows_per_ticker} rows/ticker; "
+                "rebuilding from full raw bars"
+            )
+            stock_source = _stream_recent_bar_rows(
+                raw_dir / "eodhd_stock_bars.csv",
+                rows_per_ticker=rows_per_ticker,
+                wanted_tickers=stock_tickers,
+                progress_every_rows=progress_every_rows,
+                progress_path=progress_path,
+                progress_width=progress_width,
+            )
+            stock_source.extend(_load_bar_csv(stock_update_path))
     else:
         stock_source = _stream_recent_bar_rows(
             raw_dir / "eodhd_stock_bars.csv",
@@ -752,6 +902,25 @@ def _build_recent_raw_cache(
             width=progress_width,
         )
         context_source = _load_bar_csv(context_cache_path)
+        if _max_rows_per_ticker(context_source) < rows_per_ticker:
+            _log(
+                f"{context_cache_path.name} has fewer than {rows_per_ticker} rows/ticker; "
+                "rebuilding from full raw bars"
+            )
+            _report_progress(
+                progress_path,
+                phase="load_recent_raw_cache",
+                current=2,
+                total=3,
+                detail=f"loading {raw_dir / 'market_context_bars.csv'}",
+                width=progress_width,
+            )
+            context_source = [
+                row
+                for row in _load_bar_csv(raw_dir / "market_context_bars.csv")
+                if str(row.get("ticker") or "").upper() in context_tickers
+            ]
+            context_source.extend(_load_bar_csv(context_update_path))
     else:
         _report_progress(
             progress_path,
@@ -930,6 +1099,7 @@ def _load_latest_feature_cache(
     *,
     stock_tickers: set[str],
     context_tickers: set[str],
+    min_rows_per_ticker: int = 0,
     progress_path: Path | None = None,
     progress_width: int = 30,
 ) -> tuple[pd.DataFrame, pd.DataFrame] | None:
@@ -955,6 +1125,15 @@ def _load_latest_feature_cache(
     context_features["date"] = context_features["date"].astype(str)
     stock_features = stock_features[stock_features["ticker"].isin(stock_tickers)].copy()
     context_features = context_features[context_features["ticker"].isin(context_tickers)].copy()
+    if min_rows_per_ticker > 0:
+        stock_max_rows = int(stock_features.groupby("ticker").size().max()) if not stock_features.empty else 0
+        context_max_rows = int(context_features.groupby("ticker").size().max()) if not context_features.empty else 0
+        if min(stock_max_rows, context_max_rows) < int(min_rows_per_ticker):
+            _log(
+                f"latest feature cache has fewer than {min_rows_per_ticker} rows/ticker "
+                f"(stock max={stock_max_rows}, context max={context_max_rows}); rebuilding"
+            )
+            return None
     _report_progress(
         progress_path,
         phase="load_latest_feature_cache",
@@ -966,9 +1145,18 @@ def _load_latest_feature_cache(
     return stock_features, context_features
 
 
-def _refresh_latest_inference_dataset(args: argparse.Namespace, run_dirs: Sequence[Path]) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object], Path]:
+def _refresh_latest_inference_dataset(
+    args: argparse.Namespace,
+    run_dirs: Sequence[Path],
+    *,
+    research_config: ConservativeResearchUniverseConfig,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object], Path]:
     dataset_root = Path(args.dataset_root)
     latest_dir = _latest_inference_dir(dataset_root, args.latest_inference_dir)
+    required_rows_per_ticker = (
+        research_config.required_recent_rows_per_ticker if research_config.enabled else 0
+    )
+    requested_rows_per_ticker = max(int(args.recent_raw_rows_per_ticker), 125, required_rows_per_ticker)
     latest_dir.mkdir(parents=True, exist_ok=True)
     progress_path = latest_dir / "progress.json"
     _report_progress(
@@ -1015,6 +1203,7 @@ def _refresh_latest_inference_dataset(args: argparse.Namespace, run_dirs: Sequen
             latest_dir,
             stock_tickers=stock_tickers,
             context_tickers=context_tickers,
+            min_rows_per_ticker=required_rows_per_ticker,
             progress_path=progress_path,
             progress_width=args.progress_bar_width,
         )
@@ -1032,6 +1221,7 @@ def _refresh_latest_inference_dataset(args: argparse.Namespace, run_dirs: Sequen
                 "universe_rows_loaded": len(universe_rows),
                 "stock_tickers": len(stock_tickers),
                 "context_tickers": len(context_tickers),
+                "recent_raw_rows_per_ticker": requested_rows_per_ticker,
                 "latest_stock_feature_rows": len(stock_features),
                 "latest_context_feature_rows": len(context_features),
                 "local_data_end_date": local_max or None,
@@ -1059,7 +1249,7 @@ def _refresh_latest_inference_dataset(args: argparse.Namespace, run_dirs: Sequen
         exchange_by_ticker=exchange_by_ticker,
         fetched_stock_rows=stock_rows,
         fetched_context_rows=context_rows,
-        rows_per_ticker=max(int(args.recent_raw_rows_per_ticker), 125),
+        rows_per_ticker=requested_rows_per_ticker,
         progress_every_rows=args.progress_every_rows,
         progress_path=progress_path,
         progress_width=args.progress_bar_width,
@@ -1084,7 +1274,7 @@ def _refresh_latest_inference_dataset(args: argparse.Namespace, run_dirs: Sequen
         "universe_rows_loaded": len(universe_rows),
         "stock_tickers": len(stock_tickers),
         "context_tickers": len(context_tickers),
-        "recent_raw_rows_per_ticker": max(int(args.recent_raw_rows_per_ticker), 125),
+        "recent_raw_rows_per_ticker": requested_rows_per_ticker,
         "raw_stock_rows": len(raw_stock),
         "raw_context_rows": len(raw_context),
         "latest_stock_feature_rows": len(stock_features),
@@ -1330,10 +1520,23 @@ def _build_latest_feature_sets_for_records(
 
 
 def _prediction_column(frame: pd.DataFrame) -> str:
+    score_candidates = [col for col in frame.columns if col.startswith("pred_score_")]
+    if len(score_candidates) == 1:
+        return score_candidates[0]
     candidates = [col for col in frame.columns if col.startswith("pred_prob_")]
-    if len(candidates) != 1:
-        raise ValueError(f"Expected one classification probability column, found {candidates}")
-    return candidates[0]
+    alias_candidates = [
+        col
+        for col in candidates
+        if "_class_" not in col or not col.rsplit("_class_", 1)[1].isdigit()
+    ]
+    if len(alias_candidates) == 1:
+        return alias_candidates[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    class_2_candidates = [col for col in candidates if col.endswith("_class_2")]
+    if len(class_2_candidates) == 1:
+        return class_2_candidates[0]
+    raise ValueError(f"Expected one classification probability ranking column, found {candidates}")
 
 
 def _score_models(
@@ -1678,6 +1881,7 @@ def _write_summary(
     ranked_signals: pd.DataFrame,
     position_review: pd.DataFrame,
     ledger_path: Path,
+    research_summary: dict[str, object] | None = None,
 ) -> dict[str, object]:
     summary = {
         "run_date": run_date,
@@ -1698,6 +1902,8 @@ def _write_summary(
         "consider_exit_count": int((position_review.get("review_action", pd.Series(dtype=str)) == "CONSIDER EXIT").sum()),
         "sell_signal_count": int(position_review.get("review_action", pd.Series(dtype=str)).astype(str).str.startswith("SELL").sum()),
     }
+    if research_summary:
+        summary.update({key: value for key, value in research_summary.items() if key != "research_universe_config"})
     (path / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
     pd.DataFrame([summary]).to_csv(path / "summary.csv", index=False)
     lines = [
@@ -1706,6 +1912,7 @@ def _write_summary(
         f"- Run date: `{run_date}`",
         f"- Dataset root: `{dataset_root}`",
         f"- Data date range in recent frame: `{summary['data_min_date']}` to `{summary['data_max_date']}`",
+        f"- Conservative research universe: `{summary.get('research_universe_passed_rows', summary['ranked_signal_rows'])}` of `{summary.get('research_universe_input_rows', summary['ranked_signal_rows'])}` broad eligible windows passed",
         f"- Ranked signals: `{summary['ranked_signal_rows']}`",
         f"- Entry candidates: `{summary['entry_candidate_count']}`",
         f"- Watchlist rows: `{summary['watchlist_count']}`",
@@ -1723,6 +1930,12 @@ def main() -> None:
     run_date = _run_date()
     dataset_root = Path(args.dataset_root)
     run_dirs = [Path(path) for path in (args.run_dir or DEFAULT_RUN_DIRS)]
+    run_research_config = None
+    for run_dir in run_dirs:
+        run_research_config = _research_universe_config_from_run(run_dir)
+        if run_research_config is not None:
+            break
+    research_config = _research_universe_config(args, base_config=run_research_config)
     report_name = args.report_name or _utc_now_label()
     output_dir = Path(args.output_root) / report_name
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1748,6 +1961,7 @@ def main() -> None:
     stock_features, context_features, refresh_manifest, latest_dir = _refresh_latest_inference_dataset(
         args,
         run_dirs,
+        research_config=research_config,
     )
     if args.anchor_date:
         stock_features = stock_features[stock_features["date"].astype(str) <= args.anchor_date].copy()
@@ -1773,13 +1987,37 @@ def main() -> None:
     metadata = _add_anchor_close(metadata, stock_features)
     if metadata.empty:
         raise SystemExit("No eligible latest prediction windows were produced.")
-    _log(f"eligible latest windows: {len(metadata):,}")
+
+    _log("applying conservative research universe filter")
+    research_diagnostics = latest_research_universe_diagnostics(
+        stock_features,
+        metadata,
+        research_config,
+        benchmark_ticker=benchmark_ticker,
+    )
+    research_diagnostics.to_csv(output_dir / "research_universe_diagnostics.csv", index=False)
+    research_summary = conservative_research_universe_summary(research_diagnostics, research_config)
+    research_mask = research_diagnostics["research_universe_ok"].fillna(False).astype(bool)
+    if research_config.enabled:
+        kept = int(research_mask.sum())
+        _log(
+            "conservative research universe kept "
+            f"{kept:,}/{len(research_diagnostics):,} broad eligible windows"
+        )
+    metadata = research_diagnostics.loc[research_mask].reset_index(drop=True)
+    for feature_set, frame in list(feature_sets.items()):
+        feature_sets[feature_set] = frame.loc[research_mask.to_numpy(dtype=bool)].reset_index(drop=True)
+    if metadata.empty:
+        raise SystemExit("No latest prediction windows passed the conservative research universe filter.")
+    _log(f"eligible latest windows after research filter: {len(metadata):,}")
+    scoring_tickers = set(metadata["ticker"].astype(str).str.upper())
+    scoring_stock_features = stock_features[stock_features["ticker"].astype(str).str.upper().isin(scoring_tickers)].copy()
 
     predictions = _score_models(
         records=records,
         metadata=metadata,
         feature_sets=feature_sets,
-        stock_features=stock_features,
+        stock_features=scoring_stock_features,
         context_features=context_features,
         progress_path=report_progress_path,
         progress_width=args.progress_bar_width,
@@ -1859,9 +2097,11 @@ def main() -> None:
         ranked_signals=ranked_signals,
         position_review=position_review,
         ledger_path=ledger_path,
+        research_summary=research_summary,
     )
     run_manifest = {
         **summary,
+        "research_universe_config": research_config.to_dict(),
         "latest_inference_dir": str(latest_dir.resolve()),
         "latest_inference_manifest": refresh_manifest,
         "run_dirs": [str(path) for path in run_dirs],

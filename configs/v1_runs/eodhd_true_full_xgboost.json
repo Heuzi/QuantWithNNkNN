@@ -1,6 +1,6 @@
 {
   "name": "eodhd_true_full_xgboost",
-  "description": "Model-specific true full-universe run for the selected XGBoost classifier. This uses the existing uncapped 32M-episode cache, but may still require an external-memory XGBoost path if the in-memory estimator cannot handle the full split.",
+  "description": "Model-specific true full-universe run for the selected XGBoost classifier. This expects the shared filtered true-full cache rebuilt under path_5pct_20d and trains only xgboost_classifier on the tabular production feature set.",
   "dataset_root": "data/eodhd_us_equities_30y",
   "training_dataset_root": "data/eodhd_training_panels/eodhd_true_full_walk_forward",
   "episode_cache_dir": "data/eodhd_training_panels/eodhd_true_full_walk_forward/episode_cache",
@@ -9,6 +9,7 @@
   ],
   "train": {
     "benchmark_ticker": "SPY",
+    "classification_event_type": "path_5pct_20d",
     "classification_horizon": 20,
     "classification_models": [
       "xgboost_classifier"
@@ -33,6 +34,24 @@
     "walk_forward_oos_block_size": 21,
     "walk_forward_purge_gap": 20,
     "walk_forward_val_block_size": 21,
-    "window_length": 60
+    "window_length": 60,
+    "research_allowed_exchanges": "NYSE,NASDAQ,AMEX",
+    "research_min_price": 10.0,
+    "research_min_history_days": 252,
+    "research_min_median_dollar_volume_20d": 10000000.0,
+    "research_min_median_dollar_volume_60d": 10000000.0,
+    "research_max_zero_volume_day_ratio_60d": 0.02,
+    "research_min_current_dollar_volume_vs_median_20d": 0.20,
+    "research_liquidity_short_lookback_days": 20,
+    "research_liquidity_long_lookback_days": 60,
+    "research_trend_lookback_days": 252,
+    "research_return_6m_lookback_days": 126,
+    "research_sma_short_lookback_days": 50,
+    "research_sma_long_lookback_days": 200,
+    "research_min_return_6m": -0.15,
+    "research_max_drawdown_from_252d_high_pct": 35.0,
+    "research_spike_lookback_days": 60,
+    "research_max_abs_return_1d_60d_pct": 25.0,
+    "research_max_true_range_60d_pct": 25.0
   }
 }

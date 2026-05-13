@@ -75,6 +75,16 @@ Rules:
 - do not use global full-dataset scaling statistics across future periods
 - if raw level features are retained, also provide scale-free or normalized alternatives where possible
 
+V1 persisted feature artifacts:
+- `processed/daily_features.csv` is the ticker-contiguous daily feature panel built from raw EODHD bars, fundamentals, sentiment, and context.
+- `processed/daily_features_incremental_updates.csv` and `processed/market_context_features_incremental_updates.csv` are small retrain sidecars written by routine latest prediction when new EOD bars are fetched and latest features are computed. They are keyed by `(ticker, date)` and replace older sidecar rows for the same key.
+- `scripts/merge_incremental_feature_updates.py` consolidates those sidecars into `processed/daily_features.csv` and `processed/market_context_features.csv` before true-full retraining, preserving ticker/date order for downstream streaming builders. When `processed/daily_features_normalized.csv` already exists, it also recomputes same-date normalized rows only for the dates touched by the sidecars and merges those rows into the saved normalized artifact.
+- `processed/daily_features_normalized.csv` is the saved normalized full-panel feature artifact used by strategy-universe panel materialization when it is newer than `daily_features.csv`.
+- `processed/daily_features_normalized_manifest.json` records the source file, row counts, date range, normalization feature lists, group-size policy, and execution mode.
+- Full-panel normalization is out-of-core for the EODHD true-full root: `scripts/build_normalized_features_from_processed.py` buckets rows by calendar month so each same-date cross section is complete, computes full-panel and same-sector transforms, then writes the final normalized artifact in ticker/date order.
+- Completed normalized artifacts should be reused for future retrain resumes until the upstream raw/processed feature panel changes. If incremental feature sidecars are consolidated into the main processed files, only the changed dates need to be renormalized when the saved normalized artifact exists; otherwise the full out-of-core normalizer builds the artifact. A crash before the normalized manifest is written means the normalization stage is incomplete and must be rerun.
+- Routine latest prediction refreshes should not rescan and renormalize the entire historical full panel. They rebuild the compact latest-inference cache under `processed/latest_inference/` using the same point-in-time feature semantics and strategy-universe policy for current target-pending windows.
+
 ### Layer 3: as-of fundamentals and valuation features
 Examples:
 - earnings-related fields
@@ -439,7 +449,7 @@ EODHD fundamentals and sentiment policy:
 Full-universe storage policy:
 - `raw/eodhd_stock_bars.csv`, `raw/market_context_bars.csv`, `raw/eodhd_fundamentals_raw/`, `raw/eodhd_sentiment_daily.csv`, and `raw/eodhd_fetch_status.csv` are local generated outputs and are not committed.
 - `raw/eodhd_fetch_manifest.json` records raw fetch status counts and row counts for full runs.
-- A full 30-year all-stock panel can be tens of millions of rows. Use `scripts/build_eodhd_daily_features_chunked.py` for per-ticker daily feature generation from raw bars. Full-panel cross-sectional normalization still requires a chunked or out-of-core implementation. The existing end-to-end rebuild path remains appropriate for small smoke and pilot panels.
+- A full 30-year all-stock panel can be tens of millions of rows. Use `scripts/build_eodhd_daily_features_chunked.py` for per-ticker daily feature generation from raw bars and `scripts/build_normalized_features_from_processed.py` for out-of-core full-panel cross-sectional normalization. The older end-to-end in-memory rebuild path remains appropriate only for small smoke and pilot panels.
 - Standardized V1 preparation and train/test runs should use `scripts/run_v1_pipeline.py` with JSON profiles in `configs/v1_runs/`. Use `eodhd_full_walk_forward` for the standard high-liquidity EODHD walk-forward benchmark and `eodhd_smoke_walk_forward` for short post-build training checks.
 - The current pandas trainer should not point directly at the 34GB full `processed/daily_features.csv`. Use `scripts/materialize_v1_training_panel.py` through the profile runner to create a bounded dataset root under `data/eodhd_training_panels/`, with sector/industry metadata joined from `raw/eodhd_equity_metadata.csv`.
 - Full-profile training should then use `scripts/materialize_v1_episode_cache.py` through the `materialize_cache` profile stage. The cache writes episode metadata/targets, float32 tabular `.npy` matrices, and memmapped sequence row arrays so expensive feature engineering is done once before model/fold training.

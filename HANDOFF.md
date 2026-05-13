@@ -42,6 +42,9 @@ Use this file as the shared handoff note when switching between computers or Cod
 - EODHD fundamentals/sentiment feature helpers: `src/data/eodhd_enrichment.py`
 - EODHD rebuild script: `scripts/update_eodhd_daily_dataset.py`
 - Chunked EODHD raw-to-feature builder: `scripts/build_eodhd_daily_features_chunked.py`
+- Incremental processed-feature consolidator: `scripts/merge_incremental_feature_updates.py`
+- Out-of-core full-panel normalizer: `scripts/build_normalized_features_from_processed.py`
+- True-full retrain wrapper: `scripts/run_full_universe_retrain.ps1`
 - Standard V1 pipeline runner: `scripts/run_v1_pipeline.py`
 - Materialized V1 training-panel builder: `scripts/materialize_v1_training_panel.py`
 - Episode-level V1 cache builder: `scripts/materialize_v1_episode_cache.py`
@@ -68,6 +71,9 @@ Legacy Massive scripts remain in the repo for reproducibility but are no longer 
 - Fundamental model features are joined as of each episode's `anchor_date`: use the latest filing/public row with `availability_date <= anchor_date`, never a row whose fiscal period ended before `anchor_date` but was filed later.
 - EODHD daily sentiment is stored in `raw/eodhd_sentiment_daily.csv` and lagged by one trading row before model use.
 - Full raw fetch outputs are resumable and local-only: `raw/eodhd_stock_bars.csv`, `raw/market_context_bars.csv`, `raw/eodhd_fundamentals_raw/`, `raw/eodhd_sentiment_daily.csv`, `raw/eodhd_fetch_status.csv`, and `raw/eodhd_fetch_manifest.json`.
+- Full processed feature outputs are also reusable across retrain resumes. `processed/daily_features.csv` is the chunked daily feature panel; `processed/daily_features_normalized.csv` plus `processed/daily_features_normalized_manifest.json` are the saved full-panel same-date normalized features. The normalizer is out-of-core and month-bucketed, then writes the final normalized file in ticker/date order.
+- Routine prediction refreshes should use `processed/latest_inference/` and should not rebuild the full 30-year normalized feature panel unless the underlying full processed snapshot is intentionally refreshed for retraining.
+- When routine prediction fetches new EOD bars, it persists newly computed latest feature rows into `processed/daily_features_incremental_updates.csv` and `processed/market_context_features_incremental_updates.csv`. These sidecars are consolidated into the main processed training files by `scripts/merge_incremental_feature_updates.py` during the true-full retrain wrapper, then archived. If the full normalized artifact already exists, the same consolidator renormalizes only the sidecar-touched dates and merges those rows into `processed/daily_features_normalized.csv`.
 - Missing sector/industry metadata falls back to `Unknown`.
 - Missing fundamentals or sentiment must not remove stock-window episodes; use missing indicators and neutral defaults.
 - EODHD symbol lists are collected from both current and delisted views, because the `delisted=1` view behaves as delisted-only in live checks.
@@ -104,8 +110,9 @@ Legacy Massive scripts remain in the repo for reproducibility but are no longer 
   - Current scale: 1,500 tickers, 2014-01-01 through 2026-04-24, 500,000 most recent eligible episodes, and 6 walk-forward folds.
 - True full-universe run:
   - Purpose: eventual large-scale experiment after the benchmark profile is stable.
-  - Shape: `max_tickers=0`, intended long EODHD history, same materialized-panel plus episode-cache path, and no small benchmark cap unless a compute cap is deliberately documented.
-  - Status: completed for the current three production classifiers. See `PRODUCTION_MODELS.md` for model paths, metrics, timestamps, and caveats.
+  - Shape: `max_tickers=0`, intended long EODHD history, incremental feature sidecar consolidation, saved full-panel normalization, same materialized-panel plus episode-cache path, and no small benchmark cap unless a compute cap is deliberately documented.
+  - Current wrapper: `.\scripts\run_full_universe_retrain.ps1 -Resume`.
+  - Status: no promoted `path_5pct_20d` model set exists until the current true-full retrain finishes, metrics are reviewed, and artifacts are promoted. See `PRODUCTION_MODELS.md`.
 - `eodhd_model_selection_walk_forward` is separate from the three sizes above. Use it for research when changing the model candidate list.
 
 ## Validation Checklist
@@ -124,9 +131,11 @@ Before trusting a new EODHD run:
   - `py -3.11 scripts/run_v1_pipeline.py --profile eodhd_full_walk_forward --stage build_features`
 - Full standardized classification walk-forward train/test after processed features exist. This first materializes a trainable high-liquidity panel, then materializes an episode cache, then trains the selected top-three classifier candidates from the cached root:
   - `py -3.11 scripts/run_v1_pipeline.py --profile eodhd_full_walk_forward`
+- True-full `path_5pct_20d` retrain with stage-level resume:
+  - `.\scripts\run_full_universe_retrain.ps1 -Resume`
 - Score latest target-pending windows after a data refresh, using saved deploy bundles. Point `--dataset-root` at a bounded prediction/materialized dataset root, not directly at the 34GB full processed feature CSV:
   - `py -3.11 scripts/predict_v1_supervised_baselines.py --run-dir artifacts/v1_baselines/eodhd_full_walk_forward --dataset-root data/eodhd_training_panels/eodhd_full_walk_forward`
-- Score current production full-universe classifiers after a data refresh:
+- After the multiclass set is promoted, score current production full-universe classifiers after a data refresh:
   - `py -3.11 scripts/predict_v1_supervised_baselines.py --run-dir artifacts/v1_baselines/eodhd_true_full_xgboost --dataset-root data/eodhd_us_equities_30y --output-file artifacts/production_predictions/latest_xgboost.csv`
   - `py -3.11 scripts/predict_v1_supervised_baselines.py --run-dir artifacts/v1_baselines/eodhd_true_full_torch_mlp --dataset-root data/eodhd_us_equities_30y --output-file artifacts/production_predictions/latest_torch_mlp.csv`
   - `py -3.11 scripts/predict_v1_supervised_baselines.py --run-dir artifacts/v1_baselines/eodhd_true_full_torch_seq_static --dataset-root data/eodhd_us_equities_30y --output-file artifacts/production_predictions/latest_torch_seq_static.csv`
@@ -164,7 +173,7 @@ Before trusting a new EODHD run:
 - Regular per-symbol EODHD fundamentals are expensive at full-universe scale. Prefer Bulk Fundamentals if the account has Extended Fundamentals/Bulk access enabled; current probe returned HTTP 403, so EODHD support may need to enable it.
 - EODHD sentiment ticker mapping may be unsafe for renamed or reused symbols without additional identity validation.
 - Full all-stock rebuild can consume many paid API calls and should be run intentionally after smoke/pilot validation.
-- The full 30-year all-stock panel is too large for the pilot in-memory feature builder. Use `--fetch-only` for raw collection and `scripts/build_eodhd_daily_features_chunked.py` for per-ticker daily features. Full-panel cross-sectional normalization still needs a chunked or out-of-core implementation.
+- The full 30-year all-stock panel is too large for the pilot in-memory feature builder. Use `--fetch-only` for raw collection, `scripts/build_eodhd_daily_features_chunked.py` for per-ticker daily features, `scripts/merge_incremental_feature_updates.py` to fold latest-prediction sidecars into the reusable processed and normalized artifacts, and `scripts/build_normalized_features_from_processed.py` for the first full out-of-core cross-sectional normalization build.
 - For train/test memory, use the episode cache path. Do not run the full profile by pointing the trainer directly at the full daily feature CSV; the trainer should receive `--episode-cache-dir` from `configs/v1_runs/eodhd_full_walk_forward.json`.
 
 ## Resume Prompt

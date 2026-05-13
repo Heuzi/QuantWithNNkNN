@@ -70,7 +70,8 @@ V1 implementation note:
 Current implementation snapshot:
 - Default daily market data source is now EODHD, targeting `data/eodhd_us_equities_30y`.
 - Massive-era datasets and model artifacts are legacy and should not be compared directly against EODHD full-universe results.
-- Full-universe EODHD raw collection uses `scripts/update_eodhd_daily_dataset.py --fetch-only --max-tickers 0`; per-ticker daily features can be generated through the standard profile runner: `py -3.11 scripts/run_v1_pipeline.py --profile eodhd_full_walk_forward --stage build_features`. The existing in-memory processed rebuild path is reserved for smoke/pilot panels, and full-panel cross-sectional normalization still needs an out-of-core path.
+- Full-universe EODHD raw collection uses `scripts/update_eodhd_daily_dataset.py --fetch-only --max-tickers 0`; per-ticker daily features can be generated through the standard profile runner or the true-full wrapper. The existing in-memory processed rebuild path is reserved for smoke/pilot panels.
+- Full-panel cross-sectional normalization is handled out of core by `scripts/build_normalized_features_from_processed.py`. It streams `processed/daily_features.csv` into complete calendar-month buckets, computes same-date full-panel and same-sector transforms for each month, then regroups the final `processed/daily_features_normalized.csv` back into ticker/date order for downstream panel materialization. The completed normalized CSV and `daily_features_normalized_manifest.json` are saved and reused by resume-aware full retrain runs.
 - Standard walk-forward experiments should use JSON profiles under `configs/v1_runs/` through `scripts/run_v1_pipeline.py`, rather than ad hoc long command strings. Profiles can include a `materialize_panel` stage so the trainer consumes a bounded dataset root under `data/eodhd_training_panels/` instead of loading the full 34GB feature CSV.
 - `scripts/run_v1_pipeline.py` now writes stage state under `logs/v1_pipeline_state/`, supports `--resume` to skip stages already marked completed, and requests Windows keep-awake by default during non-dry-run execution so long jobs are less likely to die from sleep/power-saving behavior.
 - Full and near-full EODHD experiments should also use the `materialize_cache` stage. It creates an episode-level cache with float32 tabular matrices and memmapped sequence arrays so feature engineering runs once and model/fold training reads cached arrays.
@@ -99,8 +100,8 @@ Current implementation snapshot:
 - Tabular inputs have shape `[episode_count, flattened_feature_count]` and use rolling-window summary columns such as `__last`, `__mean60`, and `__std60`.
 - `torch`, `xgboost`, and `lightgbm` now prefer GPU execution when available and fall back to CPU otherwise; torch models require the local PyTorch build to report `torch.cuda.is_available()`, while XGBoost/LightGBM may attempt vendor GPU paths and record any fallback error.
 - Full-run training now also uses more CPU by default when no explicit overrides are set:
-  - XGBoost defaults `V1_XGBOOST_NTHREAD` to the host CPU count instead of `1`
-  - torch dataloaders default `V1_TORCH_NUM_WORKERS` to a small positive worker count instead of `0`
+  - XGBoost defaults `V1_XGBOOST_NTHREAD` to nearly the host CPU count instead of `1`
+  - torch dataloaders default `V1_TORCH_NUM_WORKERS` to a small positive worker count capped for host-memory stability
 - Training logs now include human-readable progress bars in addition to JSON events:
   - trainer-level bars across model combos, folds, and final deploy fits
   - batch/epoch bars for `torch_mlp_classifier` and `torch_seq_static_classifier`
@@ -133,6 +134,8 @@ Current implementation snapshot:
 - Routine data refreshes should score latest target-pending windows with saved final bundles. Do not retrain just because a new daily bar arrived.
 - Production retraining cadence is every 2 to 4 weeks, with monthly as the default. Retrain immediately only after target, feature schema, universe policy, vendor semantics, leakage, or material live/OOS monitoring changes.
 - Future training indexes write `trained_at_utc`; existing May 2026 production artifacts should use the model file save timestamp recorded in `PRODUCTION_MODELS.md`.
+- True-full retraining should use `scripts/run_full_universe_retrain.ps1` rather than hand-running the individual large stages. The wrapper refreshes raw EODHD bars, resumes chunked feature construction, consolidates latest-prediction feature sidecars, incrementally refreshes or builds the saved full-panel normalized feature artifact, materializes the filtered strategy-universe panel, materializes the shared episode cache, and then trains the three supported `path_5pct_20d` classifiers. With `-Resume`, completed stage outputs are skipped, including `processed/daily_features_normalized.csv` plus `processed/daily_features_normalized_manifest.json`.
+- Routine prediction refreshes persist newly computed latest feature rows into incremental processed-feature sidecars. The true-full retrain wrapper consolidates those sidecars before normalization so retraining can reuse daily prediction-time feature processing instead of recomputing the same recent rows from raw bars.
 - Cache-backed training path:
   - `scripts/materialize_v1_episode_cache.py` streams a ticker-contiguous daily feature CSV and writes `episode_metadata.csv`, `targets.csv`, tabular `.npy` matrices, sequence `.npy` row stores, date arrays, and a manifest.
   - `scripts/train_v1_supervised_baselines.py --episode-cache-dir ...` loads metadata/targets plus memory-mapped arrays instead of loading/rebuilding tabular feature frames from daily CSV.

@@ -53,6 +53,15 @@ Refreshing data is separate from retraining models:
 
 Do not retrain models every time new market data arrives. After the multiclass retrain/promotion step is complete, use the saved promoted models for normal daily or every-few-days prediction refreshes as long as the target, feature schema, eligibility filter, and vendor semantics are unchanged.
 
+The same feature semantics are used for both retraining and latest prediction, but the operating scale differs:
+
+- Full retrain uses the full EODHD root, rebuilds `processed/daily_features.csv`, rebuilds or reuses `processed/daily_features_normalized.csv`, materializes the filtered strategy-universe panel, materializes the shared episode cache, and then trains the three supported classifiers.
+- Routine latest prediction uses the bounded cache under `processed/latest_inference/` and should not rescan the full historical feature CSV or retrain models.
+- When routine prediction fetches new EOD bars and computes latest features, it also persists the newly computed stock/context feature rows into processed incremental sidecars: `processed/daily_features_incremental_updates.csv` and `processed/market_context_features_incremental_updates.csv`.
+- The true-full retrain wrapper consolidates those sidecars into `processed/daily_features.csv` and `processed/market_context_features.csv` before normalization. This lets future retrains reuse daily prediction-time feature work instead of recomputing every already-processed recent row from raw bars.
+- A completed full-panel normalized artifact is reusable. `processed/daily_features_normalized.csv` plus `processed/daily_features_normalized_manifest.json` are the completion markers.
+- If sidecar consolidation changes only recent dates and a normalized artifact already exists, `scripts/merge_incremental_feature_updates.py` recomputes same-date normalization only for those touched dates and merges them into `processed/daily_features_normalized.csv`. If the normalized artifact is missing, the full out-of-core normalizer builds it once before train/test panel materialization.
+
 Conservative research universe filtering is part of the standard strategy-universe policy. By default it is applied to train/test/live so the classifiers are fit and evaluated on the same larger-cap, more tradable, more stable name set that the trading reports rank.
 
 Default retrain cadence:
@@ -161,6 +170,14 @@ Daily API-efficiency rule:
 When retraining is due, rerun the full classifier profiles under `path_5pct_20d`, compare the new OOS metrics with the accepted benchmark or review threshold, and promote only if the new artifacts are complete and metrics are acceptable.
 
 Future training manifests should write `trained_at_utc` and record `classification_event_type=path_5pct_20d` in the run metadata before promotion.
+
+Recommended true-full retrain wrapper:
+
+```powershell
+.\scripts\run_full_universe_retrain.ps1 -Resume
+```
+
+That wrapper runs the intended large-data sequence: raw EODHD refresh, chunked daily-feature rebuild, incremental feature sidecar consolidation, normalized-feature refresh, filtered panel materialization, episode-cache materialization, and the three model-specific training profiles. Use `-Resume` after an interruption so completed stages are skipped. The normalized stage is skipped only after both `data\eodhd_us_equities_30y\processed\daily_features_normalized.csv` and `data\eodhd_us_equities_30y\processed\daily_features_normalized_manifest.json` exist and are at least as fresh as `processed\daily_features.csv`; sidecar consolidation updates those normalized files incrementally for touched dates when possible.
 
 ## Entry Candidate Logic
 

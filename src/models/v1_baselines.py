@@ -247,7 +247,7 @@ def _torch_loader_kwargs(*, device: str, shuffle: bool, batch_size: int) -> dict
         "pin_memory": device == "cuda",
     }
     cpu_count = os.cpu_count() or 1
-    default_workers = max(min(cpu_count // 2, 8), 1)
+    default_workers = max(min(cpu_count // 4, 4), 1)
     workers_raw = os.environ.get("V1_TORCH_NUM_WORKERS", str(default_workers)).strip()
     try:
         workers = max(int(workers_raw), 0)

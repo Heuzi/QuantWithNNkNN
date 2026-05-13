@@ -87,6 +87,9 @@ RECENT_STOCK_BARS_FILENAME = "recent_stock_bars.csv"
 RECENT_CONTEXT_BARS_FILENAME = "recent_context_bars.csv"
 LATEST_STOCK_FEATURES_FILENAME = "latest_daily_features.csv"
 LATEST_CONTEXT_FEATURES_FILENAME = "latest_market_context_features.csv"
+STOCK_FEATURE_UPDATE_FILENAME = "daily_features_incremental_updates.csv"
+CONTEXT_FEATURE_UPDATE_FILENAME = "market_context_features_incremental_updates.csv"
+FEATURE_UPDATE_MANIFEST_FILENAME = "incremental_feature_updates_manifest.json"
 
 POSITION_REVIEW_COLUMNS = (
     "run_date",
@@ -134,6 +137,14 @@ def parse_args() -> argparse.Namespace:
         "--force-rebuild-latest-inference",
         action="store_true",
         help="Rebuild latest inference features even when a current cache exists.",
+    )
+    parser.add_argument(
+        "--disable-persist-latest-feature-updates",
+        action="store_true",
+        help=(
+            "Do not persist newly computed latest-inference feature rows into processed incremental update files "
+            "for future retrain consolidation."
+        ),
     )
     parser.add_argument(
         "--latest-inference-dir",
@@ -1094,6 +1105,102 @@ def _materialize_latest_inference_features(
     return stock_frame, context_frame
 
 
+def _merge_feature_update_frame(
+    path: Path,
+    incoming: pd.DataFrame,
+    *,
+    min_date: str | None,
+) -> int:
+    if incoming.empty or not min_date:
+        return 0
+    if not {"ticker", "date"}.issubset(incoming.columns):
+        return 0
+    updates = incoming.copy()
+    updates["ticker"] = updates["ticker"].astype(str).str.upper()
+    updates["date"] = updates["date"].astype(str)
+    updates = updates[updates["date"] >= str(min_date)].copy()
+    if updates.empty:
+        return 0
+
+    if path.exists() and path.stat().st_size > 0:
+        existing = pd.read_csv(path, low_memory=False)
+        if not existing.empty and {"ticker", "date"}.issubset(existing.columns):
+            existing["ticker"] = existing["ticker"].astype(str).str.upper()
+            existing["date"] = existing["date"].astype(str)
+            updates = pd.concat([existing, updates], ignore_index=True, sort=False)
+
+    updates = updates.drop_duplicates(["ticker", "date"], keep="last")
+    updates = updates.sort_values(["ticker", "date"], kind="mergesort").reset_index(drop=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    updates.to_csv(temp_path, index=False)
+    temp_path.replace(path)
+    return int(len(updates))
+
+
+def _persist_incremental_feature_updates(
+    *,
+    dataset_root: Path,
+    latest_dir: Path,
+    stock_features: pd.DataFrame,
+    context_features: pd.DataFrame,
+    min_update_date: str | None,
+    progress_path: Path | None,
+    progress_width: int,
+) -> dict[str, object]:
+    processed_dir = dataset_root / "processed"
+    if not min_update_date:
+        manifest = {
+            "enabled": True,
+            "persisted": False,
+            "reason": "no fetched update dates",
+            "stock_update_rows": 0,
+            "context_update_rows": 0,
+        }
+        write_json(latest_dir / FEATURE_UPDATE_MANIFEST_FILENAME, manifest)
+        return manifest
+    _report_progress(
+        progress_path,
+        phase="persist_incremental_feature_updates",
+        current=0,
+        total=None,
+        detail=f"min_update_date={min_update_date}",
+        width=progress_width,
+    )
+    stock_path = processed_dir / STOCK_FEATURE_UPDATE_FILENAME
+    context_path = processed_dir / CONTEXT_FEATURE_UPDATE_FILENAME
+    stock_rows = _merge_feature_update_frame(stock_path, stock_features, min_date=min_update_date)
+    context_rows = _merge_feature_update_frame(context_path, context_features, min_date=min_update_date)
+    manifest = {
+        "enabled": True,
+        "persisted": bool(stock_rows or context_rows),
+        "generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "mode": "latest_inference_incremental_feature_updates",
+        "dataset_root": str(dataset_root.resolve()),
+        "latest_inference_dir": str(latest_dir.resolve()),
+        "min_update_date": min_update_date,
+        "stock_update_file": str(stock_path.resolve()),
+        "context_update_file": str(context_path.resolve()),
+        "stock_update_rows": stock_rows,
+        "context_update_rows": context_rows,
+        "notes": [
+            "These sidecar files are retrain inputs, not production prediction outputs.",
+            "The true-full retrain wrapper consolidates them into processed/daily_features.csv and processed/market_context_features.csv before normalization.",
+        ],
+    }
+    write_json(latest_dir / FEATURE_UPDATE_MANIFEST_FILENAME, manifest)
+    write_json(processed_dir / FEATURE_UPDATE_MANIFEST_FILENAME, manifest)
+    _report_progress(
+        progress_path,
+        phase="persist_incremental_feature_updates",
+        current=1,
+        total=1,
+        detail=f"stock_update_rows={stock_rows:,} context_update_rows={context_rows:,}",
+        width=progress_width,
+    )
+    return manifest
+
+
 def _load_latest_feature_cache(
     latest_dir: Path,
     *,
@@ -1265,6 +1372,21 @@ def _refresh_latest_inference_dataset(
         progress_width=args.progress_bar_width,
         feature_progress_every_tickers=args.feature_progress_every_tickers,
     )
+    planned_dates = [str(value)[:10] for value in fetch_manifest.get("planned_fetch_dates", []) if value]
+    min_update_date = min(planned_dates) if planned_dates else None
+    feature_update_manifest = (
+        {"enabled": False, "persisted": False, "reason": "disabled by CLI"}
+        if args.disable_persist_latest_feature_updates
+        else _persist_incremental_feature_updates(
+            dataset_root=dataset_root,
+            latest_dir=latest_dir,
+            stock_features=stock_features,
+            context_features=context_features,
+            min_update_date=min_update_date,
+            progress_path=progress_path,
+            progress_width=args.progress_bar_width,
+        )
+    )
     local_max = _max_date_from_rows([*raw_stock, *raw_context])
     manifest = {
         "generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -1285,6 +1407,7 @@ def _refresh_latest_inference_dataset(
         "skip_sentiment": bool(args.skip_sentiment),
         "include_test_symbols": bool(args.include_test_symbols),
         "fetch": fetch_manifest,
+        "incremental_feature_updates": feature_update_manifest,
     }
     write_json(latest_dir / "run_manifest.json", manifest)
     _report_progress(

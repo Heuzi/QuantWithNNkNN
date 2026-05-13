@@ -91,7 +91,14 @@ function Test-StageOutput {
         "normalized" {
             $manifest = Join-Path $repoRoot "$DatasetRoot/processed/daily_features_normalized_manifest.json"
             $data = Join-Path $repoRoot "$DatasetRoot/processed/daily_features_normalized.csv"
-            return (Test-Path $manifest) -and (Test-Path $data)
+            $features = Join-Path $repoRoot "$DatasetRoot/processed/daily_features.csv"
+            if (-not ((Test-Path $manifest) -and (Test-Path $data))) {
+                return $false
+            }
+            if (Test-Path $features) {
+                return ((Get-Item $data).LastWriteTime -ge (Get-Item $features).LastWriteTime) -and ((Get-Item $manifest).LastWriteTime -ge (Get-Item $features).LastWriteTime)
+            }
+            return $true
         }
         "panel" {
             $path = Join-Path $repoRoot "data/eodhd_training_panels/eodhd_true_full_walk_forward/processed/materialized_panel_manifest.json"
@@ -178,11 +185,21 @@ try {
         ) -ResumeStage "feature_build"
     }
 
+    Invoke-Step -Name "merge_incremental_feature_updates" -Command (
+        @($python) + $basePyArgs +
+        @(
+            "scripts/merge_incremental_feature_updates.py",
+            "--dataset-root", $DatasetRoot
+        )
+    )
+
     Invoke-Step -Name "rebuild_root_normalized" -Command (
         @($python) + $basePyArgs +
         @(
             "scripts/build_normalized_features_from_processed.py",
-            "--dataset-root", $DatasetRoot
+            "--dataset-root", $DatasetRoot,
+            "--resume",
+            "--bucket-max-open-files", "256"
         )
     ) -ResumeStage "normalized"
 

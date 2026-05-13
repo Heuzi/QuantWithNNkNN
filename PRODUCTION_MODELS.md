@@ -66,11 +66,20 @@ Refreshing market data does not require retraining, but production-style scoring
 Normal production cycle:
 
 1. Refresh latest EODHD data after market close when fresh predictions are needed.
-2. Rebuild prediction-ready features/windows using the existing PIT-safe schema.
+2. Rebuild prediction-ready features/windows using the existing PIT-safe schema in the bounded latest-inference cache.
 3. Run the promoted final `path_5pct_20d` classifier bundles.
 4. Apply the same conservative research universe policy used in train/test to the latest production prediction universe.
-5. Rank surviving target-pending stock-window episodes by class-2 probability.
+5. Rank surviving target-pending stock-window episodes by `pred_score_path_5pct_20d = P(class 2) - P(class 0)`.
 6. Produce trading reports for human review.
+
+Daily prediction refreshes should not rebuild the full 30-year normalized panel. They should reuse saved model bundles and build only the compact latest-window feature set under `data/eodhd_us_equities_30y/processed/latest_inference/`.
+
+When a daily prediction refresh fetches new EOD bars, it also persists newly computed stock/context feature rows into retrain sidecars:
+
+- `processed/daily_features_incremental_updates.csv`
+- `processed/market_context_features_incremental_updates.csv`
+
+Full-panel normalization is a retrain/data-snapshot artifact, saved as `processed/daily_features_normalized.csv` with `processed/daily_features_normalized_manifest.json`. The full retrain wrapper consolidates incremental feature sidecars into the main processed feature files first; when the normalized artifact already exists, the consolidator refreshes only the touched same-date cross sections and merges them into that artifact.
 
 Use saved models for daily or every-few-days prediction refreshes as long as:
 
@@ -127,15 +136,10 @@ Retrain immediately when any of these change:
 Recommended full retrain command pattern:
 
 ```powershell
-py -3.11 scripts\run_v1_pipeline.py --profile eodhd_true_full_torch_seq_static
-py -3.11 scripts\run_v1_pipeline.py --profile eodhd_true_full_torch_mlp
-
-$env:V1_XGBOOST_TRAINING_MODE = 'chunked'
-$env:V1_XGBOOST_DEVICE = 'cpu'
-$env:V1_XGBOOST_NTHREAD = '8'
-$env:V1_XGBOOST_CHUNK_ROWS = '1048576'
-py -3.11 scripts\run_v1_pipeline.py --profile eodhd_true_full_xgboost
+.\scripts\run_full_universe_retrain.ps1 -Resume
 ```
+
+The wrapper refreshes raw EODHD bars, resumes chunked daily-feature construction, consolidates incremental processed-feature sidecars, incrementally refreshes or builds the saved normalized feature artifact, materializes the filtered true-full strategy-universe panel, materializes the shared episode cache, and trains `xgboost_classifier`, `torch_mlp_classifier`, and `torch_seq_static_classifier` separately. `-Resume` skips completed stages, including normalization once both normalized output files exist and are at least as fresh as `processed/daily_features.csv`.
 
 Only promote the new models after confirming:
 

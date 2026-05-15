@@ -28,6 +28,7 @@ from src.data.research_universe import (
 )
 from src.data.v1_dataset import (
     BASE_STOCK_FEATURES,
+    COMPACT_CONTEXT_FEATURES,
     CONTEXT_FEATURES,
     DEFAULT_BENCHMARK_TICKER,
     DEFAULT_CLASSIFICATION_EVENT_TYPE,
@@ -35,6 +36,10 @@ from src.data.v1_dataset import (
     DEFAULT_CLASSIFICATION_THRESHOLD,
     DEFAULT_HORIZONS,
     DEFAULT_WINDOW_LENGTH,
+    FEATURE_SET_NAMES,
+    LEAN_ABSOLUTE_STOCK_FEATURES,
+    LEAN_FULL_PANEL_RELATIVE_FEATURES,
+    LEAN_SECTOR_RELATIVE_FEATURES,
     MARKET_CONTEXT_TICKERS,
     PATH_5PCT_20D_EVENT_TYPE,
     PATH_5PCT_20D_NEGATIVE_THRESHOLD,
@@ -45,6 +50,7 @@ from src.data.v1_dataset import (
     add_priority_a_ohlcv_features,
     add_window_summaries,
     classification_target_column,
+    is_normalized_lean_feature_set,
     load_market_context_features,
     parse_horizons,
     pathwise_classification_labels,
@@ -117,10 +123,19 @@ def _stock_columns_from_header(
     include_relative: bool,
     include_sentiment: bool,
     include_fundamentals: bool,
+    normalized_lean: bool = False,
 ) -> list[str]:
-    columns = _available(header, BASE_STOCK_FEATURES)
+    if normalized_lean:
+        columns = _available(header, LEAN_ABSOLUTE_STOCK_FEATURES)
+        columns.extend(_available(header, [*LEAN_FULL_PANEL_RELATIVE_FEATURES, *LEAN_SECTOR_RELATIVE_FEATURES]))
+    else:
+        columns = _available(header, BASE_STOCK_FEATURES)
     if include_relative:
-        columns.extend(_relative_columns(header))
+        columns.extend(
+            _available(header, [*LEAN_FULL_PANEL_RELATIVE_FEATURES, *LEAN_SECTOR_RELATIVE_FEATURES])
+            if normalized_lean
+            else _relative_columns(header)
+        )
     if include_sentiment:
         columns.extend(_available(header, SENTIMENT_FEATURE_COLUMNS))
     if include_fundamentals:
@@ -140,6 +155,12 @@ def _context_summary_columns(context_columns: Sequence[str], *, context_prefix: 
     return [f"{context_prefix}{name}" for name in _summary_columns("context_", context_columns)]
 
 
+def _context_columns_for_feature_set(context_columns: Sequence[str], feature_set: str) -> list[str]:
+    if is_normalized_lean_feature_set(feature_set):
+        return _available(context_columns, COMPACT_CONTEXT_FEATURES)
+    return list(context_columns)
+
+
 def _sequence_columns(
     *,
     header: Sequence[str],
@@ -152,12 +173,14 @@ def _sequence_columns(
         include_relative=config.include_relative,
         include_sentiment=config.include_sentiment,
         include_fundamentals=False,
+        normalized_lean=config.normalized_lean,
     )
+    active_context_columns = _context_columns_for_feature_set(context_columns, feature_set)
     if config.include_market_context:
-        columns.extend([f"market_context_{column}" for column in context_columns])
+        columns.extend([f"market_context_{column}" for column in active_context_columns])
         columns.append("market_context_missing")
     if config.include_sector_context:
-        columns.extend([f"sector_context_{column}" for column in context_columns])
+        columns.extend([f"sector_context_{column}" for column in active_context_columns])
         columns.append("sector_context_missing")
     return list(dict.fromkeys(columns))
 
@@ -170,18 +193,21 @@ def _tabular_columns(
 ) -> list[str]:
     include_sentiment = "sentiment" in feature_set
     include_fundamentals = "fundamentals" in feature_set
+    normalized_lean = is_normalized_lean_feature_set(feature_set)
     stock_columns = _stock_columns_from_header(
         header,
-        include_relative="relative" in feature_set,
+        include_relative=("relative" in feature_set) or normalized_lean,
         include_sentiment=include_sentiment,
         include_fundamentals=include_fundamentals,
+        normalized_lean=normalized_lean,
     )
     columns = _summary_columns("stock_", stock_columns)
+    active_context_columns = _context_columns_for_feature_set(context_columns, feature_set)
     if "market" in feature_set:
-        columns.extend(_context_summary_columns(context_columns, context_prefix="market_"))
+        columns.extend(_context_summary_columns(active_context_columns, context_prefix="market_"))
         columns.append("market_context_context_missing")
     if "sector" in feature_set:
-        columns.extend(_context_summary_columns(context_columns, context_prefix="sector_"))
+        columns.extend(_context_summary_columns(active_context_columns, context_prefix="sector_"))
         columns.append("sector_context_context_missing")
     return list(dict.fromkeys(columns))
 
@@ -777,7 +803,7 @@ def build_episode_cache(
         )
     ]
 
-    tabular_sets = [feature_set for feature_set in feature_sets if feature_set not in SEQUENCE_FEATURE_SET_NAMES]
+    tabular_sets = [feature_set for feature_set in feature_sets if feature_set in FEATURE_SET_NAMES]
     sequence_sets = [feature_set for feature_set in feature_sets if feature_set in SEQUENCE_FEATURE_SET_NAMES]
     tabular_feature_columns = {
         feature_set: _tabular_columns(header=header, context_columns=context_columns, feature_set=feature_set)
@@ -1010,9 +1036,17 @@ def build_episode_cache(
                 tabular_stock_kinds = {
                     feature_set: _stock_columns_from_header(
                         header,
-                        include_relative="relative" in feature_set,
+                        include_relative=("relative" in feature_set) or is_normalized_lean_feature_set(feature_set),
                         include_sentiment="sentiment" in feature_set,
                         include_fundamentals="fundamentals" in feature_set,
+                        normalized_lean=is_normalized_lean_feature_set(feature_set),
+                    )
+                    for feature_set in tabular_sets
+                }
+                tabular_context_kinds = {
+                    feature_set: _summary_columns(
+                        "context_",
+                        _context_columns_for_feature_set(context_columns, feature_set),
                     )
                     for feature_set in tabular_sets
                 }
@@ -1036,11 +1070,11 @@ def build_episode_cache(
                         stock_summary_columns = _summary_columns("stock_", stock_columns)
                         pieces.append(_row_from_frame(stock_summary, date_value, stock_summary_columns))
                         if "market" in feature_set:
-                            raw = _row_from_frame(market_summary, date_value, context_tables["context_summary_columns"])
+                            raw = _row_from_frame(market_summary, date_value, tabular_context_kinds[feature_set])
                             pieces.append(raw)
                             pieces.append(np.array([float(np.isnan(raw).all())], dtype=np.float32))
                         if "sector" in feature_set:
-                            raw = _row_from_frame(sector_summary, date_value, context_tables["context_summary_columns"])
+                            raw = _row_from_frame(sector_summary, date_value, tabular_context_kinds[feature_set])
                             pieces.append(raw)
                             pieces.append(np.array([float(np.isnan(raw).all())], dtype=np.float32))
                         tabular_arrays[feature_set][episode_idx, :] = _fill_finite(np.concatenate(pieces))

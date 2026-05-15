@@ -17,7 +17,8 @@
     "classification_threshold": 0.05,
     "eval_mode": "walk_forward",
     "feature_sets": [
-      "stock_relative_market_sector_fundamentals_sentiment"
+      "stock_relative_market_sector_fundamentals_sentiment",
+      "stock_normalized_lean_market_sector_fundamentals_sentiment"
     ],
     "final_stop_block_size": 21,
     "horizons": [

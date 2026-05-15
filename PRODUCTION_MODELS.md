@@ -18,15 +18,17 @@ Intended production target:
   - class `1`: otherwise neutral
 - The full 20-trading-day forward window is required. Unresolved rows are unlabeled and excluded from supervised train/eval.
 
-Intended future promoted set after retraining:
+Intended future promoted model families after retraining:
 
-| Model | Expected feature set | Label mode | Output behavior |
+| Model | Candidate feature sets | Label mode | Output behavior |
 |---|---|---|---|
-| `xgboost_classifier` | `stock_relative_market_sector_fundamentals_sentiment` | `path_5pct_20d` | `multi:softprob`, 3 class probabilities |
-| `torch_mlp_classifier` | `stock_relative_market_sector_fundamentals_sentiment` | `path_5pct_20d` | 3-logit softmax output |
-| `torch_seq_static_classifier` | `stock_relative_market_sector_sentiment_sequence` | `path_5pct_20d` | 3-logit softmax output |
+| `xgboost_classifier` | `stock_relative_market_sector_fundamentals_sentiment`; `stock_normalized_lean_market_sector_fundamentals_sentiment` | `path_5pct_20d` | `multi:softprob`, 3 class probabilities |
+| `torch_mlp_classifier` | `stock_relative_market_sector_fundamentals_sentiment`; `stock_normalized_lean_market_sector_fundamentals_sentiment` | `path_5pct_20d` | 3-logit softmax output |
+| `torch_seq_static_classifier` | `stock_relative_market_sector_sentiment_sequence`; `stock_normalized_lean_market_sector_sentiment_sequence` | `path_5pct_20d` | 3-logit softmax output |
 
 Only those three classifiers are supported for `path_5pct_20d`. Other classification baselines remain binary-only and are not valid production candidates for this label mode.
+
+The `stock_normalized_lean_*` feature sets are comparison candidates, not pre-approved replacements. Promote the broad or lean profile per model family only after OOS metrics and trading-report behavior justify the choice.
 
 Prediction columns for the future promoted set:
 

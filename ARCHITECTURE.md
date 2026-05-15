@@ -88,6 +88,7 @@ Current implementation snapshot:
   - `torch_seq_static_classifier` with `stock_relative_market_sector_sentiment_sequence`
   - `torch_mlp_classifier` with `stock_relative_market_sector_fundamentals_sentiment`
   - `xgboost_classifier` with `stock_relative_market_sector_fundamentals_sentiment`
+- Lean normalized-focused comparison feature sets are available for later OOS testing. They mirror the normal component choices with `stock_normalized_lean_*` names, while treating `relative` and `compact` as already built into the lean policy. These sets keep selected scale-free daily return/volatility/trend/liquidity ratios, selected same-date full-panel and sector-relative normalized columns, compact SPY/sector context, and optional sentiment/fundamentals. They intentionally exclude direct level-like volume/liquidity inputs such as `log1p_volume` and rolling log-volume levels.
 - The trainer can still run `regression`, `classification`, or `both` for experiments, but production runs should use `task_type=classification`.
 - The current baseline suite includes tabular baselines plus `torch_seq_static`.
 - Regression tabular baselines include `zero`, `mean`, `momentum_heuristic`, `ridge`, `elastic_net`, `lightgbm`, `xgboost`, `sklearn_hist_gb`, `sklearn_mlp`, and `torch_mlp`.
@@ -175,6 +176,14 @@ Implemented V1 sequence feature sets:
 - `stock_relative_market_sector_sequence`: stock daily features plus relative stock features, `SPY` context, and mapped sector ETF context.
 - `stock_sentiment_sequence`: stock daily features plus lagged daily sentiment features.
 - `stock_relative_market_sector_sentiment_sequence`: relative stock features plus `SPY`, sector ETF, and lagged sentiment context.
+- `stock_normalized_lean_sequence`
+- `stock_normalized_lean_market_sequence`
+- `stock_normalized_lean_sector_sequence`
+- `stock_normalized_lean_market_sector_sequence`
+- `stock_normalized_lean_sentiment_sequence`
+- `stock_normalized_lean_market_sentiment_sequence`
+- `stock_normalized_lean_sector_sentiment_sequence`
+- `stock_normalized_lean_market_sector_sentiment_sequence`: lean normalized-focused stock tokens plus compact `SPY`/sector ETF context and lagged sentiment.
 
 Each sequence set also has a compact counterpart, for example `stock_relative_market_sector_compact_sequence`. Compact sequence profiles keep the same component structure but use a smaller feature list, dropping obvious duplicate or highly correlated fields such as exact momentum aliases, percentile-rank counterparts, and some overlapping liquidity columns.
 
@@ -207,6 +216,24 @@ Implemented V1 tabular feature sets:
 - `stock_relative_market_sector_fundamentals`
 - `stock_only_fundamentals_sentiment`
 - `stock_relative_market_sector_fundamentals_sentiment`
+- `stock_normalized_lean`
+- `stock_normalized_lean_market`
+- `stock_normalized_lean_sector`
+- `stock_normalized_lean_market_sector`
+- `stock_normalized_lean_sentiment`
+- `stock_normalized_lean_market_sentiment`
+- `stock_normalized_lean_sector_sentiment`
+- `stock_normalized_lean_market_sector_sentiment`
+- `stock_normalized_lean_fundamentals`
+- `stock_normalized_lean_market_fundamentals`
+- `stock_normalized_lean_sector_fundamentals`
+- `stock_normalized_lean_market_sector_fundamentals`
+- `stock_normalized_lean_fundamentals_sentiment`
+- `stock_normalized_lean_market_fundamentals_sentiment`
+- `stock_normalized_lean_sector_fundamentals_sentiment`
+- `stock_normalized_lean_market_sector_fundamentals_sentiment`
+
+The `stock_normalized_lean_*` profiles are intended as lower-noise comparison candidates. They emphasize normalized cross-sectional/sector-relative signals and scale-free stock behavior while omitting direct level-like log-volume columns that duplicate the normalized liquidity signals. There are no separate `stock_normalized_lean_relative_*` or `stock_normalized_lean_*_compact` names because the lean profile already implies normalized/relative stock inputs and compact market/sector context.
 
 Approximate full vs compact feature counts when all expected columns are present:
 - `stock_only`: about 90

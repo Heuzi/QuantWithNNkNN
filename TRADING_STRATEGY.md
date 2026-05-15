@@ -86,6 +86,13 @@ The previous binary promoted set is deprecated and must not be used as the produ
 
 Those three models are the only supported `path_5pct_20d` production classifiers. They must be retrained and promoted before this strategy is used as the active production workflow.
 
+The retrain profiles can include both broad and lean normalized-focused feature-set candidates. The main lean production-candidate counterparts are:
+
+- `stock_normalized_lean_market_sector_fundamentals_sentiment` for tabular classifiers
+- `stock_normalized_lean_market_sector_sentiment_sequence` for the sequence/static classifier
+
+Additional lean ablation names such as `stock_normalized_lean`, `stock_normalized_lean_market`, and `stock_normalized_lean_fundamentals_sentiment` are available for research/model-selection runs. They should be evaluated against the broad feature sets before promotion; the trading strategy should use whichever promoted bundles are accepted after OOS review.
+
 The daily strategy commands remain the same after retraining and promotion. The default production ranking score is `pred_score_path_5pct_20d = P(class 2) - P(class 0)`, while `pred_prob_path_5pct_20d` remains the raw class-2 probability column.
 
 ### Prediction Refresh

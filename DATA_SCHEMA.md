@@ -85,6 +85,20 @@ V1 persisted feature artifacts:
 - Completed normalized artifacts should be reused for future retrain resumes until the upstream raw/processed feature panel changes. If incremental feature sidecars are consolidated into the main processed files, only the changed dates need to be renormalized when the saved normalized artifact exists; otherwise the full out-of-core normalizer builds the artifact. A crash before the normalized manifest is written means the normalization stage is incomplete and must be rerun.
 - Routine latest prediction refreshes should not rescan and renormalize the entire historical full panel. They rebuild the compact latest-inference cache under `processed/latest_inference/` using the same point-in-time feature semantics and strategy-universe policy for current target-pending windows.
 
+V1 normalized-focused model profiles:
+- The broad production-candidate profiles remain available for model comparison.
+- The lean normalized-focused profiles add lower-noise alternatives for later train/test comparison and mirror the normal component choices with `stock_normalized_lean_*` names.
+- Examples:
+  - `stock_normalized_lean`
+  - `stock_normalized_lean_market`
+  - `stock_normalized_lean_market_sector`
+  - `stock_normalized_lean_fundamentals_sentiment`
+  - `stock_normalized_lean_market_sector_fundamentals_sentiment`
+  - `stock_normalized_lean_market_sector_sentiment_sequence`
+- These profiles keep selected scale-free stock features, selected full-panel and sector-relative same-date normalized features, compact market/sector context, and optional as-of sentiment/fundamentals.
+- They intentionally omit direct level-like log-volume inputs such as `log1p_volume` and rolling log-volume levels, while retaining normalized liquidity signals such as `log1p_dollar_volume__cs_z`, `log1p_dollar_volume__cs_pct`, `log1p_dollar_volume__sector_cs_z`, and `log1p_dollar_volume__sector_cs_pct`.
+- Separate `relative` and `compact` suffixes are not used for lean profiles because those choices are part of the lean profile itself.
+
 ### Layer 3: as-of fundamentals and valuation features
 Examples:
 - earnings-related fields

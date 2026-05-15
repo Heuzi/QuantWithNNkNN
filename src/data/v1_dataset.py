@@ -211,6 +211,89 @@ COMPACT_CONTEXT_FEATURES = [
     "volume_zscore_20d",
 ]
 
+LEAN_ABSOLUTE_STOCK_FEATURES = [
+    "log_return_1d",
+    "gap_pct",
+    "intraday_return",
+    "hl_range_pct",
+    "close_location",
+    "true_range_pct",
+    "rolling_return_5d",
+    "rolling_return_20d",
+    "rolling_return_60d",
+    "rolling_vol_20d",
+    "rolling_vol_60d",
+    "price_vs_sma_20d",
+    "price_vs_sma_60d",
+    "momentum_20d",
+    "momentum_60d",
+    "volume_ratio_20d",
+    "dollar_volume_ratio_5d",
+    "volume_zscore_20d",
+    "stock_vs_market_return_1d",
+    "stock_vs_sector_return_1d",
+    "stock_vs_market_return_5d",
+    "stock_vs_sector_return_5d",
+]
+
+LEAN_RELATIVE_BASE_FEATURES = [
+    "log1p_dollar_volume",
+    "return_1d",
+    "rolling_return_5d",
+    "rolling_return_20d",
+    "rolling_return_60d",
+    "rolling_vol_20d",
+    "rolling_vol_60d",
+    "price_vs_sma_20d",
+    "price_vs_sma_60d",
+    "momentum_20d",
+    "momentum_60d",
+    "volume_ratio_20d",
+]
+
+LEAN_SECTOR_RELATIVE_BASE_FEATURES = [
+    "log1p_dollar_volume",
+    "return_1d",
+    "rolling_return_20d",
+    "rolling_return_60d",
+    "rolling_vol_20d",
+    "rolling_vol_60d",
+    "momentum_20d",
+    "momentum_60d",
+    "volume_ratio_20d",
+]
+
+LEAN_FULL_PANEL_RELATIVE_FEATURES = [
+    f"{feature}{suffix}"
+    for feature in LEAN_RELATIVE_BASE_FEATURES
+    for suffix in ("__cs_z", "__cs_pct")
+]
+
+LEAN_SECTOR_RELATIVE_FEATURES = [
+    f"{feature}{suffix}"
+    for feature in LEAN_SECTOR_RELATIVE_BASE_FEATURES
+    for suffix in ("__sector_cs_z", "__sector_cs_pct")
+]
+
+NORMALIZED_LEAN_TABULAR_FEATURE_SET_NAMES = (
+    "stock_normalized_lean",
+    "stock_normalized_lean_market",
+    "stock_normalized_lean_sector",
+    "stock_normalized_lean_market_sector",
+    "stock_normalized_lean_sentiment",
+    "stock_normalized_lean_market_sentiment",
+    "stock_normalized_lean_sector_sentiment",
+    "stock_normalized_lean_market_sector_sentiment",
+    "stock_normalized_lean_fundamentals",
+    "stock_normalized_lean_market_fundamentals",
+    "stock_normalized_lean_sector_fundamentals",
+    "stock_normalized_lean_market_sector_fundamentals",
+    "stock_normalized_lean_fundamentals_sentiment",
+    "stock_normalized_lean_market_fundamentals_sentiment",
+    "stock_normalized_lean_sector_fundamentals_sentiment",
+    "stock_normalized_lean_market_sector_fundamentals_sentiment",
+)
+
 FEATURE_SET_NAMES = (
     "stock_only",
     "stock_relative",
@@ -226,6 +309,7 @@ FEATURE_SET_NAMES = (
     "stock_relative_market_sector_fundamentals",
     "stock_only_fundamentals_sentiment",
     "stock_relative_market_sector_fundamentals_sentiment",
+    *NORMALIZED_LEAN_TABULAR_FEATURE_SET_NAMES,
 )
 FULL_SEQUENCE_BASE_FEATURE_SET_NAMES = (
     "stock_only",
@@ -249,9 +333,20 @@ COMPACT_SEQUENCE_BASE_FEATURE_SET_NAMES = (
     "stock_relative_sector_compact",
     "stock_relative_market_sector_compact",
 )
+NORMALIZED_LEAN_SEQUENCE_BASE_FEATURE_SET_NAMES = (
+    "stock_normalized_lean",
+    "stock_normalized_lean_market",
+    "stock_normalized_lean_sector",
+    "stock_normalized_lean_market_sector",
+    "stock_normalized_lean_sentiment",
+    "stock_normalized_lean_market_sentiment",
+    "stock_normalized_lean_sector_sentiment",
+    "stock_normalized_lean_market_sector_sentiment",
+)
 SEQUENCE_BASE_FEATURE_SET_NAMES = (
     *FULL_SEQUENCE_BASE_FEATURE_SET_NAMES,
     *COMPACT_SEQUENCE_BASE_FEATURE_SET_NAMES,
+    *NORMALIZED_LEAN_SEQUENCE_BASE_FEATURE_SET_NAMES,
 )
 SEQUENCE_FEATURE_SET_NAMES = (
     *SEQUENCE_BASE_FEATURE_SET_NAMES,
@@ -342,6 +437,7 @@ class SequenceFeatureConfig:
     include_sector_context: bool
     include_sentiment: bool
     compact: bool
+    normalized_lean: bool
 
     def to_dict(self) -> dict[str, bool]:
         return {
@@ -351,7 +447,28 @@ class SequenceFeatureConfig:
             "sector_context_features": self.include_sector_context,
             "sentiment_features": self.include_sentiment,
             "compact_feature_profile": self.compact,
+            "normalized_lean_feature_profile": self.normalized_lean,
         }
+
+
+def is_normalized_lean_feature_set(feature_set: str) -> bool:
+    return "normalized_lean" in feature_set.removesuffix("_sequence")
+
+
+def normalized_lean_stock_summary_kind(feature_set: str) -> str:
+    if not is_normalized_lean_feature_set(feature_set):
+        raise ValueError(f"Not a normalized-lean feature set: {feature_set!r}")
+    canonical = feature_set.removesuffix("_sequence")
+    parts = set(canonical.split("_"))
+    include_fundamentals = "fundamentals" in parts
+    include_sentiment = "sentiment" in parts
+    if include_fundamentals and include_sentiment:
+        return "stock_normalized_lean_fundamental_sentiment"
+    if include_fundamentals:
+        return "stock_normalized_lean_fundamental"
+    if include_sentiment:
+        return "stock_normalized_lean_sentiment"
+    return "stock_normalized_lean"
 
 
 def sequence_feature_config(feature_set: str) -> SequenceFeatureConfig:
@@ -359,12 +476,14 @@ def sequence_feature_config(feature_set: str) -> SequenceFeatureConfig:
         raise ValueError(f"Sequence inputs are only supported for {SEQUENCE_FEATURE_SET_NAMES}, got {feature_set}.")
     canonical = feature_set.removesuffix("_sequence")
     parts = set(canonical.split("_"))
+    normalized_lean = is_normalized_lean_feature_set(feature_set)
     return SequenceFeatureConfig(
-        include_relative="relative" in parts,
+        include_relative=("relative" in parts) or normalized_lean,
         include_market_context="market" in parts,
         include_sector_context="sector" in parts,
         include_sentiment="sentiment" in parts,
         compact="compact" in parts,
+        normalized_lean=normalized_lean,
     )
 
 
@@ -659,7 +778,23 @@ def add_context_relative_return_features(
     return stocks.drop(columns=["_sector_etf", "_sector_return_1d", "_sector_return_5d"], errors="ignore")
 
 
-def select_stock_feature_columns(df: pd.DataFrame, include_relative: bool, *, compact: bool = False) -> list[str]:
+def select_stock_feature_columns(
+    df: pd.DataFrame,
+    include_relative: bool,
+    *,
+    compact: bool = False,
+    normalized_lean: bool = False,
+) -> list[str]:
+    if normalized_lean:
+        cols = _available_numeric_columns(df, LEAN_ABSOLUTE_STOCK_FEATURES)
+        cols.extend(
+            _available_numeric_columns(
+                df,
+                [*LEAN_FULL_PANEL_RELATIVE_FEATURES, *LEAN_SECTOR_RELATIVE_FEATURES],
+            )
+        )
+        return list(dict.fromkeys(cols))
+
     cols = _available_numeric_columns(df, COMPACT_STOCK_FEATURES if compact else BASE_STOCK_FEATURES)
     if include_relative:
         if compact:
@@ -688,10 +823,16 @@ def select_augmented_stock_feature_columns(
     include_relative: bool,
     *,
     compact: bool = False,
+    normalized_lean: bool = False,
     include_sentiment: bool = False,
     include_fundamentals: bool = False,
 ) -> list[str]:
-    cols = select_stock_feature_columns(df, include_relative=include_relative, compact=compact)
+    cols = select_stock_feature_columns(
+        df,
+        include_relative=include_relative,
+        compact=compact,
+        normalized_lean=normalized_lean,
+    )
     if include_sentiment:
         cols.extend(_available_numeric_columns(df, SENTIMENT_FEATURE_COLUMNS))
     if include_fundamentals:
@@ -713,12 +854,13 @@ def select_sequence_feature_columns(
         stock_features,
         include_relative=config.include_relative,
         compact=config.compact,
+        normalized_lean=config.normalized_lean,
         include_sentiment=config.include_sentiment,
     )
     if config.include_market_context or config.include_sector_context:
         if context_features is None:
             raise ValueError(f"{feature_set} sequence inputs require context_features.")
-        context_cols = select_context_feature_columns(context_features, compact=config.compact)
+        context_cols = select_context_feature_columns(context_features, compact=config.compact or config.normalized_lean)
         if config.include_market_context:
             cols.extend(f"market_context_{col}" for col in context_cols)
             cols.append("market_context_missing")
@@ -765,6 +907,7 @@ def build_sequence_feature_store(
         stocks,
         include_relative=config.include_relative,
         compact=config.compact,
+        normalized_lean=config.normalized_lean,
         include_sentiment=config.include_sentiment,
     )
     frame = stocks[["ticker", "date", "gics_sector", *stock_cols]].copy()
@@ -777,7 +920,7 @@ def build_sequence_feature_store(
         context = context_features.copy()
         context["ticker"] = context["ticker"].astype(str).str.upper()
         context["date"] = context["date"].astype(str)
-        context_cols = select_context_feature_columns(context, compact=config.compact)
+        context_cols = select_context_feature_columns(context, compact=config.compact or config.normalized_lean)
         if not context_cols:
             raise ValueError(f"No context feature columns available for {feature_set}.")
         if config.include_market_context:
@@ -1187,14 +1330,34 @@ def build_v1_dataset(
                 cols = select_stock_feature_columns(stock_features, include_relative=False, compact=True)
             elif kind == "stock_relative_compact":
                 cols = select_stock_feature_columns(stock_features, include_relative=True, compact=True)
+            elif kind == "stock_normalized_lean":
+                cols = select_stock_feature_columns(
+                    stock_features,
+                    include_relative=True,
+                    normalized_lean=True,
+                )
             elif kind == "stock_sentiment":
                 cols = select_augmented_stock_feature_columns(stock_features, include_relative=False, include_sentiment=True)
             elif kind == "stock_relative_sentiment":
                 cols = select_augmented_stock_feature_columns(stock_features, include_relative=True, include_sentiment=True)
+            elif kind == "stock_normalized_lean_sentiment":
+                cols = select_augmented_stock_feature_columns(
+                    stock_features,
+                    include_relative=True,
+                    normalized_lean=True,
+                    include_sentiment=True,
+                )
             elif kind == "stock_fundamental":
                 cols = select_augmented_stock_feature_columns(stock_features, include_relative=False, include_fundamentals=True)
             elif kind == "stock_relative_fundamental":
                 cols = select_augmented_stock_feature_columns(stock_features, include_relative=True, include_fundamentals=True)
+            elif kind == "stock_normalized_lean_fundamental":
+                cols = select_augmented_stock_feature_columns(
+                    stock_features,
+                    include_relative=True,
+                    normalized_lean=True,
+                    include_fundamentals=True,
+                )
             elif kind == "stock_fundamental_sentiment":
                 cols = select_augmented_stock_feature_columns(
                     stock_features,
@@ -1206,6 +1369,14 @@ def build_v1_dataset(
                 cols = select_augmented_stock_feature_columns(
                     stock_features,
                     include_relative=True,
+                    include_sentiment=True,
+                    include_fundamentals=True,
+                )
+            elif kind == "stock_normalized_lean_fundamental_sentiment":
+                cols = select_augmented_stock_feature_columns(
+                    stock_features,
+                    include_relative=True,
+                    normalized_lean=True,
                     include_sentiment=True,
                     include_fundamentals=True,
                 )
@@ -1278,6 +1449,15 @@ def build_v1_dataset(
             True,
         ),
     }
+    for lean_name in NORMALIZED_LEAN_TABULAR_FEATURE_SET_NAMES:
+        include_market = "market" in lean_name
+        include_sector = "sector" in lean_name
+        frame_specs[lean_name] = (
+            normalized_lean_stock_summary_kind(lean_name),
+            include_market or include_sector,
+            include_market,
+            include_sector,
+        )
 
     feature_sets: dict[str, pd.DataFrame] = {}
     feature_columns: dict[str, list[str]] = {}
@@ -1389,10 +1569,27 @@ def build_latest_v1_feature_sets(
     stock_relative_cols = select_stock_feature_columns(stocks, include_relative=True)
     stock_compact_cols = select_stock_feature_columns(stocks, include_relative=False, compact=True)
     stock_relative_compact_cols = select_stock_feature_columns(stocks, include_relative=True, compact=True)
+    stock_normalized_lean_cols = select_stock_feature_columns(
+        stocks,
+        include_relative=True,
+        normalized_lean=True,
+    )
     stock_sentiment_cols = select_augmented_stock_feature_columns(stocks, include_relative=False, include_sentiment=True)
     stock_relative_sentiment_cols = select_augmented_stock_feature_columns(stocks, include_relative=True, include_sentiment=True)
+    stock_normalized_lean_sentiment_cols = select_augmented_stock_feature_columns(
+        stocks,
+        include_relative=True,
+        normalized_lean=True,
+        include_sentiment=True,
+    )
     stock_fundamental_cols = select_augmented_stock_feature_columns(stocks, include_relative=False, include_fundamentals=True)
     stock_relative_fundamental_cols = select_augmented_stock_feature_columns(stocks, include_relative=True, include_fundamentals=True)
+    stock_normalized_lean_fundamental_cols = select_augmented_stock_feature_columns(
+        stocks,
+        include_relative=True,
+        normalized_lean=True,
+        include_fundamentals=True,
+    )
     stock_fundamental_sentiment_cols = select_augmented_stock_feature_columns(
         stocks,
         include_relative=False,
@@ -1402,6 +1599,13 @@ def build_latest_v1_feature_sets(
     stock_relative_fundamental_sentiment_cols = select_augmented_stock_feature_columns(
         stocks,
         include_relative=True,
+        include_sentiment=True,
+        include_fundamentals=True,
+    )
+    stock_normalized_lean_fundamental_sentiment_cols = select_augmented_stock_feature_columns(
+        stocks,
+        include_relative=True,
+        normalized_lean=True,
         include_sentiment=True,
         include_fundamentals=True,
     )
@@ -1431,6 +1635,12 @@ def build_latest_v1_feature_sets(
         prefix="stock_",
         window_length=window_length,
     )
+    stock_normalized_lean_summary = add_window_summaries(
+        stocks,
+        feature_cols=stock_normalized_lean_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
     stock_sentiment_summary = add_window_summaries(
         stocks,
         feature_cols=stock_sentiment_cols,
@@ -1440,6 +1650,12 @@ def build_latest_v1_feature_sets(
     stock_relative_sentiment_summary = add_window_summaries(
         stocks,
         feature_cols=stock_relative_sentiment_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_normalized_lean_sentiment_summary = add_window_summaries(
+        stocks,
+        feature_cols=stock_normalized_lean_sentiment_cols,
         prefix="stock_",
         window_length=window_length,
     )
@@ -1455,6 +1671,12 @@ def build_latest_v1_feature_sets(
         prefix="stock_",
         window_length=window_length,
     )
+    stock_normalized_lean_fundamental_summary = add_window_summaries(
+        stocks,
+        feature_cols=stock_normalized_lean_fundamental_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
     stock_fundamental_sentiment_summary = add_window_summaries(
         stocks,
         feature_cols=stock_fundamental_sentiment_cols,
@@ -1464,6 +1686,12 @@ def build_latest_v1_feature_sets(
     stock_relative_fundamental_sentiment_summary = add_window_summaries(
         stocks,
         feature_cols=stock_relative_fundamental_sentiment_cols,
+        prefix="stock_",
+        window_length=window_length,
+    )
+    stock_normalized_lean_fundamental_sentiment_summary = add_window_summaries(
+        stocks,
+        feature_cols=stock_normalized_lean_fundamental_sentiment_cols,
         prefix="stock_",
         window_length=window_length,
     )
@@ -1505,6 +1733,12 @@ def build_latest_v1_feature_sets(
         right_on=["ticker", "date"],
         how="left",
     ).drop(columns=["date"], errors="ignore")
+    stock_normalized_lean = base.merge(
+        stock_normalized_lean_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
     stock_sentiment = base.merge(
         stock_sentiment_summary,
         left_on=["ticker", "anchor_date"],
@@ -1513,6 +1747,12 @@ def build_latest_v1_feature_sets(
     ).drop(columns=["date"], errors="ignore")
     stock_relative_sentiment = base.merge(
         stock_relative_sentiment_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+    stock_normalized_lean_sentiment = base.merge(
+        stock_normalized_lean_sentiment_summary,
         left_on=["ticker", "anchor_date"],
         right_on=["ticker", "date"],
         how="left",
@@ -1529,6 +1769,12 @@ def build_latest_v1_feature_sets(
         right_on=["ticker", "date"],
         how="left",
     ).drop(columns=["date"], errors="ignore")
+    stock_normalized_lean_fundamental = base.merge(
+        stock_normalized_lean_fundamental_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
     stock_fundamental_sentiment = base.merge(
         stock_fundamental_sentiment_summary,
         left_on=["ticker", "anchor_date"],
@@ -1537,6 +1783,12 @@ def build_latest_v1_feature_sets(
     ).drop(columns=["date"], errors="ignore")
     stock_relative_fundamental_sentiment = base.merge(
         stock_relative_fundamental_sentiment_summary,
+        left_on=["ticker", "anchor_date"],
+        right_on=["ticker", "date"],
+        how="left",
+    ).drop(columns=["date"], errors="ignore")
+    stock_normalized_lean_fundamental_sentiment = base.merge(
+        stock_normalized_lean_fundamental_sentiment_summary,
         left_on=["ticker", "anchor_date"],
         right_on=["ticker", "date"],
         how="left",
@@ -1611,6 +1863,26 @@ def build_latest_v1_feature_sets(
             include_sector=True,
         ),
     }
+    lean_frames_by_kind = {
+        "stock_normalized_lean": stock_normalized_lean,
+        "stock_normalized_lean_sentiment": stock_normalized_lean_sentiment,
+        "stock_normalized_lean_fundamental": stock_normalized_lean_fundamental,
+        "stock_normalized_lean_fundamental_sentiment": stock_normalized_lean_fundamental_sentiment,
+    }
+    for lean_name in NORMALIZED_LEAN_TABULAR_FEATURE_SET_NAMES:
+        base_frame = lean_frames_by_kind[normalized_lean_stock_summary_kind(lean_name)]
+        include_market = "market" in lean_name
+        include_sector = "sector" in lean_name
+        frames[lean_name] = (
+            feature_frame(
+                base_frame,
+                context_summary_frame=compact_context_summary,
+                include_market=include_market,
+                include_sector=include_sector,
+            )
+            if include_market or include_sector
+            else base_frame
+        )
     non_features = {
         "ticker",
         "anchor_date",

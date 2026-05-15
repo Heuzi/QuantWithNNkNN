@@ -1,1 +1,18 @@
-migrate everything to C drive. so that everything is more efficient. 
+can you migrate everything (the whole project including datasets) to C drive. so that everything is more efficient. You are allowed to move projects/files.
+
+Next we will do the required fix fix:
+
+Fix materialize_panel to coerce numeric price columns before research-universe/pct-change logic.
+Make the wrapper fail-fast when a stage exits nonzero.
+Clean the partial SSD panel/cache outputs.
+Resume the original multi stages from materialize_panel; normalization should now be skipped because the normalized CSV + manifest are complete. For your info:"So the full chain is currently here:
+
+refresh_root_raw - done or skipped by resume
+rebuild_root_features_resume - done or skipped by resume
+merge_incremental_feature_updates - done
+rebuild_root_normalized - current stage
+materialize_panel - not started
+materialize_cache - not started
+train_xgboost - not started
+train_torch_mlp - not started
+train_torch_seq_static - not started" These notes might not be accurate, you decide where to resume from.

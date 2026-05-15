@@ -33,12 +33,19 @@
     "eval_mode": "walk_forward",
     "feature_sets": [
       "stock_only",
+      "stock_normalized_lean",
       "stock_relative_market_sector",
+      "stock_normalized_lean_market_sector",
       "stock_only_fundamentals_sentiment",
+      "stock_normalized_lean_fundamentals_sentiment",
       "stock_relative_market_sector_fundamentals_sentiment",
+      "stock_normalized_lean_market_sector_fundamentals_sentiment",
       "stock_only_sequence",
+      "stock_normalized_lean_sequence",
       "stock_relative_market_sector_sequence",
-      "stock_relative_market_sector_sentiment_sequence"
+      "stock_normalized_lean_market_sector_sequence",
+      "stock_relative_market_sector_sentiment_sequence",
+      "stock_normalized_lean_market_sector_sentiment_sequence"
     ],
     "final_stop_block_size": 21,
     "horizons": [

@@ -2,8 +2,8 @@
   "name": "eodhd_true_full_torch_seq_static",
   "description": "Model-specific true full-universe run for the selected sequence/static classifier. This expects the shared filtered true-full cache rebuilt under path_5pct_20d and trains only torch_seq_static_classifier on the production sequence feature set.",
   "dataset_root": "data/eodhd_us_equities_30y",
-  "training_dataset_root": "data/eodhd_training_panels/eodhd_true_full_walk_forward",
-  "episode_cache_dir": "data/eodhd_training_panels/eodhd_true_full_walk_forward/episode_cache",
+  "training_dataset_root": "C:/QuantWithNNkNN_fast/data/eodhd_training_panels/eodhd_true_full_walk_forward",
+  "episode_cache_dir": "C:/QuantWithNNkNN_fast/data/eodhd_training_panels/eodhd_true_full_walk_forward/episode_cache",
   "stages": [
     "train"
   ],
@@ -26,7 +26,7 @@
       20
     ],
     "max_episodes": 0,
-    "output_root": "artifacts/v1_baselines",
+    "output_root": "C:/QuantWithNNkNN_fast/artifacts/v1_baselines",
     "run_name": "eodhd_true_full_torch_seq_static",
     "task_type": "classification",
     "torch_batch_size": 2048,

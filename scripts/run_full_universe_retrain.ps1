@@ -1,6 +1,7 @@
 param(
     [string]$DatasetRoot = "data/eodhd_us_equities_30y",
     [string]$EndDate = "2026-05-08",
+    [string]$FastRoot = "C:/QuantWithNNkNN_fast",
     [string]$LogRoot = "logs/full_universe_retrain",
     [switch]$Resume,
     [switch]$DryRun
@@ -43,7 +44,11 @@ function Invoke-Step {
 
 function Remove-IfExists {
     param([string]$PathText)
-    $path = Join-Path $repoRoot $PathText
+    if ([System.IO.Path]::IsPathRooted($PathText)) {
+        $path = $PathText
+    } else {
+        $path = Join-Path $repoRoot $PathText
+    }
     if (Test-Path $path) {
         Remove-Item -LiteralPath $path -Recurse -Force
     }
@@ -63,6 +68,11 @@ function Invoke-Cleanup {
         "artifacts/v1_baselines/eodhd_true_full_xgboost",
         "artifacts/v1_baselines/eodhd_true_full_torch_mlp",
         "artifacts/v1_baselines/eodhd_true_full_torch_seq_static",
+        "$FastRoot/data/eodhd_training_panels/eodhd_true_full_walk_forward",
+        "$FastRoot/artifacts/v1_baselines/eodhd_true_full_walk_forward",
+        "$FastRoot/artifacts/v1_baselines/eodhd_true_full_xgboost",
+        "$FastRoot/artifacts/v1_baselines/eodhd_true_full_torch_mlp",
+        "$FastRoot/artifacts/v1_baselines/eodhd_true_full_torch_seq_static",
         "logs/v1_pipeline_state/eodhd_true_full_walk_forward.json",
         "logs/v1_pipeline_state/eodhd_true_full_xgboost.json",
         "logs/v1_pipeline_state/eodhd_true_full_torch_mlp.json",
@@ -101,23 +111,23 @@ function Test-StageOutput {
             return $true
         }
         "panel" {
-            $path = Join-Path $repoRoot "data/eodhd_training_panels/eodhd_true_full_walk_forward/processed/materialized_panel_manifest.json"
+            $path = Join-Path $FastRoot "data/eodhd_training_panels/eodhd_true_full_walk_forward/processed/materialized_panel_manifest.json"
             return (Test-Path $path)
         }
         "cache" {
-            $path = Join-Path $repoRoot "data/eodhd_training_panels/eodhd_true_full_walk_forward/episode_cache/manifest.json"
+            $path = Join-Path $FastRoot "data/eodhd_training_panels/eodhd_true_full_walk_forward/episode_cache/manifest.json"
             return (Test-Path $path)
         }
         "train_xgboost" {
-            $path = Join-Path $repoRoot "artifacts/v1_baselines/eodhd_true_full_xgboost/final_models.json"
+            $path = Join-Path $FastRoot "artifacts/v1_baselines/eodhd_true_full_xgboost/final_models.json"
             return (Test-Path $path)
         }
         "train_torch_mlp" {
-            $path = Join-Path $repoRoot "artifacts/v1_baselines/eodhd_true_full_torch_mlp/final_models.json"
+            $path = Join-Path $FastRoot "artifacts/v1_baselines/eodhd_true_full_torch_mlp/final_models.json"
             return (Test-Path $path)
         }
         "train_torch_seq_static" {
-            $path = Join-Path $repoRoot "artifacts/v1_baselines/eodhd_true_full_torch_seq_static/final_models.json"
+            $path = Join-Path $FastRoot "artifacts/v1_baselines/eodhd_true_full_torch_seq_static/final_models.json"
             return (Test-Path $path)
         }
     }

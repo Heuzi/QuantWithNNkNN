@@ -1,1 +1,1 @@
-This is the state of my machine now. Check if it's still running. If not anymore, we can stop it and fix it for rerun. Before rerun, add checkpoint/resume mode for normalization. 
+migrate everything to C drive. so that everything is more efficient. 

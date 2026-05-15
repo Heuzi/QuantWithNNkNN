@@ -283,7 +283,9 @@ def _stage_environment(stage: str) -> dict[str, str]:
         # Keep CPU utilization high for tree models, but avoid multiplying RAM
         # pressure through many prefetched torch batches on full-universe runs.
         env.setdefault("V1_XGBOOST_NTHREAD", str(max(cpu_count - 1, 1)))
-        env.setdefault("V1_TORCH_NUM_WORKERS", str(max(min(cpu_count // 4, 4), 1)))
+        env.setdefault("V1_XGBOOST_BATCH_ROWS", "524288")
+        env.setdefault("V1_XGBOOST_PREDICT_BATCH_ROWS", "524288")
+        env.setdefault("V1_TORCH_NUM_WORKERS", str(max(min(cpu_count // 2, 6), 1)))
         env.setdefault("V1_TORCH_PREFETCH_FACTOR", "2")
     return env
 

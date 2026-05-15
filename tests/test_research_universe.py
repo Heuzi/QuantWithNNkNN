@@ -7,6 +7,7 @@ import pandas as pd
 
 from src.data.research_universe import (
     ConservativeResearchUniverseConfig,
+    add_conservative_research_universe_columns,
     latest_research_universe_diagnostics,
 )
 
@@ -95,6 +96,18 @@ class ConservativeResearchUniverseTests(unittest.TestCase):
             by_ticker.loc["SPIKE", "research_primary_rejection_reason"],
             {"REJECTED_SPIKE_ABS_RETURN", "REJECTED_SPIKE_TRUE_RANGE"},
         )
+
+    def test_numeric_string_close_columns_support_pct_change_fallback(self) -> None:
+        frame = pd.DataFrame(_rows("GOOD", start_price=40.0, daily_drift=0.06, dollar_volume=25_000_000.0))
+        for column in ("open", "high", "low", "close", "volume", "dollar_volume", "true_range_pct"):
+            frame[column] = frame[column].map(str)
+        frame["return_1d"] = ""
+
+        diagnostics = add_conservative_research_universe_columns(frame, ConservativeResearchUniverseConfig())
+
+        self.assertIn("research_max_abs_return_60d", diagnostics.columns)
+        self.assertGreater(diagnostics["research_max_abs_return_60d"].notna().sum(), 0)
+        self.assertTrue(pd.api.types.is_float_dtype(diagnostics["research_close"]))
 
 
 if __name__ == "__main__":

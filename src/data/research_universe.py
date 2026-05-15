@@ -275,7 +275,8 @@ def add_conservative_research_universe_columns(
         dollar_volume / out["research_median_dollar_volume_20d"].replace(0.0, np.nan)
     )
 
-    previous_close_6m = grouped["close"].shift(config.return_6m_lookback_days).astype(float)
+    close_grouped = close.groupby(out["ticker"], sort=False)
+    previous_close_6m = close_grouped.shift(config.return_6m_lookback_days).astype(float)
     out["research_return_6m"] = close / previous_close_6m - 1.0
 
     high_for_drawdown = high.where(np.isfinite(high), close)
@@ -306,7 +307,7 @@ def add_conservative_research_universe_columns(
 
     return_1d = _numeric_column(out, "return_1d")
     if return_1d.isna().all():
-        return_1d = grouped["close"].pct_change()
+        return_1d = close_grouped.pct_change()
     out["research_max_abs_return_60d"] = _rolling_by_ticker(
         out,
         return_1d.abs(),

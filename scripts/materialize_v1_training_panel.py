@@ -40,6 +40,19 @@ METADATA_COLUMNS = (
     "metadata_source",
 )
 
+RESEARCH_NUMERIC_COLUMNS = (
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "dollar_volume",
+    "return_1d",
+    "true_range_pct",
+    "rolling_avg_dollar_volume_20d",
+    "rolling_avg_dollar_volume_60d",
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -266,6 +279,14 @@ def _enriched_row(row: dict[str, str], metadata_by_ticker: dict[str, dict[str, s
     return out
 
 
+def _coerce_research_numeric_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    for column in RESEARCH_NUMERIC_COLUMNS:
+        if column in out.columns:
+            out[column] = pd.to_numeric(out[column], errors="coerce")
+    return out
+
+
 def _iter_selected_ticker_groups(
     path: Path,
     *,
@@ -341,7 +362,10 @@ def _write_filtered_stock_features(
             ]
             group_frame = pd.DataFrame(rows)
             if research_config is not None:
-                diagnostics = add_conservative_research_universe_columns(group_frame, research_config)
+                diagnostics = add_conservative_research_universe_columns(
+                    _coerce_research_numeric_columns(group_frame),
+                    research_config,
+                )
                 research_input_rows += int(len(diagnostics))
                 mask = diagnostics["research_universe_ok"].fillna(False).astype(bool)
                 research_passed_rows += int(mask.sum())

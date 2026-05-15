@@ -19,13 +19,13 @@
     "end_date": "2026-05-08",
     "force": true,
     "max_tickers": 0,
-    "output_dataset_root": "C:/QuantWithNNkNN_fast/data/eodhd_training_panels/eodhd_true_full_walk_forward",
+    "output_dataset_root": "data/eodhd_training_panels/eodhd_true_full_walk_forward",
     "progress_every": 1000000,
     "start_date": "1995-01-01",
     "ticker_selection": "first"
   },
   "materialize_cache": {
-    "cache_dir": "C:/QuantWithNNkNN_fast/data/eodhd_training_panels/eodhd_true_full_walk_forward/episode_cache",
+    "cache_dir": "data/eodhd_training_panels/eodhd_true_full_walk_forward/episode_cache",
     "force": true,
     "progress_every": 250
   },
@@ -53,7 +53,7 @@
       20
     ],
     "max_episodes": 0,
-    "output_root": "C:/QuantWithNNkNN_fast/artifacts/v1_baselines",
+    "output_root": "artifacts/v1_baselines",
     "run_name": "eodhd_true_full_walk_forward",
     "task_type": "classification",
     "torch_batch_size": 1024,

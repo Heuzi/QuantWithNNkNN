@@ -1,7 +1,7 @@
 param(
     [string]$DatasetRoot = "data/eodhd_us_equities_30y",
     [string]$EndDate = "2026-05-08",
-    [string]$FastRoot = "C:/QuantWithNNkNN_fast",
+    [string]$FastRoot = "",
     [string]$LogRoot = "logs/full_universe_retrain",
     [switch]$Resume,
     [switch]$DryRun
@@ -11,6 +11,9 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
+if ([string]::IsNullOrWhiteSpace($FastRoot)) {
+    $FastRoot = $repoRoot
+}
 
 function Write-Stage {
     param(
@@ -39,6 +42,9 @@ function Invoke-Step {
         return
     }
     & $Command[0] $Command[1..($Command.Length - 1)]
+    if ($LASTEXITCODE -ne 0) {
+        throw "Step '$Name' failed with exit code $LASTEXITCODE."
+    }
     Write-Stage -Name $Name -State "END"
 }
 

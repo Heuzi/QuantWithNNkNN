@@ -55,6 +55,14 @@ from src.data.eodhd_stage1 import (  # noqa: E402
     normalize_eodhd_eod_rows,
 )
 from src.data.massive_stage1 import compute_daily_features, write_csv, write_json  # noqa: E402
+from src.data.normalization import (  # noqa: E402
+    FULL_PANEL_MIN_GROUP_SIZE,
+    FULL_PANEL_NORMALIZATION_FEATURES,
+    LOG1P_BASE_FEATURES,
+    SECTOR_MIN_GROUP_SIZE,
+    SECTOR_NORMALIZATION_FEATURES,
+    load_equity_metadata,
+)
 from src.data.v1_dataset import (  # noqa: E402
     MARKET_CONTEXT_TICKERS,
     SECTOR_ETF_BY_GICS,
@@ -67,6 +75,7 @@ from src.data.v1_dataset import (  # noqa: E402
     load_market_context_features,
     select_augmented_stock_feature_columns,
     select_context_feature_columns,
+    is_normalized_lean_feature_set,
     preferred_stock_feature_path,
     validate_model_feature_columns,
     _filtered_stock_universe,
@@ -161,6 +170,16 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         help="Production model run directory. Repeat for multiple models. Defaults to the current three-model set.",
+    )
+    parser.add_argument(
+        "--leaderboard-rank",
+        type=int,
+        default=0,
+        help=(
+            "Optional per-run-dir classification leaderboard rank to score. "
+            "Use 1 to score only the best OOS feature set from each model family. "
+            "Default 0 keeps all model records for backwards compatibility."
+        ),
     )
     parser.add_argument("--anchor-date", default="", help="Optional YYYY-MM-DD cutoff for predictions.")
     parser.add_argument(
@@ -875,10 +894,17 @@ def _build_recent_raw_cache(
             detail=f"loading existing {stock_cache_path.name}",
             width=progress_width,
         )
-        stock_source = _load_bar_csv(stock_cache_path)
-        if _max_rows_per_ticker(stock_source) < rows_per_ticker:
+        stock_source = [
+            row
+            for row in _load_bar_csv(stock_cache_path)
+            if str(row.get("ticker") or "").upper() in stock_tickers
+        ]
+        stock_source_tickers = {str(row.get("ticker") or "").upper() for row in stock_source if row.get("ticker")}
+        if len(stock_source_tickers) < len(stock_tickers) or _max_rows_per_ticker(stock_source) < rows_per_ticker:
             _log(
-                f"{stock_cache_path.name} has fewer than {rows_per_ticker} rows/ticker; "
+                f"{stock_cache_path.name} is incomplete for the requested universe "
+                f"({len(stock_source_tickers):,}/{len(stock_tickers):,} tickers) or has fewer than "
+                f"{rows_per_ticker} rows/ticker; "
                 "rebuilding from full raw bars"
             )
             stock_source = _stream_recent_bar_rows(
@@ -889,7 +915,11 @@ def _build_recent_raw_cache(
                 progress_path=progress_path,
                 progress_width=progress_width,
             )
-            stock_source.extend(_load_bar_csv(stock_update_path))
+            stock_source.extend(
+                row
+                for row in _load_bar_csv(stock_update_path)
+                if str(row.get("ticker") or "").upper() in stock_tickers
+            )
     else:
         stock_source = _stream_recent_bar_rows(
             raw_dir / "eodhd_stock_bars.csv",
@@ -899,7 +929,11 @@ def _build_recent_raw_cache(
             progress_path=progress_path,
             progress_width=progress_width,
         )
-        stock_source.extend(_load_bar_csv(stock_update_path))
+        stock_source.extend(
+            row
+            for row in _load_bar_csv(stock_update_path)
+            if str(row.get("ticker") or "").upper() in stock_tickers
+        )
     stock_source.extend(fetched_stock_rows)
     stock_recent = _apply_exchange_by_ticker(_tail_bar_rows(stock_source, rows_per_ticker), exchange_by_ticker)
 
@@ -912,10 +946,17 @@ def _build_recent_raw_cache(
             detail=f"loading existing {context_cache_path.name}",
             width=progress_width,
         )
-        context_source = _load_bar_csv(context_cache_path)
-        if _max_rows_per_ticker(context_source) < rows_per_ticker:
+        context_source = [
+            row
+            for row in _load_bar_csv(context_cache_path)
+            if str(row.get("ticker") or "").upper() in context_tickers
+        ]
+        context_source_tickers = {str(row.get("ticker") or "").upper() for row in context_source if row.get("ticker")}
+        if len(context_source_tickers) < len(context_tickers) or _max_rows_per_ticker(context_source) < rows_per_ticker:
             _log(
-                f"{context_cache_path.name} has fewer than {rows_per_ticker} rows/ticker; "
+                f"{context_cache_path.name} is incomplete for the requested context universe "
+                f"({len(context_source_tickers):,}/{len(context_tickers):,} tickers) or has fewer than "
+                f"{rows_per_ticker} rows/ticker; "
                 "rebuilding from full raw bars"
             )
             _report_progress(
@@ -931,7 +972,11 @@ def _build_recent_raw_cache(
                 for row in _load_bar_csv(raw_dir / "market_context_bars.csv")
                 if str(row.get("ticker") or "").upper() in context_tickers
             ]
-            context_source.extend(_load_bar_csv(context_update_path))
+            context_source.extend(
+                row
+                for row in _load_bar_csv(context_update_path)
+                if str(row.get("ticker") or "").upper() in context_tickers
+            )
     else:
         _report_progress(
             progress_path,
@@ -946,7 +991,11 @@ def _build_recent_raw_cache(
             for row in _load_bar_csv(raw_dir / "market_context_bars.csv")
             if str(row.get("ticker") or "").upper() in context_tickers
         ]
-        context_source.extend(_load_bar_csv(context_update_path))
+        context_source.extend(
+            row
+            for row in _load_bar_csv(context_update_path)
+            if str(row.get("ticker") or "").upper() in context_tickers
+        )
     context_source.extend(fetched_context_rows)
     context_recent = _tail_bar_rows(context_source, rows_per_ticker)
 
@@ -1207,6 +1256,7 @@ def _load_latest_feature_cache(
     stock_tickers: set[str],
     context_tickers: set[str],
     min_rows_per_ticker: int = 0,
+    require_normalized_lean: bool = False,
     progress_path: Path | None = None,
     progress_width: int = 30,
 ) -> tuple[pd.DataFrame, pd.DataFrame] | None:
@@ -1230,6 +1280,9 @@ def _load_latest_feature_cache(
     stock_features["date"] = stock_features["date"].astype(str)
     context_features["ticker"] = context_features["ticker"].astype(str).str.upper()
     context_features["date"] = context_features["date"].astype(str)
+    if require_normalized_lean and not _has_normalized_lean_columns(stock_features):
+        _log("latest feature cache is missing normalized-lean cross-sectional columns; rebuilding")
+        return None
     stock_features = stock_features[stock_features["ticker"].isin(stock_tickers)].copy()
     context_features = context_features[context_features["ticker"].isin(context_tickers)].copy()
     if min_rows_per_ticker > 0:
@@ -1252,10 +1305,153 @@ def _load_latest_feature_cache(
     return stock_features, context_features
 
 
+def _records_require_normalized_lean(records: Sequence[dict[str, object]]) -> bool:
+    return any(is_normalized_lean_feature_set(str(record.get("feature_set") or "")) for record in records)
+
+
+def _has_normalized_lean_columns(stock_features: pd.DataFrame) -> bool:
+    columns = set(stock_features.columns)
+    return any(
+        column.endswith("__cs_z")
+        or column.endswith("__cs_pct")
+        or column.endswith("__sector_cs_z")
+        or column.endswith("__sector_cs_pct")
+        for column in columns
+    )
+
+
+def _normalize_latest_stock_features(
+    stock_features: pd.DataFrame,
+    *,
+    dataset_root: Path,
+    latest_dir: Path,
+    progress_path: Path | None,
+    progress_width: int,
+) -> pd.DataFrame:
+    if stock_features.empty or _has_normalized_lean_columns(stock_features):
+        return stock_features
+    metadata_path = dataset_root / "raw" / "eodhd_equity_metadata.csv"
+    sector_metadata = load_equity_metadata(metadata_path) if metadata_path.exists() else {}
+    normalized = stock_features.copy()
+    normalized["ticker"] = normalized["ticker"].astype(str).str.upper()
+    normalized["date"] = normalized["date"].astype(str)
+    if "gics_sector" not in normalized.columns:
+        normalized["gics_sector"] = None
+    if "gics_sub_industry" not in normalized.columns:
+        normalized["gics_sub_industry"] = None
+    if sector_metadata:
+        sector_map = {ticker: meta.get("gics_sector") for ticker, meta in sector_metadata.items()}
+        industry_map = {ticker: meta.get("gics_sub_industry") for ticker, meta in sector_metadata.items()}
+        missing_sector = normalized["gics_sector"].isna() | (normalized["gics_sector"].astype(str).str.strip() == "")
+        missing_industry = normalized["gics_sub_industry"].isna() | (
+            normalized["gics_sub_industry"].astype(str).str.strip() == ""
+        )
+        normalized.loc[missing_sector, "gics_sector"] = normalized.loc[missing_sector, "ticker"].map(sector_map)
+        normalized.loc[missing_industry, "gics_sub_industry"] = normalized.loc[missing_industry, "ticker"].map(industry_map)
+    _report_progress(
+        progress_path,
+        phase="normalize_latest_features",
+        current=0,
+        total=None,
+        detail="computing same-date normalized-lean columns",
+        width=progress_width,
+    )
+
+    for base_feature in LOG1P_BASE_FEATURES:
+        source = (
+            pd.to_numeric(normalized[base_feature], errors="coerce")
+            if base_feature in normalized.columns
+            else pd.Series(np.nan, index=normalized.index)
+        )
+        normalized[f"log1p_{base_feature}"] = np.where(source >= 0.0, np.log1p(source), np.nan)
+
+    normalized["cs_universe_count"] = np.nan
+    normalized["sector_universe_count"] = np.nan
+
+    def update_min_count(count_key: str, counts: pd.Series) -> None:
+        valid = counts.notna() & (counts > 0)
+        current = pd.to_numeric(normalized[count_key], errors="coerce")
+        replacement = counts.astype(float)
+        normalized[count_key] = np.where(
+            valid & current.notna(),
+            np.minimum(current, replacement),
+            np.where(valid, replacement, current),
+        )
+
+    def add_group_columns(
+        *,
+        feature: str,
+        group_keys: object,
+        z_column: str,
+        pct_column: str,
+        count_key: str,
+        min_group_size: int,
+    ) -> None:
+        if feature not in normalized.columns:
+            normalized[z_column] = np.nan
+            normalized[pct_column] = np.nan
+            return
+        values = pd.to_numeric(normalized[feature], errors="coerce")
+        grouped = values.groupby(group_keys, sort=False, dropna=True)
+        counts = grouped.transform("count")
+        update_min_count(count_key, counts)
+        means = grouped.transform("mean")
+        mean_squares = values.pow(2).groupby(group_keys, sort=False, dropna=True).transform("mean")
+        std = np.sqrt((mean_squares - means.pow(2)).clip(lower=0.0))
+        ranks = grouped.rank(method="average")
+        finite = values.notna()
+        pct_mask = finite & (counts >= min_group_size) & (counts > 1)
+        z_mask = pct_mask & (std > 0)
+        normalized[pct_column] = np.where(pct_mask, (ranks - 1.0) / (counts - 1.0), np.nan)
+        normalized[z_column] = np.where(z_mask, (values - means) / std, np.nan)
+
+    date_keys = normalized["date"]
+    for feature in FULL_PANEL_NORMALIZATION_FEATURES:
+        add_group_columns(
+            feature=feature,
+            group_keys=date_keys,
+            z_column=f"{feature}__cs_z",
+            pct_column=f"{feature}__cs_pct",
+            count_key="cs_universe_count",
+            min_group_size=FULL_PANEL_MIN_GROUP_SIZE,
+        )
+
+    sector_keys = [normalized["date"], normalized["gics_sector"]]
+    for feature in SECTOR_NORMALIZATION_FEATURES:
+        add_group_columns(
+            feature=feature,
+            group_keys=sector_keys,
+            z_column=f"{feature}__sector_cs_z",
+            pct_column=f"{feature}__sector_cs_pct",
+            count_key="sector_universe_count",
+            min_group_size=SECTOR_MIN_GROUP_SIZE,
+        )
+
+    normalized["cs_universe_count"] = pd.to_numeric(
+        normalized["cs_universe_count"],
+        errors="coerce",
+    ).round()
+    normalized["sector_universe_count"] = pd.to_numeric(
+        normalized["sector_universe_count"],
+        errors="coerce",
+    ).round()
+    normalized.to_csv(latest_dir / LATEST_STOCK_FEATURES_FILENAME, index=False)
+    _report_progress(
+        progress_path,
+        phase="normalize_latest_features",
+        current=1,
+        total=1,
+        detail=f"stock_features={len(normalized):,}",
+        width=progress_width,
+    )
+    return normalized
+
+
 def _refresh_latest_inference_dataset(
     args: argparse.Namespace,
     run_dirs: Sequence[Path],
     *,
+    records: Sequence[dict[str, object]],
     research_config: ConservativeResearchUniverseConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object], Path]:
     dataset_root = Path(args.dataset_root)
@@ -1263,6 +1459,7 @@ def _refresh_latest_inference_dataset(
     required_rows_per_ticker = (
         research_config.required_recent_rows_per_ticker if research_config.enabled else 0
     )
+    require_normalized_lean = _records_require_normalized_lean(records)
     requested_rows_per_ticker = max(int(args.recent_raw_rows_per_ticker), 125, required_rows_per_ticker)
     latest_dir.mkdir(parents=True, exist_ok=True)
     progress_path = latest_dir / "progress.json"
@@ -1311,6 +1508,7 @@ def _refresh_latest_inference_dataset(
             stock_tickers=stock_tickers,
             context_tickers=context_tickers,
             min_rows_per_ticker=required_rows_per_ticker,
+            require_normalized_lean=require_normalized_lean,
             progress_path=progress_path,
             progress_width=args.progress_bar_width,
         )
@@ -1372,6 +1570,15 @@ def _refresh_latest_inference_dataset(
         progress_width=args.progress_bar_width,
         feature_progress_every_tickers=args.feature_progress_every_tickers,
     )
+    raw_stock_features_for_sidecar = stock_features
+    if require_normalized_lean:
+        stock_features = _normalize_latest_stock_features(
+            stock_features,
+            dataset_root=dataset_root,
+            latest_dir=latest_dir,
+            progress_path=progress_path,
+            progress_width=args.progress_bar_width,
+        )
     planned_dates = [str(value)[:10] for value in fetch_manifest.get("planned_fetch_dates", []) if value]
     min_update_date = min(planned_dates) if planned_dates else None
     feature_update_manifest = (
@@ -1380,7 +1587,7 @@ def _refresh_latest_inference_dataset(
         else _persist_incremental_feature_updates(
             dataset_root=dataset_root,
             latest_dir=latest_dir,
-            stock_features=stock_features,
+            stock_features=raw_stock_features_for_sidecar,
             context_features=context_features,
             min_update_date=min_update_date,
             progress_path=progress_path,
@@ -1461,13 +1668,50 @@ def _load_recent_stock_features(
     return tails
 
 
-def _load_model_records(run_dirs: Sequence[Path]) -> list[dict[str, object]]:
+def _load_model_records(run_dirs: Sequence[Path], *, leaderboard_rank: int = 0) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for run_dir in run_dirs:
         model_index_path = _resolve_model_index_path(run_dir)
         model_index = json.loads(model_index_path.read_text(encoding="utf-8"))
-        for record in model_index.get("models", []):
-            records.append({"run_dir": run_dir, "model_index_path": model_index_path, **record})
+        run_records = [
+            {"run_dir": run_dir, "model_index_path": model_index_path, **record}
+            for record in model_index.get("models", [])
+        ]
+        if leaderboard_rank > 0:
+            leaderboard = _leaderboard_for_run(run_dir, "classification")
+            required_columns = {"model_name", "feature_set", "leaderboard_rank"}
+            if leaderboard.empty or not required_columns.issubset(leaderboard.columns):
+                raise SystemExit(
+                    f"Cannot select leaderboard rank {leaderboard_rank} for {run_dir}: "
+                    "missing classification leaderboard with model_name, feature_set, and leaderboard_rank."
+                )
+            leaderboard = leaderboard.copy()
+            leaderboard["leaderboard_rank"] = pd.to_numeric(
+                leaderboard["leaderboard_rank"],
+                errors="coerce",
+            )
+            selected = leaderboard[leaderboard["leaderboard_rank"] == int(leaderboard_rank)]
+            selected_keys = {
+                (str(row["model_name"]), str(row["feature_set"]))
+                for row in selected[["model_name", "feature_set"]].to_dict("records")
+            }
+            run_records = [
+                record
+                for record in run_records
+                if str(record.get("task_type") or "classification") == "classification"
+                and (str(record.get("model_name")), str(record.get("feature_set"))) in selected_keys
+            ]
+            if len(run_records) != 1:
+                details = ", ".join(
+                    f"{record.get('model_name')}::{record.get('feature_set')}"
+                    for record in run_records
+                ) or "none"
+                raise SystemExit(
+                    f"Expected exactly one classification model at leaderboard rank {leaderboard_rank} "
+                    f"in {run_dir}, found {len(run_records)}: {details}"
+                )
+            run_records[0]["selection_leaderboard_rank"] = int(leaderboard_rank)
+        records.extend(run_records)
     if not records:
         raise SystemExit("No models found in the requested run directories.")
     return records
@@ -1571,8 +1815,10 @@ def _build_latest_feature_sets_for_records(
     feature_set_names = sorted(requested_tabular)
     for feature_index, feature_set in enumerate(feature_set_names, start=1):
         parts = set(feature_set.split("_"))
+        normalized_lean = is_normalized_lean_feature_set(feature_set)
         compact = "compact" in parts
-        include_relative = "relative" in parts
+        context_compact = compact or normalized_lean
+        include_relative = ("relative" in parts) or normalized_lean
         include_market = "market" in parts
         include_sector = "sector" in parts
         include_fundamentals = "fundamentals" in parts
@@ -1590,6 +1836,7 @@ def _build_latest_feature_sets_for_records(
             stocks,
             include_relative=include_relative,
             compact=compact,
+            normalized_lean=normalized_lean,
             include_sentiment=include_sentiment,
             include_fundamentals=include_fundamentals,
         )
@@ -1606,15 +1853,15 @@ def _build_latest_feature_sets_for_records(
             how="left",
         ).drop(columns=["date"], errors="ignore")
         if include_market or include_sector:
-            if compact not in context_summary_cache:
-                context_cols = select_context_feature_columns(context, compact=compact)
-                context_summary_cache[compact] = add_window_summaries(
+            if context_compact not in context_summary_cache:
+                context_cols = select_context_feature_columns(context, compact=context_compact)
+                context_summary_cache[context_compact] = add_window_summaries(
                     context,
                     feature_cols=context_cols,
                     prefix="context_",
                     window_length=window_length,
                 )
-            context_summary = context_summary_cache[compact]
+            context_summary = context_summary_cache[context_compact]
             if include_market:
                 frame = _merge_context(
                     frame,
@@ -2072,7 +2319,7 @@ def main() -> None:
         width=args.progress_bar_width,
     )
 
-    records = _load_model_records(run_dirs)
+    records = _load_model_records(run_dirs, leaderboard_rank=max(int(args.leaderboard_rank), 0))
     benchmark_ticker = str(records[0].get("benchmark_ticker") or "SPY")
     window_length = max(int(record.get("window_length") or 60) for record in records)
     eligibility_config = None
@@ -2084,6 +2331,7 @@ def main() -> None:
     stock_features, context_features, refresh_manifest, latest_dir = _refresh_latest_inference_dataset(
         args,
         run_dirs,
+        records=records,
         research_config=research_config,
     )
     if args.anchor_date:
@@ -2228,6 +2476,17 @@ def main() -> None:
         "latest_inference_dir": str(latest_dir.resolve()),
         "latest_inference_manifest": refresh_manifest,
         "run_dirs": [str(path) for path in run_dirs],
+        "leaderboard_rank_filter": int(args.leaderboard_rank) if args.leaderboard_rank else None,
+        "selected_models": [
+            {
+                "model_name": str(record.get("model_name")),
+                "feature_set": str(record.get("feature_set")),
+                "run_dir": str(record.get("run_dir")),
+                "artifact_path": str(record.get("artifact_path")),
+                "selection_leaderboard_rank": record.get("selection_leaderboard_rank"),
+            }
+            for record in records
+        ],
         "model_count": len(records),
         "anchor_date_arg": args.anchor_date or None,
     }

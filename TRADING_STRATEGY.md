@@ -44,7 +44,7 @@ Follow all existing project MD instructions and repo conventions.
 
 Use the intended production classification setup based on `path_5pct_20d`.
 
-`PRODUCTION_MODELS.md` is the source of truth for promotion status. Under the current repo state, there is no active promoted multiclass production set until the three supported classifiers are retrained and promoted under `path_5pct_20d`.
+`PRODUCTION_MODELS.md` is the source of truth for promotion status. The current active multiclass production-candidate set uses the best OOS leaderboard-ranked feature set from each supported `path_5pct_20d` classifier family.
 
 Refreshing data is separate from retraining models:
 
@@ -76,24 +76,23 @@ Do not print or save sensitive algorithm details, full feature vectors, model ar
 
 ## Promotion State
 
-No active promoted multiclass production set exists yet.
+The active multiclass production-candidate set is the best OOS leaderboard-ranked model from each supported classifier family. Here, "best" means `leaderboard_rank = 1` within each model family's `classification_oos_leaderboard.csv` / `classification_leaderboard.csv`.
 
-The previous binary promoted set is deprecated and must not be used as the production recommendation set. The intended promoted set after retraining remains:
+The previous binary promoted set is deprecated and must not be used as the production recommendation set.
 
-- `xgboost_classifier`
-- `torch_mlp_classifier`
-- `torch_seq_static_classifier`
+Current selected `path_5pct_20d` production-candidate bundles:
 
-Those three models are the only supported `path_5pct_20d` production classifiers. They must be retrained and promoted before this strategy is used as the active production workflow.
+| Model | Selected feature set | Selection basis |
+|---|---|---|
+| `xgboost_classifier` | `stock_normalized_lean_market_sector_fundamentals_sentiment` | OOS leaderboard rank 1 |
+| `torch_mlp_classifier` | `stock_relative_market_sector_fundamentals_sentiment` | OOS leaderboard rank 1 |
+| `torch_seq_static_classifier` | `stock_normalized_lean_market_sector_sentiment_sequence` | OOS leaderboard rank 1 |
 
-The retrain profiles can include both broad and lean normalized-focused feature-set candidates. The main lean production-candidate counterparts are:
+Those three models are the only supported `path_5pct_20d` production classifiers. Other classification baselines remain research-only unless separately retrained, evaluated, and promoted for this multiclass target.
 
-- `stock_normalized_lean_market_sector_fundamentals_sentiment` for tabular classifiers
-- `stock_normalized_lean_market_sector_sentiment_sequence` for the sequence/static classifier
+The retrain profiles can include both broad and lean normalized-focused feature-set candidates. The trading strategy should use `--leaderboard-rank 1` to score only the current best feature set per model family. Omitting `--leaderboard-rank` keeps the backwards-compatible behavior of scoring every model record in the supplied run directories.
 
-Additional lean ablation names such as `stock_normalized_lean`, `stock_normalized_lean_market`, and `stock_normalized_lean_fundamentals_sentiment` are available for research/model-selection runs. They should be evaluated against the broad feature sets before promotion; the trading strategy should use whichever promoted bundles are accepted after OOS review.
-
-The daily strategy commands remain the same after retraining and promotion. The default production ranking score is `pred_score_path_5pct_20d = P(class 2) - P(class 0)`, while `pred_prob_path_5pct_20d` remains the raw class-2 probability column.
+The default production ranking score is `pred_score_path_5pct_20d = P(class 2) - P(class 0)`, while `pred_prob_path_5pct_20d` remains the raw class-2 probability column.
 
 ### Prediction Refresh
 
@@ -104,7 +103,8 @@ Default daily command:
 ```powershell
 py -3.11 scripts\run_trading_strategy.py `
   --dataset-root data\eodhd_us_equities_30y `
-  --credentials-path EODHD_api_key
+  --credentials-path EODHD_api_key `
+  --leaderboard-rank 1
 ```
 
 The script writes the bounded latest-window feature cache to:

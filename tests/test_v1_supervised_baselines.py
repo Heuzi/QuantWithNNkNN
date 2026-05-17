@@ -988,6 +988,101 @@ class V1SupervisedBaselineTests(unittest.TestCase):
         self.assertEqual(pred.shape, (len(x), 3))
         self.assertTrue(np.allclose(pred.sum(axis=1), 1.0, atol=1e-5))
 
+    @unittest.skipUnless(importlib.util.find_spec("xgboost") is not None, "xgboost is not installed")
+    def test_xgboost_multiclass_classifier_lazy_smoke(self) -> None:
+        class LazyFrame:
+            def __init__(self, values: np.ndarray) -> None:
+                self.values = values.astype(np.float32)
+                self.shape = self.values.shape
+
+            def __len__(self) -> int:
+                return self.values.shape[0]
+
+            def iter_numpy_batches(self, *, batch_size: int, shuffle: bool = False, random_state: int = 0):
+                rows = np.arange(len(self), dtype=np.int64)
+                if shuffle:
+                    rng = np.random.default_rng(random_state)
+                    rng.shuffle(rows)
+                for start in range(0, len(rows), batch_size):
+                    local = rows[start : start + batch_size]
+                    yield local, self.values[local].copy()
+
+        values = np.column_stack(
+            [
+                np.linspace(0.0, 1.0, 18),
+                np.tile([0.0, 1.0, 2.0], 6),
+                np.tile([2.0, 1.0, 0.0], 6),
+            ]
+        )
+        x = LazyFrame(values)
+        y = pd.DataFrame({PATH_5PCT_20D_EVENT_TYPE: np.tile([0, 1, 2], 6)})
+        model = make_model(
+            "xgboost_classifier",
+            task_type="classification",
+            model_kwargs={
+                "num_classes": 3,
+                "n_estimators": 3,
+                "patience": 2,
+                "prefer_gpu": False,
+            },
+        )
+        model.fit(x, y)
+        pred = model.predict(x)
+
+        self.assertEqual(pred.shape, (len(x), 3))
+        self.assertTrue(np.allclose(pred.sum(axis=1), 1.0, atol=1e-5))
+
+    @unittest.skipUnless(importlib.util.find_spec("xgboost") is not None, "xgboost is not installed")
+    def test_xgboost_lazy_classifier_predict_uses_best_iteration(self) -> None:
+        import xgboost as xgb
+
+        class LazyFrame:
+            def __init__(self, values: np.ndarray) -> None:
+                self.values = values.astype(np.float32)
+                self.shape = self.values.shape
+
+            def __len__(self) -> int:
+                return self.values.shape[0]
+
+            def iter_numpy_batches(self, *, batch_size: int, shuffle: bool = False, random_state: int = 0):
+                rows = np.arange(len(self), dtype=np.int64)
+                if shuffle:
+                    rng = np.random.default_rng(random_state)
+                    rng.shuffle(rows)
+                for start in range(0, len(rows), batch_size):
+                    local = rows[start : start + batch_size]
+                    yield local, self.values[local].copy()
+
+        values = np.column_stack(
+            [
+                np.linspace(-2.0, 2.0, 90),
+                np.sin(np.linspace(0.0, 6.0, 90)),
+                np.cos(np.linspace(0.0, 6.0, 90)),
+            ]
+        )
+        x = LazyFrame(values)
+        y = pd.DataFrame({PATH_5PCT_20D_EVENT_TYPE: np.tile([0, 1, 2], 30)})
+        model = make_model(
+            "xgboost_classifier",
+            task_type="classification",
+            model_kwargs={
+                "num_classes": 3,
+                "n_estimators": 8,
+                "patience": 2,
+                "prefer_gpu": False,
+            },
+        )
+        model.fit(x, y)
+        model.best_iteration_ = 1
+
+        pred = model.predict(x)
+        dmatrix = xgb.DMatrix(values.astype(np.float32))
+        expected = model._format_prediction(model.model_.predict(dmatrix, iteration_range=(0, 1)))
+        default = model._format_prediction(model.model_.predict(dmatrix))
+
+        self.assertTrue(np.allclose(pred, expected, atol=1e-7))
+        self.assertFalse(np.allclose(default, expected, atol=1e-7))
+
 
 if __name__ == "__main__":
     unittest.main()

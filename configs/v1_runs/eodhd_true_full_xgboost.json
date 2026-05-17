@@ -30,6 +30,8 @@
     "output_root": "artifacts/v1_baselines",
     "run_name": "eodhd_true_full_xgboost",
     "task_type": "classification",
+    "xgboost_n_estimators": 1000,
+    "xgboost_patience": 30,
     "walk_forward_max_folds": 6,
     "walk_forward_min_train_dates": 252,
     "walk_forward_oos_block_size": 21,

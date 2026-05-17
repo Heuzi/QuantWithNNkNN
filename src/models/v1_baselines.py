@@ -7,6 +7,7 @@ import os
 import pickle
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Protocol, Sequence
 
@@ -302,6 +303,23 @@ def _emit_progress_line(prefix: str, completed: int, total: int, *, detail: str 
     print(message, flush=True)
 
 
+def _append_training_progress_event(payload: dict[str, object]) -> None:
+    path_text = os.environ.get("V1_TRAINING_PROGRESS_LOG", "").strip()
+    if not path_text:
+        return
+    try:
+        payload = {
+            "generated_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            **payload,
+        }
+        path = Path(path_text)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    except Exception:
+        return
+
+
 def _make_xgboost_progress_callback(xgb, *, model_name: str, phase: str, total_rounds: int):
     total_rounds = max(int(total_rounds), 1)
     progress_every = _xgboost_progress_every(total_rounds)
@@ -319,6 +337,7 @@ def _make_xgboost_progress_callback(xgb, *, model_name: str, phase: str, total_r
             ):
                 return False
             metric_tail = ""
+            metrics: dict[str, float] = {}
             if evals_log:
                 parts: list[str] = []
                 for dataset_name, metric_map in evals_log.items():
@@ -326,7 +345,9 @@ def _make_xgboost_progress_callback(xgb, *, model_name: str, phase: str, total_r
                         continue
                     metric_name, metric_values = next(iter(metric_map.items()))
                     if metric_values:
-                        parts.append(f"{dataset_name}.{metric_name}={float(metric_values[-1]):.5f}")
+                        metric_value = float(metric_values[-1])
+                        metrics[f"{dataset_name}.{metric_name}"] = metric_value
+                        parts.append(f"{dataset_name}.{metric_name}={metric_value:.5f}")
                 metric_tail = " ".join(parts)
             elapsed = round(time.monotonic() - self.start_time, 1)
             detail = f"rounds elapsed={elapsed}s"
@@ -338,9 +359,42 @@ def _make_xgboost_progress_callback(xgb, *, model_name: str, phase: str, total_r
                 total_rounds,
                 detail=detail,
             )
+            _append_training_progress_event(
+                {
+                    "step": "xgboost_training_round",
+                    "model_name": model_name,
+                    "phase": phase,
+                    "round": round_number,
+                    "total_rounds": total_rounds,
+                    "elapsed_seconds": elapsed,
+                    "metrics": metrics,
+                }
+            )
             return False
 
     return _Callback()
+
+
+def _xgboost_booster_predict(model: Any, dmatrix: Any, *, best_iteration: int | None = None) -> np.ndarray:
+    if best_iteration is not None:
+        try:
+            end_iteration = int(best_iteration)
+        except (TypeError, ValueError):
+            end_iteration = 0
+        if end_iteration > 0:
+            try:
+                boosted_rounds = int(model.num_boosted_rounds())
+                end_iteration = min(end_iteration, boosted_rounds)
+            except Exception:
+                pass
+            try:
+                return model.predict(dmatrix, iteration_range=(0, end_iteration))
+            except TypeError:
+                # Older XGBoost releases use ntree_limit instead of iteration_range.
+                best_ntree_limit = getattr(model, "best_ntree_limit", None)
+                if best_ntree_limit:
+                    return model.predict(dmatrix, ntree_limit=int(best_ntree_limit))
+    return model.predict(dmatrix)
 
 
 def _sequence_standardizer_batches(store: Any, cutoff_date: str) -> Iterable[np.ndarray]:
@@ -1444,6 +1498,14 @@ class XGBoostRegressor:
                 evals=evals,
                 early_stopping_rounds=self.patience if evals else None,
                 verbose_eval=25 if evals else False,
+                callbacks=[
+                    _make_xgboost_progress_callback(
+                        xgb,
+                        model_name="xgboost",
+                        phase="fit",
+                        total_rounds=self.n_estimators,
+                    )
+                ],
             )
         except Exception as exc:
             if self.device_ != "cuda":
@@ -1458,6 +1520,14 @@ class XGBoostRegressor:
                 evals=evals,
                 early_stopping_rounds=self.patience if evals else None,
                 verbose_eval=25 if evals else False,
+                callbacks=[
+                    _make_xgboost_progress_callback(
+                        xgb,
+                        model_name="xgboost",
+                        phase="fit",
+                        total_rounds=self.n_estimators,
+                    )
+                ],
             )
         best_iteration = getattr(self.model_, "best_iteration", None)
         self.best_iteration_ = int(best_iteration + 1) if best_iteration is not None else self.n_estimators
@@ -2795,31 +2865,18 @@ class XGBoostClassifier:
     ) -> "XGBoostClassifier":
         import xgboost as xgb
 
-        y_train = _as_array(y).reshape(-1).astype(np.float32)
+        y_train = self._target_values(y)
         if np.unique(y_train).size < 2:
-            self.model_ = _ConstantProbabilityClassifier(float(y_train[0]) if len(y_train) else 0.0)
+            self.model_ = self._constant_model(y_train)
             self.best_iteration_ = 1
             self.device_ = "cpu"
             self.gpu_fallback_error_ = ""
             return self
-        y_val_arr = _as_array(val_y).reshape(-1).astype(np.float32) if val_y is not None else None
-        scale_pos_weight = float((len(y_train) - y_train.sum()) / max(y_train.sum(), 1.0))
+        y_val_arr = self._target_values(val_y) if val_y is not None else None
         self.gpu_fallback_error_ = ""
         self.device_ = _xgboost_device(self.prefer_gpu)
         nthread = _xgboost_nthread()
-        params = {
-            "learning_rate": 0.03,
-            "max_depth": 4,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "objective": "binary:logistic",
-            "tree_method": "hist",
-            "device": self.device_,
-            "eval_metric": "logloss",
-            "scale_pos_weight": max(scale_pos_weight, 1.0),
-            "seed": self.random_state,
-            "nthread": nthread,
-        }
+        params = self._training_params(y_values=y_train, nthread=nthread)
         if _xgboost_training_mode(len(x)) == "chunked":
             self.model_, self.best_iteration_ = self._train_lazy_chunks(
                 x,
@@ -2848,6 +2905,8 @@ class XGBoostClassifier:
                     "n_estimators": self.n_estimators,
                     "device": self.device_,
                     "nthread": nthread,
+                    "objective": params.get("objective"),
+                    "num_class": params.get("num_class"),
                 }
             ),
             flush=True,
@@ -2860,6 +2919,14 @@ class XGBoostClassifier:
                 evals=evals,
                 early_stopping_rounds=self.patience if evals else None,
                 verbose_eval=25 if evals else False,
+                callbacks=[
+                    _make_xgboost_progress_callback(
+                        xgb,
+                        model_name="xgboost_classifier",
+                        phase="fit",
+                        total_rounds=self.n_estimators,
+                    )
+                ],
             )
         except Exception as exc:
             if self.device_ != "cuda":
@@ -2874,6 +2941,14 @@ class XGBoostClassifier:
                 evals=evals,
                 early_stopping_rounds=self.patience if evals else None,
                 verbose_eval=25 if evals else False,
+                callbacks=[
+                    _make_xgboost_progress_callback(
+                        xgb,
+                        model_name="xgboost_classifier",
+                        phase="fit",
+                        total_rounds=self.n_estimators,
+                    )
+                ],
             )
         best_iteration = getattr(self.model_, "best_iteration", None)
         self.best_iteration_ = int(best_iteration + 1) if best_iteration is not None else self.n_estimators
@@ -3036,14 +3111,28 @@ class XGBoostClassifier:
                 batch_size = 262_144
             for _, batch in x.iter_numpy_batches(batch_size=batch_size, shuffle=False):
                 values = np.nan_to_num(batch.astype(np.float32, copy=False), nan=0.0, posinf=0.0, neginf=0.0)
-                outputs.append(self._format_prediction(self.model_.predict(xgb.DMatrix(values))))
+                outputs.append(
+                    self._format_prediction(
+                        _xgboost_booster_predict(
+                            self.model_,
+                            xgb.DMatrix(values),
+                            best_iteration=getattr(self, "best_iteration_", None),
+                        )
+                    )
+                )
             if not outputs:
                 return np.empty((0, int(self.num_classes) if self._is_multiclass() else 1), dtype=np.float64)
             return np.vstack(outputs)
         x_values = self._preprocess(x, fit=False)
         if not hasattr(self.model_, "predict_proba"):
             values = np.nan_to_num(x_values.astype(np.float32, copy=False), nan=0.0, posinf=0.0, neginf=0.0)
-            return self._format_prediction(self.model_.predict(xgb.DMatrix(values)))
+            return self._format_prediction(
+                _xgboost_booster_predict(
+                    self.model_,
+                    xgb.DMatrix(values),
+                    best_iteration=getattr(self, "best_iteration_", None),
+                )
+            )
         return self._format_prediction(self.model_.predict_proba(x_values)).astype(np.float64)
 
 
@@ -3423,19 +3512,16 @@ class TorchMLPClassifier:
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
-            print(
-                json.dumps(
-                    {
-                        "step": "torch_mlp_classifier_epoch",
-                        "epoch": epoch + 1,
-                        "max_epochs": self.max_epochs,
-                        "best_epoch": best_epoch,
-                        "metric": best_metric,
-                        "device": str(self.device_),
-                    }
-                ),
-                flush=True,
-            )
+            epoch_event = {
+                "step": "torch_mlp_classifier_epoch",
+                "epoch": epoch + 1,
+                "max_epochs": self.max_epochs,
+                "best_epoch": best_epoch,
+                "metric": best_metric,
+                "device": str(self.device_),
+            }
+            print(json.dumps(epoch_event), flush=True)
+            _append_training_progress_event(epoch_event)
             _emit_progress_line(
                 "torch_mlp_classifier:epoch",
                 epoch + 1,
@@ -3867,19 +3953,16 @@ class TorchSequenceStaticClassifier:
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
-            print(
-                json.dumps(
-                    {
-                        "step": "torch_seq_static_classifier_epoch",
-                        "epoch": epoch + 1,
-                        "max_epochs": self.max_epochs,
-                        "best_epoch": best_epoch,
-                        "metric": best_metric,
-                        "device": str(self.device_),
-                    }
-                ),
-                flush=True,
-            )
+            epoch_event = {
+                "step": "torch_seq_static_classifier_epoch",
+                "epoch": epoch + 1,
+                "max_epochs": self.max_epochs,
+                "best_epoch": best_epoch,
+                "metric": best_metric,
+                "device": str(self.device_),
+            }
+            print(json.dumps(epoch_event), flush=True)
+            _append_training_progress_event(epoch_event)
             _emit_progress_line(
                 "torch_seq_static_classifier:epoch",
                 epoch + 1,

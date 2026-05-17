@@ -1,18 +1,22 @@
-can you migrate everything (the whole project including datasets) to C drive. so that everything is more efficient. You are allowed to move projects/files.
+currently:
+"The full run is testing 3 classifier models, each on 2 feature sets, for 6 walk-forward folds.
 
-Next we will do the required fix fix:
+Model	Type	Feature Sets
+xgboost_classifier	tabular XGBoost	stock_relative_market_sector_fundamentals_sentiment; stock_normalized_lean_market_sector_fundamentals_sentiment
+torch_mlp_classifier	tabular neural net / MLP	stock_relative_market_sector_fundamentals_sentiment; stock_normalized_lean_market_sector_fundamentals_sentiment
+torch_seq_static_classifier	60-day sequence + static neural model	stock_relative_market_sector_sentiment_sequence; stock_normalized_lean_market_sector_sentiment_sequence
+"
+We want to do ablation study. by running each model on smaller sets of features:
+such as:
+stock_realative_only
+stock_normalized_lean_market_sector
+stock_fundamentals
 
-Fix materialize_panel to coerce numeric price columns before research-universe/pct-change logic.
-Make the wrapper fail-fast when a stage exits nonzero.
-Clean the partial SSD panel/cache outputs.
-Resume the original multi stages from materialize_panel; normalization should now be skipped because the normalized CSV + manifest are complete. For your info:"So the full chain is currently here:
+Help me decide the possible datasets.
 
-refresh_root_raw - done or skipped by resume
-rebuild_root_features_resume - done or skipped by resume
-merge_incremental_feature_updates - done
-rebuild_root_normalized - current stage
-materialize_panel - not started
-materialize_cache - not started
-train_xgboost - not started
-train_torch_mlp - not started
-train_torch_seq_static - not started" These notes might not be accurate, you decide where to resume from.
+Then carry out the experiment and train the models. 
+We want to decide the best model/feature set combination.
+
+The six ones are already trained, we can ignore them.
+Try to reuse their datasets whenever possible, I don't want to renormalize everything.
+

@@ -5,6 +5,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import re
 import time
 import sys
 
@@ -62,6 +63,7 @@ from src.models.v1_baselines import (  # noqa: E402
     evaluate_classification_predictions,
     evaluate_predictions,
     is_sequence_static_model,
+    load_model_bundle,
     make_model,
     prediction_frame,
     save_model_bundle,
@@ -153,6 +155,8 @@ def parse_args() -> argparse.Namespace:
             "pathwise target; sustained_pathwise_outperform and path_5pct_20d are opt-in."
         ),
     )
+    parser.add_argument("--xgboost-n-estimators", type=int, default=0, help="Override XGBoost max boosting rounds.")
+    parser.add_argument("--xgboost-patience", type=int, default=0, help="Override XGBoost early-stop patience.")
     parser.add_argument("--torch-max-epochs", type=int, default=0, help="Override max epochs for torch models.")
     parser.add_argument("--torch-patience", type=int, default=0, help="Override early-stop patience for torch models.")
     parser.add_argument("--torch-batch-size", type=int, default=0, help="Override batch size for torch models.")
@@ -318,6 +322,11 @@ def _torch_model_kwargs(args: argparse.Namespace, model_name: str) -> dict[str, 
 
 def _model_kwargs(args: argparse.Namespace, model_name: str, task_type: str) -> dict[str, object]:
     kwargs = _torch_model_kwargs(args, model_name)
+    if model_name in {"xgboost", "xgboost_classifier"}:
+        if args.xgboost_n_estimators and args.xgboost_n_estimators > 0:
+            kwargs["n_estimators"] = args.xgboost_n_estimators
+        if args.xgboost_patience and args.xgboost_patience > 0:
+            kwargs["patience"] = args.xgboost_patience
     if task_type == "classification" and args.classification_event_type == PATH_5PCT_20D_EVENT_TYPE:
         kwargs["num_classes"] = len(classification_class_labels(args.classification_event_type))
     return kwargs
@@ -651,6 +660,94 @@ def _write_task_outputs(
             predictions.to_csv(output_dir / target_name, index=False)
 
 
+def _safe_artifact_component(value: object) -> str:
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("._")
+    return text or "item"
+
+
+def _walk_forward_checkpoint_paths(
+    *,
+    output_dir: Path,
+    task_type: str,
+    model_name: str,
+    feature_set: str,
+    fold_id: int,
+) -> tuple[Path, Path]:
+    checkpoint_dir = output_dir / "checkpoints" / "walk_forward" / task_type
+    stem = "__".join(
+        _safe_artifact_component(part)
+        for part in (feature_set, model_name, f"fold_{fold_id}")
+    )
+    return checkpoint_dir / f"{stem}.pkl", checkpoint_dir / f"{stem}.json"
+
+
+def _walk_forward_resume_key(
+    *,
+    args: argparse.Namespace,
+    task_type: str,
+    model_name: str,
+    feature_set: str,
+    fold_id: int,
+    target_columns: list[str],
+    model_kwargs: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "task_type": task_type,
+        "model_name": model_name,
+        "feature_set": feature_set,
+        "fold_id": int(fold_id),
+        "target_columns": list(target_columns),
+        "window_length": int(args.window_length),
+        "classification_event_type": args.classification_event_type if task_type == "classification" else None,
+        "classification_horizon": int(args.classification_horizon) if task_type == "classification" else None,
+        "classification_threshold": float(args.classification_threshold) if task_type == "classification" else None,
+        "model_kwargs": model_kwargs,
+    }
+
+
+def _append_training_progress(output_dir: Path, payload: dict[str, object]) -> None:
+    path = output_dir / "training_progress.jsonl"
+    event = {
+        "generated_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        **payload,
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True) + "\n")
+
+
+def _load_fold_checkpoint(path: Path, *, resume_key: dict[str, object]) -> object | None:
+    if not path.exists():
+        return None
+    try:
+        bundle = load_model_bundle(path)
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "step": "walk_forward_fold_checkpoint_ignored",
+                    "artifact_path": str(path.resolve()),
+                    "reason": f"{type(exc).__name__}: {exc}",
+                }
+            ),
+            flush=True,
+        )
+        return None
+    metadata = bundle.get("metadata") if isinstance(bundle, dict) else None
+    if not isinstance(metadata, dict) or metadata.get("training_resume_key") != resume_key:
+        print(
+            json.dumps(
+                {
+                    "step": "walk_forward_fold_checkpoint_ignored",
+                    "artifact_path": str(path.resolve()),
+                    "reason": "resume key mismatch",
+                }
+            ),
+            flush=True,
+        )
+        return None
+    return bundle.get("model")
+
+
 def _classification_metrics(
     *,
     metadata: pd.DataFrame,
@@ -945,6 +1042,7 @@ def _train_task_walk_forward(
             y_train = dataset.targets.loc[train_rows, target_columns].reset_index(drop=True)
             y_val = dataset.targets.loc[val_rows, target_columns].reset_index(drop=True)
             y_oos = dataset.targets.loc[oos_rows, target_columns].reset_index(drop=True)
+            vocabularies = None
             if is_sequence_static_model(model_name):
                 vocabularies = build_category_vocabularies(train_meta, columns=STATIC_CATEGORICAL_COLUMNS)
                 store = sequence_stores[feature_set]
@@ -956,13 +1054,85 @@ def _train_task_walk_forward(
                 _, x_val, _ = _prepare_flat_inputs(dataset, feature_set, val_rows, task_type=task_type)
                 _, x_oos, _ = _prepare_flat_inputs(dataset, feature_set, oos_rows, task_type=task_type)
             model_kwargs = _model_kwargs(args, model_name, task_type)
-            model = make_model(
-                model_name,
-                window_length=args.window_length,
+            checkpoint_path, checkpoint_manifest_path = _walk_forward_checkpoint_paths(
+                output_dir=output_dir,
                 task_type=task_type,
+                model_name=model_name,
+                feature_set=feature_set,
+                fold_id=fold.fold_id,
+            )
+            resume_key = _walk_forward_resume_key(
+                args=args,
+                task_type=task_type,
+                model_name=model_name,
+                feature_set=feature_set,
+                fold_id=fold.fold_id,
+                target_columns=target_columns,
                 model_kwargs=model_kwargs,
             )
-            model.fit(x_train, y_train, val_x=x_val, val_y=y_val)
+            model = _load_fold_checkpoint(checkpoint_path, resume_key=resume_key)
+            if model is not None:
+                event = {
+                    "step": "walk_forward_fold_checkpoint_loaded",
+                    "task_type": task_type,
+                    "model_name": model_name,
+                    "feature_set": feature_set,
+                    "fold_id": fold.fold_id,
+                    "artifact_path": str(checkpoint_path.resolve()),
+                }
+                print(json.dumps(event), flush=True)
+                _append_training_progress(output_dir, event)
+            else:
+                model = make_model(
+                    model_name,
+                    window_length=args.window_length,
+                    task_type=task_type,
+                    model_kwargs=model_kwargs,
+                )
+                model.fit(x_train, y_train, val_x=x_val, val_y=y_val)
+                checkpoint_metadata = _build_model_metadata(
+                    task_type=task_type,
+                    model_name=model_name,
+                    feature_set=feature_set,
+                    target_columns=target_columns,
+                    horizons=horizons,
+                    window_length=args.window_length,
+                    benchmark_ticker=args.benchmark_ticker,
+                    eval_mode=args.eval_mode,
+                    split_summary={"fold": _fold_summary(fold, dataset.metadata)},
+                    flat_feature_columns=dataset.feature_columns.get(feature_set),
+                    sequence_feature_columns=sequence_stores[feature_set].feature_columns if is_sequence_static_model(model_name) else None,
+                    sequence_components=sequence_feature_config(feature_set).to_dict() if is_sequence_static_model(model_name) else None,
+                    static_vocabularies=vocabularies,
+                    runtime=_model_runtime_metadata(model),
+                    classification_threshold=args.classification_threshold,
+                    classification_horizon=args.classification_horizon,
+                    classification_event_type=args.classification_event_type,
+                )
+                checkpoint_metadata["checkpoint_type"] = "walk_forward_fold"
+                checkpoint_metadata["training_resume_key"] = resume_key
+                checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                save_model_bundle(checkpoint_path, model=model, metadata=checkpoint_metadata)
+                write_json(
+                    checkpoint_manifest_path,
+                    {
+                        "generated_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                        "checkpoint_type": "walk_forward_fold",
+                        "artifact_path": str(checkpoint_path.resolve()),
+                        "training_resume_key": resume_key,
+                        "runtime": checkpoint_metadata.get("runtime"),
+                    },
+                )
+                event = {
+                    "step": "walk_forward_fold_checkpoint_saved",
+                    "task_type": task_type,
+                    "model_name": model_name,
+                    "feature_set": feature_set,
+                    "fold_id": fold.fold_id,
+                    "artifact_path": str(checkpoint_path.resolve()),
+                }
+                print(json.dumps(event), flush=True)
+                _append_training_progress(output_dir, event)
             print(
                 json.dumps(
                     {
@@ -1172,6 +1342,17 @@ def main() -> None:
     models_dir = output_dir / "models"
     output_dir.mkdir(parents=True, exist_ok=True)
     models_dir.mkdir(parents=True, exist_ok=True)
+    progress_log_path = output_dir / "training_progress.jsonl"
+    os.environ["V1_TRAINING_PROGRESS_LOG"] = str(progress_log_path.resolve())
+    _append_training_progress(
+        output_dir,
+        {
+            "step": "training_run_start",
+            "run_name": run_name,
+            "eval_mode": args.eval_mode,
+            "task_type": args.task_type,
+        },
+    )
 
     eligibility_config = _episode_eligibility_config(args)
     research_config = _research_universe_config(args)
@@ -1293,8 +1474,16 @@ def main() -> None:
         "hidden_units": args.torch_hidden_units or None,
         "hidden_dim": args.torch_hidden_dim or None,
     }
+    xgboost_training_overrides = {
+        "n_estimators": args.xgboost_n_estimators or None,
+        "patience": args.xgboost_patience or None,
+    }
     if any(value is not None for value in torch_training_overrides.values()):
         dataset_manifest["torch_training_overrides"] = torch_training_overrides
+    if any(value is not None for value in xgboost_training_overrides.values()):
+        dataset_manifest["xgboost_training_overrides"] = xgboost_training_overrides
+    dataset_manifest["training_progress_log"] = progress_log_path.relative_to(output_dir).as_posix()
+    dataset_manifest["checkpoint_dir"] = (output_dir / "checkpoints").relative_to(output_dir).as_posix()
     save_dataset_manifest(output_dir / "dataset_manifest.json", dataset_manifest)
 
     combined_records: list[dict[str, object]] = []

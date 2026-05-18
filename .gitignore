@@ -9,6 +9,8 @@ EODHD_api_key
 artifacts/*
 !artifacts/v1_baselines/
 artifacts/v1_baselines/*
+!artifacts/production_reports/
+!artifacts/production_reports/**
 logs/
 
 # Generated EODHD datasets

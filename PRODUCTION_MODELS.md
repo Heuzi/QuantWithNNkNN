@@ -4,7 +4,7 @@ This file tracks the intended V1 production classifier policy and the promotion 
 
 ## Production Status
 
-There is no currently promoted `path_5pct_20d` production model set.
+The current active `path_5pct_20d` production-candidate set is the best model from each supported classifier family after the balanced true-full ablation study.
 
 The previous binary production artifacts are deprecated and must not be treated as the active production recommendation set. They were trained on the old binary target policy and have been removed from the promoted production state.
 
@@ -18,17 +18,17 @@ Intended production target:
   - class `1`: otherwise neutral
 - The full 20-trading-day forward window is required. Unresolved rows are unlabeled and excluded from supervised train/eval.
 
-Intended future promoted model families after retraining:
+Current promoted candidate model families:
 
-| Model | Candidate feature sets | Label mode | Output behavior |
-|---|---|---|---|
-| `xgboost_classifier` | `stock_relative_market_sector_fundamentals_sentiment`; `stock_normalized_lean_market_sector_fundamentals_sentiment` | `path_5pct_20d` | `multi:softprob`, 3 class probabilities |
-| `torch_mlp_classifier` | `stock_relative_market_sector_fundamentals_sentiment`; `stock_normalized_lean_market_sector_fundamentals_sentiment` | `path_5pct_20d` | 3-logit softmax output |
-| `torch_seq_static_classifier` | `stock_relative_market_sector_sentiment_sequence`; `stock_normalized_lean_market_sector_sentiment_sequence` | `path_5pct_20d` | 3-logit softmax output |
+| Model | Run directory | Selected feature set | Selection score | Top-decile precision | Accuracy | Log loss | Output behavior |
+|---|---|---|---:|---:|---:|---:|---|
+| `xgboost_classifier` | `artifacts/v1_baselines/eodhd_true_full_xgboost` | `stock_normalized_lean_market_sector_fundamentals_sentiment` | `1.143022` | `0.591422` | `0.478090` | `0.956338` | `multi:softprob`, 3 class probabilities |
+| `torch_mlp_classifier` | `artifacts/v1_baselines/eodhd_true_full_ablation_torch_mlp` | `stock_only_fundamentals` | `1.114128` | `0.566842` | `0.487801` | `0.941229` | 3-logit softmax output |
+| `torch_seq_static_classifier` | `artifacts/v1_baselines/eodhd_true_full_ablation_torch_seq_static` | `stock_only_sequence` | `1.020999` | `0.530210` | `0.458752` | `0.968252` | 3-logit softmax output |
 
-Only those three classifiers are supported for `path_5pct_20d`. Other classification baselines remain binary-only and are not valid production candidates for this label mode.
+Only those three selected classifier bundles are supported for current `path_5pct_20d` production-style reports. Other multiclass classification artifacts remain research-only unless separately reviewed and promoted.
 
-The `stock_normalized_lean_*` feature sets are comparison candidates, not pre-approved replacements. Promote the broad or lean profile per model family only after OOS metrics and trading-report behavior justify the choice.
+Selection rationale is recorded in `artifacts/v1_baselines/eodhd_true_full_ablation_balanced_summary/combined_classification_oos_leaderboard.csv` and `artifacts/v1_baselines/eodhd_true_full_ablation_balanced_summary/summary.md`. The promotion rule is `model_family_rank = 1` by the trading-oriented OOS `selection_score = mean_pr_auc + mean_top_decile_precision + mean_top_bottom_spread`.
 
 Prediction columns for the future promoted set:
 
@@ -63,7 +63,7 @@ After promoting a newly retrained model set, update this file with:
 
 ## Prediction Refresh Policy
 
-Refreshing market data does not require retraining, but production-style scoring under the new policy requires a promoted `path_5pct_20d` model set to exist first.
+Refreshing market data does not require retraining. Production-style scoring uses the promoted `path_5pct_20d` candidate set above.
 
 Normal production cycle:
 
@@ -93,23 +93,14 @@ Use saved models for daily or every-few-days prediction refreshes as long as:
 
 The conservative research universe is part of the shared strategy-universe policy. Standard training, walk-forward evaluation, latest prediction, and trading reports should all use the same filter configuration unless a run explicitly documents a different universe profile.
 
-Once the retrained multiclass set is promoted, run latest predictions separately for each promoted model directory, for example:
+Run latest predictions through the trading-strategy wrapper, which loads the selected model-family run directories and filters each to `--leaderboard-rank 1`:
 
 ```powershell
-py -3.11 scripts\predict_v1_supervised_baselines.py `
-  --run-dir <PROMOTED_XGBOOST_RUN_DIR> `
+py -3.11 scripts\run_trading_strategy.py `
   --dataset-root data\eodhd_us_equities_30y `
-  --output-file artifacts\production_predictions\latest_xgboost.csv
-
-py -3.11 scripts\predict_v1_supervised_baselines.py `
-  --run-dir <PROMOTED_TORCH_MLP_RUN_DIR> `
-  --dataset-root data\eodhd_us_equities_30y `
-  --output-file artifacts\production_predictions\latest_torch_mlp.csv
-
-py -3.11 scripts\predict_v1_supervised_baselines.py `
-  --run-dir <PROMOTED_TORCH_SEQ_STATIC_RUN_DIR> `
-  --dataset-root data\eodhd_us_equities_30y `
-  --output-file artifacts\production_predictions\latest_torch_seq_static.csv
+  --credentials-path EODHD_api_key `
+  --force-rebuild-latest-inference `
+  --leaderboard-rank 1
 ```
 
 Use a bounded prediction dataset root instead of the full EODHD root if the full processed feature table is too large for the prediction machine.

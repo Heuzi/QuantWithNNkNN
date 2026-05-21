@@ -86,8 +86,8 @@ from src.models.v1_baselines import load_model_bundle, prediction_frame  # noqa:
 
 DEFAULT_RUN_DIRS = (
     "artifacts/v1_baselines/eodhd_true_full_xgboost",
-    "artifacts/v1_baselines/eodhd_true_full_torch_mlp",
-    "artifacts/v1_baselines/eodhd_true_full_torch_seq_static",
+    "artifacts/v1_baselines/eodhd_true_full_ablation_torch_mlp",
+    "artifacts/v1_baselines/eodhd_true_full_ablation_torch_seq_static",
 )
 LATEST_INFERENCE_DIRNAME = "latest_inference"
 STOCK_UPDATE_FILENAME = "eodhd_stock_bars_daily_updates.csv"

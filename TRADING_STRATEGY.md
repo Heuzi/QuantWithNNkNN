@@ -76,7 +76,7 @@ Do not print or save sensitive algorithm details, full feature vectors, model ar
 
 ## Promotion State
 
-The active multiclass production-candidate set is the best OOS leaderboard-ranked model from each supported classifier family. Here, "best" means `leaderboard_rank = 1` within each model family's `classification_oos_leaderboard.csv` / `classification_leaderboard.csv`.
+The active multiclass production-candidate set is the best OOS leaderboard-ranked model from each supported classifier family after the balanced true-full ablation study. Here, "best" means `model_family_rank = 1` in `artifacts/v1_baselines/eodhd_true_full_ablation_balanced_summary/combined_classification_oos_leaderboard.csv`, using the trading-oriented selection score `mean_pr_auc + mean_top_decile_precision + mean_top_bottom_spread`.
 
 The previous binary promoted set is deprecated and must not be used as the production recommendation set.
 
@@ -84,13 +84,19 @@ Current selected `path_5pct_20d` production-candidate bundles:
 
 | Model | Selected feature set | Selection basis |
 |---|---|---|
-| `xgboost_classifier` | `stock_normalized_lean_market_sector_fundamentals_sentiment` | OOS leaderboard rank 1 |
-| `torch_mlp_classifier` | `stock_relative_market_sector_fundamentals_sentiment` | OOS leaderboard rank 1 |
-| `torch_seq_static_classifier` | `stock_normalized_lean_market_sector_sentiment_sequence` | OOS leaderboard rank 1 |
+| `xgboost_classifier` | `stock_normalized_lean_market_sector_fundamentals_sentiment` | Family rank 1, overall rank 1, score `1.143022` |
+| `torch_mlp_classifier` | `stock_only_fundamentals` | Family rank 1, overall rank 8, score `1.114128` |
+| `torch_seq_static_classifier` | `stock_only_sequence` | Family rank 1, overall rank 23, score `1.020999` |
 
 Those three models are the only supported `path_5pct_20d` production classifiers. Other classification baselines remain research-only unless separately retrained, evaluated, and promoted for this multiclass target.
 
-The retrain profiles can include both broad and lean normalized-focused feature-set candidates. The trading strategy should use `--leaderboard-rank 1` to score only the current best feature set per model family. Omitting `--leaderboard-rank` keeps the backwards-compatible behavior of scoring every model record in the supplied run directories.
+The selected production directories are:
+
+- `artifacts/v1_baselines/eodhd_true_full_xgboost`
+- `artifacts/v1_baselines/eodhd_true_full_ablation_torch_mlp`
+- `artifacts/v1_baselines/eodhd_true_full_ablation_torch_seq_static`
+
+The retrain and ablation profiles can include multiple feature-set candidates. The trading strategy should use `--leaderboard-rank 1` to score only the current best feature set in each selected model-family run directory. Omitting `--leaderboard-rank` keeps the backwards-compatible behavior of scoring every model record in the supplied run directories.
 
 The default production ranking score is `pred_score_path_5pct_20d = P(class 2) - P(class 0)`, while `pred_prob_path_5pct_20d` remains the raw class-2 probability column.
 
@@ -104,6 +110,7 @@ Default daily command:
 py -3.11 scripts\run_trading_strategy.py `
   --dataset-root data\eodhd_us_equities_30y `
   --credentials-path EODHD_api_key `
+  --force-rebuild-latest-inference `
   --leaderboard-rank 1
 ```
 

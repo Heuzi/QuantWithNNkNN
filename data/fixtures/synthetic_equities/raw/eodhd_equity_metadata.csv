@@ -1,0 +1,4 @@
+symbol,ticker,eodhd_symbol,name,country,exchange,currency,type,isin,sector,industry,gics_sector,gics_sub_industry,is_delisted,delisted_date,metadata_source
+SYN1,SYN1,SYN1.US,Synthetic Software One,USA,NASDAQ,USD,Common Stock,,Technology,Software,Information Technology,Software,false,,synthetic_fixture
+SYN2,SYN2,SYN2.US,Synthetic Hardware Two,USA,NYSE,USD,Common Stock,,Technology,Hardware,Information Technology,Hardware,false,,synthetic_fixture
+SPY,SPY,SPY.US,Synthetic Market ETF,USA,NYSE,USD,ETF,,Benchmark,Market,Unknown,Unknown,false,,synthetic_fixture

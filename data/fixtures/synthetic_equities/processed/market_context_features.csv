@@ -1,0 +1,5 @@
+date,ticker,open,high,low,close,volume,dollar_volume,adjusted,return_1d,log_return_1d,gap_pct,intraday_return,hl_range_pct,close_location,true_range_pct,rolling_return_5d,rolling_return_20d,rolling_return_60d,rolling_vol_20d,rolling_vol_60d,price_vs_sma_20d,price_vs_sma_60d,momentum_20d,momentum_60d,volume_ratio_20d,dollar_volume_ratio_5d,volume_zscore_20d
+2024-01-02,SPY,100.00,100.50,99.80,100.20,5000,501000,true,,,,0.0020,0.0070,0.5714,0.0070,,,,,,,,,,,
+2024-01-03,SPY,100.20,100.80,100.00,100.60,5200,523120,true,0.0040,0.0040,0.0000,0.0040,0.0080,0.7500,0.0080,,,,,,,,,,,
+2024-01-04,SPY,100.60,101.00,100.40,100.80,5100,514080,true,0.0020,0.0020,0.0000,0.0020,0.0060,0.6667,0.0060,,,,,,,,,,,
+2024-01-05,SPY,100.80,101.10,100.50,100.70,5300,533710,true,-0.0010,-0.0010,0.0000,-0.0010,0.0060,0.3333,0.0060,,,,,,,,,,,

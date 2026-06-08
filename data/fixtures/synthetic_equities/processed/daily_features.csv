@@ -1,0 +1,9 @@
+date,ticker,open,high,low,close,volume,dollar_volume,adjusted,return_1d,log_return_1d,gap_pct,intraday_return,hl_range_pct,close_location,true_range_pct,rolling_return_5d,rolling_return_20d,rolling_return_60d,rolling_vol_20d,rolling_vol_60d,price_vs_sma_20d,price_vs_sma_60d,momentum_20d,momentum_60d,volume_ratio_20d,dollar_volume_ratio_5d,volume_zscore_20d,log1p_volume,log1p_dollar_volume,log1p_rolling_avg_volume_20d,log1p_rolling_avg_volume_60d,log1p_rolling_avg_dollar_volume_20d,log1p_rolling_avg_dollar_volume_60d,gics_sector,gics_sub_industry
+2024-01-02,SYN1,10.00,10.30,9.90,10.20,1000,10200,true,,,,0.0200,0.0400,0.7500,0.0400,,,,,,,,,,,6.9088,9.2302,,,,Information Technology,Software
+2024-01-03,SYN1,10.20,10.50,10.10,10.40,1100,11440,true,0.0196,0.0194,0.0000,0.0196,0.0392,0.7500,0.0392,,,,,,,,,,,7.0039,9.3450,,,,Information Technology,Software
+2024-01-04,SYN1,10.40,10.70,10.20,10.60,1200,12720,true,0.0192,0.0190,0.0000,0.0192,0.0481,0.8000,0.0481,,,,,,,,,,,7.0909,9.4510,,,,Information Technology,Software
+2024-01-05,SYN1,10.60,10.80,10.30,10.50,1150,12075,true,-0.0094,-0.0095,0.0000,-0.0094,0.0472,0.4000,0.0472,,,,,,,,,,,7.0484,9.3981,,,,Information Technology,Software
+2024-01-02,SYN2,20.00,20.20,19.80,20.10,900,18090,true,,,,0.0050,0.0200,0.7500,0.0200,,,,,,,,,,,6.8035,9.8032,,,,Information Technology,Hardware
+2024-01-03,SYN2,20.10,20.30,19.90,20.00,950,19000,true,-0.0050,-0.0050,0.0000,-0.0050,0.0199,0.2500,0.0199,,,,,,,,,,,6.8575,9.8522,,,,Information Technology,Hardware
+2024-01-04,SYN2,20.00,20.40,19.90,20.30,970,19691,true,0.0150,0.0149,0.0000,0.0150,0.0250,0.8000,0.0250,,,,,,,,,,,6.8783,9.8870,,,,Information Technology,Hardware
+2024-01-05,SYN2,20.30,20.60,20.10,20.50,980,20090,true,0.0099,0.0098,0.0000,0.0099,0.0246,0.8000,0.0246,,,,,,,,,,,6.8886,9.9080,,,,Information Technology,Hardware

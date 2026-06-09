@@ -40,6 +40,7 @@ RESEARCH_UNIVERSE_DIAGNOSTIC_COLUMNS = (
 class ConservativeResearchUniverseConfig:
     """Shared strategy-universe guardrail for train/test/live scoring."""
 
+    name: str = "conservative"
     enabled: bool = True
     common_stocks_only: bool = True
     allowed_exchanges: tuple[str, ...] = ("NYSE", "NASDAQ", "AMEX")
@@ -78,6 +79,9 @@ class ConservativeResearchUniverseConfig:
         for name, value in positive_ints.items():
             if int(value) < 1:
                 raise ValueError(f"{name} must be >= 1.")
+        if not str(self.name).strip():
+            raise ValueError("Research-universe name must be non-empty.")
+        object.__setattr__(self, "name", str(self.name).strip())
         object.__setattr__(self, "allowed_exchanges", parse_allowed_exchanges(self.allowed_exchanges))
         if min(
             self.min_price,
@@ -105,6 +109,7 @@ class ConservativeResearchUniverseConfig:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "name": self.name,
             "enabled": self.enabled,
             "common_stocks_only": self.common_stocks_only,
             "allowed_exchanges": list(self.allowed_exchanges),
@@ -133,6 +138,7 @@ class ConservativeResearchUniverseConfig:
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "ConservativeResearchUniverseConfig":
         return cls(
+            name=str(payload.get("name", cls.name)),
             enabled=bool(payload.get("enabled", True)),
             common_stocks_only=bool(payload.get("common_stocks_only", True)),
             allowed_exchanges=parse_allowed_exchanges(payload.get("allowed_exchanges", cls.allowed_exchanges)),

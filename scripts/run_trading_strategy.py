@@ -181,6 +181,16 @@ def parse_args() -> argparse.Namespace:
             "Default 0 keeps all model records for backwards compatibility."
         ),
     )
+    parser.add_argument(
+        "--leaderboard-top-k",
+        type=int,
+        default=0,
+        help=(
+            "Optional per-run-dir classification leaderboard top-K filter. "
+            "Use this for model-selection runs where the top K model/feature-set rows should be scored. "
+            "Ignored when --leaderboard-rank is set."
+        ),
+    )
     parser.add_argument("--anchor-date", default="", help="Optional YYYY-MM-DD cutoff for predictions.")
     parser.add_argument(
         "--max-anchor-lag-days",
@@ -198,6 +208,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable the shared strategy-universe filter for latest recommendations.",
     )
+    parser.add_argument("--research-universe-name", default="")
     parser.add_argument("--research-allowed-exchanges", default="")
     parser.add_argument("--research-min-price", type=float, default=None)
     parser.add_argument("--research-min-history-days", type=int, default=None)
@@ -243,6 +254,7 @@ def _research_universe_config(
 ) -> ConservativeResearchUniverseConfig:
     base = base_config or ConservativeResearchUniverseConfig()
     return ConservativeResearchUniverseConfig(
+        name=args.research_universe_name if args.research_universe_name else base.name,
         enabled=not bool(args.disable_conservative_research_universe),
         common_stocks_only=base.common_stocks_only,
         allowed_exchanges=parse_allowed_exchanges(args.research_allowed_exchanges) if args.research_allowed_exchanges else base.allowed_exchanges,
@@ -1668,7 +1680,12 @@ def _load_recent_stock_features(
     return tails
 
 
-def _load_model_records(run_dirs: Sequence[Path], *, leaderboard_rank: int = 0) -> list[dict[str, object]]:
+def _load_model_records(
+    run_dirs: Sequence[Path],
+    *,
+    leaderboard_rank: int = 0,
+    leaderboard_top_k: int = 0,
+) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for run_dir in run_dirs:
         model_index_path = _resolve_model_index_path(run_dir)
@@ -1677,12 +1694,12 @@ def _load_model_records(run_dirs: Sequence[Path], *, leaderboard_rank: int = 0) 
             {"run_dir": run_dir, "model_index_path": model_index_path, **record}
             for record in model_index.get("models", [])
         ]
-        if leaderboard_rank > 0:
+        if leaderboard_rank > 0 or leaderboard_top_k > 0:
             leaderboard = _leaderboard_for_run(run_dir, "classification")
             required_columns = {"model_name", "feature_set", "leaderboard_rank"}
             if leaderboard.empty or not required_columns.issubset(leaderboard.columns):
                 raise SystemExit(
-                    f"Cannot select leaderboard rank {leaderboard_rank} for {run_dir}: "
+                    f"Cannot select leaderboard rows for {run_dir}: "
                     "missing classification leaderboard with model_name, feature_set, and leaderboard_rank."
                 )
             leaderboard = leaderboard.copy()
@@ -1690,10 +1707,23 @@ def _load_model_records(run_dirs: Sequence[Path], *, leaderboard_rank: int = 0) 
                 leaderboard["leaderboard_rank"],
                 errors="coerce",
             )
-            selected = leaderboard[leaderboard["leaderboard_rank"] == int(leaderboard_rank)]
+            if leaderboard_rank > 0:
+                selected = leaderboard[leaderboard["leaderboard_rank"] == int(leaderboard_rank)]
+                selection_label = f"leaderboard rank {leaderboard_rank}"
+            else:
+                selected = leaderboard[
+                    leaderboard["leaderboard_rank"].notna()
+                    & (leaderboard["leaderboard_rank"] <= int(leaderboard_top_k))
+                ]
+                selection_label = f"top {leaderboard_top_k} leaderboard rows"
             selected_keys = {
                 (str(row["model_name"]), str(row["feature_set"]))
                 for row in selected[["model_name", "feature_set"]].to_dict("records")
+            }
+            selected_ranks = {
+                (str(row["model_name"]), str(row["feature_set"])): int(row["leaderboard_rank"])
+                for row in selected[["model_name", "feature_set", "leaderboard_rank"]].to_dict("records")
+                if pd.notna(row["leaderboard_rank"])
             }
             run_records = [
                 record
@@ -1701,16 +1731,19 @@ def _load_model_records(run_dirs: Sequence[Path], *, leaderboard_rank: int = 0) 
                 if str(record.get("task_type") or "classification") == "classification"
                 and (str(record.get("model_name")), str(record.get("feature_set"))) in selected_keys
             ]
-            if len(run_records) != 1:
+            expected_count = 1 if leaderboard_rank > 0 else min(int(leaderboard_top_k), len(selected_keys))
+            if len(run_records) != expected_count:
                 details = ", ".join(
                     f"{record.get('model_name')}::{record.get('feature_set')}"
                     for record in run_records
                 ) or "none"
                 raise SystemExit(
-                    f"Expected exactly one classification model at leaderboard rank {leaderboard_rank} "
+                    f"Expected {expected_count} classification model(s) for {selection_label} "
                     f"in {run_dir}, found {len(run_records)}: {details}"
                 )
-            run_records[0]["selection_leaderboard_rank"] = int(leaderboard_rank)
+            for record in run_records:
+                key = (str(record.get("model_name")), str(record.get("feature_set")))
+                record["selection_leaderboard_rank"] = selected_ranks.get(key)
         records.extend(run_records)
     if not records:
         raise SystemExit("No models found in the requested run directories.")
@@ -2273,7 +2306,11 @@ def _write_summary(
         "sell_signal_count": int(position_review.get("review_action", pd.Series(dtype=str)).astype(str).str.startswith("SELL").sum()),
     }
     if research_summary:
+        research_config_payload = research_summary.get("research_universe_config")
+        if isinstance(research_config_payload, dict):
+            summary["research_universe_name"] = str(research_config_payload.get("name") or "conservative")
         summary.update({key: value for key, value in research_summary.items() if key != "research_universe_config"})
+    research_label = str(summary.get("research_universe_name") or "conservative").replace("_", " ")
     (path / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
     pd.DataFrame([summary]).to_csv(path / "summary.csv", index=False)
     lines = [
@@ -2282,7 +2319,7 @@ def _write_summary(
         f"- Run date: `{run_date}`",
         f"- Dataset root: `{dataset_root}`",
         f"- Data date range in recent frame: `{summary['data_min_date']}` to `{summary['data_max_date']}`",
-        f"- Conservative research universe: `{summary.get('research_universe_passed_rows', summary['ranked_signal_rows'])}` of `{summary.get('research_universe_input_rows', summary['ranked_signal_rows'])}` broad eligible windows passed",
+        f"- {research_label.title()} research universe: `{summary.get('research_universe_passed_rows', summary['ranked_signal_rows'])}` of `{summary.get('research_universe_input_rows', summary['ranked_signal_rows'])}` broad eligible windows passed",
         f"- Ranked signals: `{summary['ranked_signal_rows']}`",
         f"- Entry candidates: `{summary['entry_candidate_count']}`",
         f"- Watchlist rows: `{summary['watchlist_count']}`",
@@ -2319,7 +2356,11 @@ def main() -> None:
         width=args.progress_bar_width,
     )
 
-    records = _load_model_records(run_dirs, leaderboard_rank=max(int(args.leaderboard_rank), 0))
+    records = _load_model_records(
+        run_dirs,
+        leaderboard_rank=max(int(args.leaderboard_rank), 0),
+        leaderboard_top_k=0 if int(args.leaderboard_rank) > 0 else max(int(args.leaderboard_top_k), 0),
+    )
     benchmark_ticker = str(records[0].get("benchmark_ticker") or "SPY")
     window_length = max(int(record.get("window_length") or 60) for record in records)
     eligibility_config = None
@@ -2477,6 +2518,11 @@ def main() -> None:
         "latest_inference_manifest": refresh_manifest,
         "run_dirs": [str(path) for path in run_dirs],
         "leaderboard_rank_filter": int(args.leaderboard_rank) if args.leaderboard_rank else None,
+        "leaderboard_top_k_filter": (
+            int(args.leaderboard_top_k)
+            if args.leaderboard_top_k and not args.leaderboard_rank
+            else None
+        ),
         "selected_models": [
             {
                 "model_name": str(record.get("model_name")),

@@ -193,6 +193,43 @@ Recommended true-full retrain wrapper:
 
 That wrapper runs the intended large-data sequence: raw EODHD refresh, chunked daily-feature rebuild, incremental feature sidecar consolidation, normalized-feature refresh, filtered panel materialization, episode-cache materialization, and the three model-specific training profiles. Use `-Resume` after an interruption so completed stages are skipped. The normalized stage is skipped only after both `data\eodhd_us_equities_30y\processed\daily_features_normalized.csv` and `data\eodhd_us_equities_30y\processed\daily_features_normalized_manifest.json` exist and are at least as fresh as `processed\daily_features.csv`; sidecar consolidation updates those normalized files incrementally for touched dates when possible.
 
+### Sleeve Training
+
+The production strategy now supports two separately trained sleeves:
+
+- `conservative`: the existing stable-trend sleeve with strict trend, drawdown, liquidity, and spike guardrails.
+- `momentum_breakout`: a separate high-momentum sleeve that keeps common-stock and liquidity guardrails but disables moving-average and spike rejections, requires positive 6-month return, and allows wider drawdowns.
+
+Do not mix model artifacts across sleeves. Each sleeve has its own materialized panel, episode cache, and model artifacts. The conservative sleeve continues to use the currently promoted rank-1 model from each existing model-family run directory. The momentum/breakout sleeve uses a bounded tabular model-selection run and scores the top three OOS leaderboard rows.
+
+Momentum/breakout model selection trains:
+
+- `xgboost_classifier` and `torch_mlp_classifier` across broad tabular feature sets.
+- sequence candidates are intentionally excluded from the current bounded model-selection profile because panel-wide sequence cache materialization is much slower; use the sleeve-specific sequence profiles only for a follow-up experiment.
+- only the latest chronological walk-forward fold, via `walk_forward_max_folds=1`, for faster iteration.
+
+Recommended two-sleeve retrain wrapper:
+
+```powershell
+.\scripts\run_two_sleeve_retrain.ps1 -Sleeve momentum_breakout -Resume
+```
+
+To run one sleeve only:
+
+```powershell
+.\scripts\run_two_sleeve_retrain.ps1 -Sleeve momentum_breakout -Resume
+```
+
+The two-sleeve retrain wrapper refreshes shared data once, then materializes and trains the selected sleeve. For momentum/breakout it runs `eodhd_sleeve_momentum_breakout_model_selection_cache` and `eodhd_sleeve_momentum_breakout_model_selection`. Use `-DryRun` to inspect the exact commands without launching the large retrain.
+
+Recommended two-sleeve trading report:
+
+```powershell
+.\scripts\run_two_sleeve_trading_strategy.ps1 -ForceRebuildLatestInference
+```
+
+This writes one conservative subreport, one momentum/breakout subreport, and a combined review folder. The sleeve rankings remain independent; the combined report does not blend scores across sleeves.
+
 ## Entry Candidate Logic
 
 For each latest prediction date:

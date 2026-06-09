@@ -13,7 +13,7 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $repoRoot
 
 $runDate = Get-Date -Format "yyyyMMdd"
-$reportName = "latest_best3_$runDate"
+$reportName = "latest_two_sleeve_$runDate"
 $reportDir = Join-Path $OutputRoot $reportName
 $logDir = Join-Path "logs" "trading_strategy"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -39,16 +39,16 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $args = @(
-    "scripts\run_trading_strategy.py",
-    "--dataset-root", $DatasetRoot,
-    "--credentials-path", $CredentialsPath,
-    "--force-rebuild-latest-inference",
-    "--leaderboard-rank", "1",
-    "--report-name", $reportName
+    "scripts\run_two_sleeve_trading_strategy.ps1",
+    "-DatasetRoot", $DatasetRoot,
+    "-CredentialsPath", $CredentialsPath,
+    "-OutputRoot", $OutputRoot,
+    "-ReportName", $reportName,
+    "-ForceRebuildLatestInference"
 )
 
-Write-Log "running trading strategy: py -3.11 $($args -join ' ')"
-& py -3.11 @args 2>&1 | Tee-Object -FilePath $logPath -Append
+Write-Log "running trading strategy: powershell -ExecutionPolicy Bypass -File $($args -join ' ')"
+& powershell -ExecutionPolicy Bypass -File @args 2>&1 | Tee-Object -FilePath $logPath -Append
 if ($LASTEXITCODE -ne 0) {
     throw "trading strategy failed with exit code $LASTEXITCODE"
 }
@@ -59,21 +59,26 @@ if (-not (Test-Path $manifestPath)) {
 }
 
 $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
-if ([int]$manifest.model_count -ne 3) {
-    throw "Expected model_count=3 in report manifest, got $($manifest.model_count)"
+if ([int]$manifest.sleeve_count -ne 2) {
+    throw "Expected sleeve_count=2 in combined report manifest, got $($manifest.sleeve_count)"
 }
-if (-not $manifest.latest_inference_manifest.local_data_end_date) {
-    throw "Report manifest is missing latest_inference_manifest.local_data_end_date"
+if ([int]$manifest.model_count -lt 6) {
+    throw "Expected at least 6 scored models in combined report manifest, got $($manifest.model_count)"
 }
 
-Write-Log "report validated: model_count=$($manifest.model_count) data_max_date=$($manifest.data_max_date)"
+Write-Log "report validated: sleeve_count=$($manifest.sleeve_count) model_count=$($manifest.model_count)"
 
-git add $reportDir
+$sourceDirs = @(
+    $reportDir,
+    (Join-Path $OutputRoot "${reportName}_conservative"),
+    (Join-Path $OutputRoot "${reportName}_momentum_breakout")
+)
+git add @sourceDirs
 if ($LASTEXITCODE -ne 0) {
     throw "git add failed with exit code $LASTEXITCODE"
 }
 
-$staged = git diff --cached --name-only -- $reportDir
+$staged = git diff --cached --name-only -- @sourceDirs
 if (-not $staged) {
     Write-Log "no report changes staged; nothing to commit"
     exit 0

@@ -98,6 +98,7 @@ def _materialize_panel_command(profile: dict[str, Any]) -> list[str]:
         raise SystemExit("Profiles with materialize_panel must set materialize_panel.output_dataset_root.")
     train_config = profile.get("train") or {}
     for key in (
+        "research_universe_name",
         "disable_conservative_research_universe",
         "research_allowed_exchanges",
         "research_min_price",
@@ -164,6 +165,7 @@ def _materialize_cache_command(profile: dict[str, Any]) -> list[str]:
         "eligibility_min_avg_dollar_volume",
         "eligibility_min_price",
         "eligibility_allowed_exchanges",
+        "research_universe_name",
         "disable_conservative_research_universe",
         "research_allowed_exchanges",
         "research_min_price",

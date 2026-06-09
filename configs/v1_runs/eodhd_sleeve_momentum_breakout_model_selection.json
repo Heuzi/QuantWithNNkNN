@@ -1,0 +1,50 @@
+{
+  "name": "eodhd_sleeve_momentum_breakout_model_selection",
+  "description": "Train/test broad-but-bounded momentum/breakout sleeve classifier candidates across tabular and sequence feature sets, then select the top three by OOS leaderboard.",
+  "dataset_root": "data/eodhd_us_equities_30y",
+  "training_dataset_root": "data/eodhd_training_panels/eodhd_sleeve_momentum_breakout",
+  "episode_cache_dir": "data/eodhd_training_panels/eodhd_sleeve_momentum_breakout/episode_cache_model_selection",
+  "stages": [
+    "train"
+  ],
+  "train": {
+    "benchmark_ticker": "SPY",
+    "classification_event_type": "path_5pct_20d",
+    "classification_horizon": 20,
+    "classification_models": [
+      "xgboost_classifier",
+      "torch_mlp_classifier"
+    ],
+    "classification_threshold": 0.05,
+    "eval_mode": "walk_forward",
+    "feature_sets": [
+      "stock_only_fundamentals",
+      "stock_only_sentiment",
+      "stock_only_fundamentals_sentiment",
+      "stock_relative_market_sector_fundamentals_sentiment",
+      "stock_normalized_lean_market_sector_fundamentals_sentiment"
+    ],
+    "final_stop_block_size": 21,
+    "horizons": [
+      5,
+      10,
+      20
+    ],
+    "max_episodes": 150000,
+    "output_root": "artifacts/v1_baselines",
+    "run_name": "eodhd_sleeve_momentum_breakout_model_selection",
+    "task_type": "classification",
+    "torch_batch_size": 8192,
+    "torch_max_epochs": 40,
+    "torch_patience": 6,
+    "xgboost_n_estimators": 800,
+    "xgboost_patience": 20,
+    "walk_forward_max_folds": 1,
+    "walk_forward_min_train_dates": 240,
+    "walk_forward_oos_block_size": 21,
+    "walk_forward_purge_gap": 20,
+    "walk_forward_val_block_size": 21,
+    "window_length": 60,
+    "research_universe_name": "momentum_breakout"
+  }
+}

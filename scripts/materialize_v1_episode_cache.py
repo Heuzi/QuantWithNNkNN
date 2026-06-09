@@ -67,6 +67,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable the shared strategy-universe filter for train/test/cache construction.",
     )
+    parser.add_argument("--research-universe-name", default="conservative")
     parser.add_argument("--research-common-stocks-only", action="store_true", default=True)
     parser.add_argument("--research-allowed-exchanges", default="NYSE,NASDAQ,AMEX")
     parser.add_argument("--research-min-price", type=float, default=10.0)
@@ -110,6 +111,7 @@ def _research_universe_config(args: argparse.Namespace) -> ConservativeResearchU
     if args.disable_conservative_research_universe:
         return None
     return ConservativeResearchUniverseConfig(
+        name=args.research_universe_name,
         common_stocks_only=bool(args.research_common_stocks_only),
         allowed_exchanges=parse_allowed_exchanges(args.research_allowed_exchanges),
         min_price=args.research_min_price,

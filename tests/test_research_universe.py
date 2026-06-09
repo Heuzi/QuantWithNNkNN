@@ -109,6 +109,26 @@ class ConservativeResearchUniverseTests(unittest.TestCase):
         self.assertGreater(diagnostics["research_max_abs_return_60d"].notna().sum(), 0)
         self.assertTrue(pd.api.types.is_float_dtype(diagnostics["research_close"]))
 
+    def test_config_name_round_trips_for_independent_sleeves(self) -> None:
+        config = ConservativeResearchUniverseConfig(
+            name="momentum_breakout",
+            min_return_6m=0.05,
+            max_drawdown_from_252d_high=0.60,
+            require_close_above_sma200=False,
+            require_sma50_above_sma200=False,
+            spike_filter_enabled=False,
+        )
+
+        payload = config.to_dict()
+        restored = ConservativeResearchUniverseConfig.from_mapping(payload)
+
+        self.assertEqual(payload["name"], "momentum_breakout")
+        self.assertEqual(restored.name, "momentum_breakout")
+        self.assertFalse(restored.require_close_above_sma200)
+        self.assertFalse(restored.require_sma50_above_sma200)
+        self.assertFalse(restored.spike_filter_enabled)
+        self.assertEqual(restored.min_return_6m, 0.05)
+
 
 if __name__ == "__main__":
     unittest.main()

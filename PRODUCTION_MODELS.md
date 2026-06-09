@@ -134,6 +134,14 @@ Recommended full retrain command pattern:
 
 The wrapper refreshes raw EODHD bars, resumes chunked daily-feature construction, consolidates incremental processed-feature sidecars, incrementally refreshes or builds the saved normalized feature artifact, materializes the filtered true-full strategy-universe panel, materializes the shared episode cache, and trains `xgboost_classifier`, `torch_mlp_classifier`, and `torch_seq_static_classifier` separately. `-Resume` skips completed stages, including normalization once both normalized output files exist and are at least as fresh as `processed/daily_features.csv`.
 
+Two-sleeve retraining is now the preferred research path before changing production promotion state:
+
+```powershell
+.\scripts\run_two_sleeve_retrain.ps1 -Resume
+```
+
+This trains `conservative` and `momentum_breakout` models independently. For the current refresh, run only `-Sleeve momentum_breakout` because the conservative production-candidate models already exist. The current momentum/breakout profile trains bounded tabular model/feature-set candidates and the trading wrapper scores the top three OOS leaderboard rows with `--leaderboard-top-k 3`. The sleeve profiles currently use `walk_forward_max_folds=1`, which evaluates only the latest chronological train/validation/OOS fold to reduce runtime. That is acceptable for fast sleeve iteration, but a promotion decision should treat it as a recent-regime check rather than a full multi-regime walk-forward study. The sleeves must not share promoted model artifacts. Compare each sleeve's OOS leaderboard and final-model manifests independently before deciding whether either sleeve should be promoted into production reports.
+
 Only promote the new models after confirming:
 
 - all final model manifests exist

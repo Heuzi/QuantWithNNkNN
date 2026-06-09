@@ -72,6 +72,20 @@ py -3.11 scripts\train_v1_supervised_baselines.py `
 
 For a full licensed local run, use the same wrapper with `-FullUniverse`, then run the JSON profiles in `configs/v1_runs/` with `scripts/run_v1_pipeline.py`.
 
+For the current two-sleeve research workflow, train independent conservative and momentum/breakout model sets with:
+
+```powershell
+.\scripts\run_two_sleeve_retrain.ps1 -Sleeve momentum_breakout -Resume
+```
+
+The momentum/breakout sleeve uses a bounded model-selection profile across broad tabular feature sets, then the trading runner scores the top three OOS leaderboard rows for that sleeve. The sleeve profiles write separate training panels, episode caches, and model artifacts so their models are not reused across sleeves. They intentionally run only the most recent walk-forward fold for faster iteration; use the older multi-fold profiles when broad historical regime coverage is required.
+
+Run the current two-sleeve trading report with:
+
+```powershell
+.\scripts\run_two_sleeve_trading_strategy.ps1 -ForceRebuildLatestInference
+```
+
 ## Synthetic Fixture
 
 `data/fixtures/synthetic_equities/` contains hand-written toy rows for docs and smoke examples. It is not suitable for model quality evaluation.

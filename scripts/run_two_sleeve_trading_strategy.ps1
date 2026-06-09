@@ -85,10 +85,14 @@ Invoke-Step -Name "conservative_trading_strategy" -Command $conservative
 $momentum = Add-SharedArgs @(
     "py", "-3.11", "scripts\run_trading_strategy.py",
     "--report-name", $momentumReport,
-    "--skip-fetch",
     "--leaderboard-top-k", "3",
     "--run-dir", "artifacts\v1_baselines\eodhd_sleeve_momentum_breakout_model_selection"
 )
+if ($SkipFetch) {
+    $momentum += "--skip-fetch"
+} elseif ($ForceRebuildLatestInference) {
+    $momentum += "--force-rebuild-latest-inference"
+}
 Invoke-Step -Name "momentum_breakout_trading_strategy" -Command $momentum
 
 Invoke-Step -Name "combine_sleeve_reports" -Command @(

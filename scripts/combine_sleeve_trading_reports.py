@@ -84,6 +84,10 @@ def _combine_csv(name: str, sleeve_reports: list[tuple[str, Path]], output_dir: 
     return len(combined)
 
 
+def _present_values(values: list[object]) -> list[str]:
+    return [str(value)[:10] for value in values if value not in (None, "")]
+
+
 def main() -> None:
     args = _parse_args()
     output_dir = Path(args.output_dir)
@@ -99,11 +103,31 @@ def main() -> None:
         for name in COMBINED_CSVS
     }
     generated_utc = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    data_min_dates = _present_values([summary.get("data_min_date") for summary in summaries])
+    data_max_dates = _present_values([summary.get("data_max_date") for summary in summaries])
+    sleeve_data_max_dates = {
+        str(summary["sleeve"]): summary.get("data_max_date")
+        for summary in summaries
+    }
+    sleeve_fetch_statuses: dict[str, object] = {}
+    sleeve_skipped_fetch: dict[str, object] = {}
+    for summary_item in summaries:
+        sleeve = str(summary_item["sleeve"])
+        latest_manifest = summary_item.get("latest_inference_manifest")
+        fetch_manifest = latest_manifest.get("fetch") if isinstance(latest_manifest, dict) else None
+        if isinstance(fetch_manifest, dict):
+            sleeve_fetch_statuses[sleeve] = fetch_manifest.get("fetch_status")
+            sleeve_skipped_fetch[sleeve] = fetch_manifest.get("skipped_fetch")
     summary = {
         "generated_utc": generated_utc,
         "sleeve_count": len(sleeve_reports),
         "sleeves": [sleeve for sleeve, _ in sleeve_reports],
         "source_report_dirs": {sleeve: str(report_dir) for sleeve, report_dir in sleeve_reports},
+        "data_min_date": min(data_min_dates) if data_min_dates else None,
+        "data_max_date": max(data_max_dates) if data_max_dates else None,
+        "sleeve_data_max_dates": sleeve_data_max_dates,
+        "sleeve_fetch_statuses": sleeve_fetch_statuses,
+        "sleeve_skipped_fetch": sleeve_skipped_fetch,
         "combined_counts": combined_counts,
         "entry_candidate_count": int(summary_frame.get("entry_candidate_count", pd.Series(dtype=int)).sum()),
         "watchlist_count": int(summary_frame.get("watchlist_count", pd.Series(dtype=int)).sum()),
@@ -118,6 +142,15 @@ def main() -> None:
         "",
         f"- Generated UTC: `{generated_utc}`",
         f"- Sleeves: `{', '.join(summary['sleeves'])}`",
+        f"- Data date range: `{summary['data_min_date']}` to `{summary['data_max_date']}`",
+        "- Sleeve data max dates: "
+        + ", ".join(f"`{sleeve}={date_value}`" for sleeve, date_value in sleeve_data_max_dates.items()),
+        "- Sleeve fetch status: "
+        + ", ".join(
+            f"`{sleeve}={sleeve_fetch_statuses.get(sleeve)}`"
+            for sleeve, _ in sleeve_reports
+            if sleeve in sleeve_fetch_statuses
+        ),
         f"- Total models scored: `{summary['model_count']}`",
         f"- Ranked signals: `{summary['ranked_signal_rows']}`",
         f"- Entry candidates: `{summary['entry_candidate_count']}`",

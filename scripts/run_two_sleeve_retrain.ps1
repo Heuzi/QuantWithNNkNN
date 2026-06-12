@@ -6,6 +6,7 @@ param(
     [string]$EndDate = "",
     [switch]$Resume,
     [switch]$SkipDataRefresh,
+    [switch]$Recent10YearModelSelection,
     [switch]$DryRun
 )
 
@@ -116,7 +117,10 @@ try {
     }
 
     foreach ($selectedSleeve in Selected-Sleeves) {
-        if ($selectedSleeve -eq "momentum_breakout") {
+        if ($Recent10YearModelSelection) {
+            Invoke-Profile -Profile "configs/v1_runs/eodhd_sleeve_${selectedSleeve}_recent10y_model_selection_cache.json"
+            Invoke-Profile -Profile "configs/v1_runs/eodhd_sleeve_${selectedSleeve}_recent10y_model_selection.json"
+        } elseif ($selectedSleeve -eq "momentum_breakout") {
             Invoke-Profile -Profile "configs/v1_runs/eodhd_sleeve_momentum_breakout_model_selection_cache.json"
             Invoke-Profile -Profile "configs/v1_runs/eodhd_sleeve_momentum_breakout_model_selection.json"
         } else {

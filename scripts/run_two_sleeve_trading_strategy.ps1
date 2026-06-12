@@ -9,6 +9,7 @@ param(
     [int]$MaxTickers = 0,
     [switch]$SkipFetch,
     [switch]$ForceRebuildLatestInference,
+    [switch]$UseRecent10YearModelSelection,
     [switch]$DryRun
 )
 
@@ -66,14 +67,24 @@ function Add-SharedArgs {
     return $out
 }
 
-$conservative = Add-SharedArgs @(
+$conservativeArgs = @(
     "py", "-3.11", "scripts\run_trading_strategy.py",
-    "--report-name", $conservativeReport,
-    "--leaderboard-rank", "1",
-    "--run-dir", "artifacts\v1_baselines\eodhd_true_full_xgboost",
-    "--run-dir", "artifacts\v1_baselines\eodhd_true_full_ablation_torch_mlp",
-    "--run-dir", "artifacts\v1_baselines\eodhd_true_full_ablation_torch_seq_static"
+    "--report-name", $conservativeReport
 )
+if ($UseRecent10YearModelSelection) {
+    $conservativeArgs += @(
+        "--leaderboard-top-k", "3",
+        "--run-dir", "artifacts\v1_baselines\eodhd_sleeve_conservative_recent10y_model_selection"
+    )
+} else {
+    $conservativeArgs += @(
+        "--leaderboard-rank", "1",
+        "--run-dir", "artifacts\v1_baselines\eodhd_true_full_xgboost",
+        "--run-dir", "artifacts\v1_baselines\eodhd_true_full_ablation_torch_mlp",
+        "--run-dir", "artifacts\v1_baselines\eodhd_true_full_ablation_torch_seq_static"
+    )
+}
+$conservative = Add-SharedArgs $conservativeArgs
 if ($SkipFetch) {
     $conservative += "--skip-fetch"
 } elseif ($ForceRebuildLatestInference) {
@@ -82,16 +93,19 @@ if ($SkipFetch) {
 
 Invoke-Step -Name "conservative_trading_strategy" -Command $conservative
 
-$momentum = Add-SharedArgs @(
+$momentumArgs = @(
     "py", "-3.11", "scripts\run_trading_strategy.py",
     "--report-name", $momentumReport,
-    "--leaderboard-top-k", "3",
-    "--run-dir", "artifacts\v1_baselines\eodhd_sleeve_momentum_breakout_model_selection"
+    "--leaderboard-top-k", "3"
 )
+if ($UseRecent10YearModelSelection) {
+    $momentumArgs += @("--run-dir", "artifacts\v1_baselines\eodhd_sleeve_momentum_breakout_recent10y_model_selection")
+} else {
+    $momentumArgs += @("--run-dir", "artifacts\v1_baselines\eodhd_sleeve_momentum_breakout_model_selection")
+}
+$momentum = Add-SharedArgs $momentumArgs
 if ($SkipFetch) {
     $momentum += "--skip-fetch"
-} elseif ($ForceRebuildLatestInference) {
-    $momentum += "--force-rebuild-latest-inference"
 }
 Invoke-Step -Name "momentum_breakout_trading_strategy" -Command $momentum
 

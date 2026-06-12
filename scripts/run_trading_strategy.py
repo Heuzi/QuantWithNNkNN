@@ -1833,6 +1833,12 @@ def _build_latest_feature_sets_for_records(
     metadata = latest[metadata_columns].reset_index(drop=True)
 
     base = metadata.copy()
+    base_tickers = set(base["ticker"].astype(str).str.upper())
+    summary_stocks = stocks[stocks["ticker"].astype(str).str.upper().isin(base_tickers)].copy()
+    _log(
+        "latest feature summaries will use "
+        f"{len(summary_stocks):,}/{len(stocks):,} stock rows for {len(base_tickers):,} current tickers"
+    )
     feature_sets: dict[str, pd.DataFrame] = {}
     feature_columns: dict[str, list[str]] = {}
     context_summary_cache: dict[bool, pd.DataFrame] = {}
@@ -1874,7 +1880,7 @@ def _build_latest_feature_sets_for_records(
             include_fundamentals=include_fundamentals,
         )
         stock_summary = add_window_summaries(
-            stocks,
+            summary_stocks,
             feature_cols=stock_cols,
             prefix="stock_",
             window_length=window_length,

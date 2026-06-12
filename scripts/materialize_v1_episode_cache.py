@@ -38,6 +38,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-length", type=int, default=DEFAULT_WINDOW_LENGTH)
     parser.add_argument("--benchmark-ticker", default=DEFAULT_BENCHMARK_TICKER)
     parser.add_argument("--max-episodes", type=int, default=0, help="Keep the most recent N eligible episodes; 0 keeps all.")
+    parser.add_argument(
+        "--max-episodes-per-anchor-date",
+        type=int,
+        default=0,
+        help=(
+            "Keep a deterministic sample of at most N eligible episodes for each anchor date; "
+            "0 disables per-date sampling. This preserves the training date span better than "
+            "a global most-recent episode cap."
+        ),
+    )
     parser.add_argument("--classification-horizon", type=int, default=DEFAULT_CLASSIFICATION_HORIZON)
     parser.add_argument("--classification-threshold", type=float, default=DEFAULT_CLASSIFICATION_THRESHOLD)
     parser.add_argument(
@@ -150,6 +160,7 @@ def main() -> None:
         window_length=args.window_length,
         benchmark_ticker=args.benchmark_ticker,
         max_episodes=args.max_episodes or None,
+        max_episodes_per_anchor_date=args.max_episodes_per_anchor_date or None,
         classification_horizon=args.classification_horizon,
         classification_threshold=args.classification_threshold,
         classification_event_type=args.classification_event_type,

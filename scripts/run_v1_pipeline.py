@@ -154,6 +154,7 @@ def _materialize_cache_command(profile: dict[str, Any]) -> list[str]:
         "window_length",
         "benchmark_ticker",
         "max_episodes",
+        "max_episodes_per_anchor_date",
         "classification_horizon",
         "classification_threshold",
         "classification_event_type",

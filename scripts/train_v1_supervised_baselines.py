@@ -26,6 +26,7 @@ from src.data.v1_dataset import (  # noqa: E402
     SEQUENCE_FEATURE_SET_NAMES,
     STATIC_CATEGORICAL_COLUMNS,
     V1Dataset,
+    WalkForwardFold,
     build_category_vocabularies,
     build_sequence_feature_store,
     build_v1_dataset,
@@ -125,6 +126,14 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="Optional cap on walk-forward folds. Keeps the most recent folds.",
+    )
+    parser.add_argument(
+        "--walk-forward-anchor-last-oos",
+        action="store_true",
+        help=(
+            "Build a single walk-forward fold whose OOS block is the last available "
+            "anchor dates. Intended for fast recent-window model selection."
+        ),
     )
     parser.add_argument(
         "--walk-forward-purge-gap",
@@ -493,6 +502,21 @@ def _model_runtime_metadata(model: object) -> dict[str, object]:
         runtime["prefer_gpu"] = bool(getattr(model, "prefer_gpu"))
     if getattr(model, "gpu_fallback_error_", ""):
         runtime["gpu_fallback_error"] = str(getattr(model, "gpu_fallback_error_"))
+    for attr_name, runtime_key in (
+        ("best_epoch_", "best_epoch"),
+        ("max_epochs", "max_epochs"),
+        ("patience", "patience"),
+        ("batch_size", "batch_size"),
+        ("learning_rate", "learning_rate"),
+        ("best_iteration_", "best_iteration"),
+        ("n_estimators", "n_estimators"),
+    ):
+        if hasattr(model, attr_name):
+            value = getattr(model, attr_name)
+            if hasattr(value, "item"):
+                value = value.item()
+            if isinstance(value, (bool, int, float, str)):
+                runtime[runtime_key] = value
     return runtime
 
 
@@ -660,6 +684,67 @@ def _write_task_outputs(
         if predictions is not None:
             target_name = f"{prefix}oos_predictions.csv" if eval_mode == "walk_forward" else f"{prefix}val_test_predictions.csv"
             predictions.to_csv(output_dir / target_name, index=False)
+
+
+def _write_model_runtime_summary(
+    output_dir: Path,
+    *,
+    records: list[dict[str, object]],
+    leaderboards: dict[str, pd.DataFrame],
+) -> None:
+    rows: list[dict[str, object]] = []
+    leaderboard_columns = (
+        "leaderboard_rank",
+        "recommended",
+        "selection_score",
+        "mean_pr_auc",
+        "mean_top_decile_precision",
+        "mean_top_bottom_spread",
+        "mean_rank_ic",
+    )
+    runtime_columns = (
+        "best_epoch",
+        "max_epochs",
+        "patience",
+        "batch_size",
+        "learning_rate",
+        "best_iteration",
+        "n_estimators",
+        "requested_device",
+        "resolved_device",
+        "xgboost_device",
+        "prefer_gpu",
+    )
+    for record in records:
+        task_type = str(record.get("task_type") or "")
+        model_name = str(record.get("model_name") or "")
+        feature_set = str(record.get("feature_set") or "")
+        runtime = record.get("runtime")
+        runtime = runtime if isinstance(runtime, dict) else {}
+        row: dict[str, object] = {
+            "task_type": task_type,
+            "model_name": model_name,
+            "feature_set": feature_set,
+            "artifact_path": record.get("artifact_path"),
+            "input_layout": record.get("input_layout"),
+        }
+        for column in runtime_columns:
+            row[column] = runtime.get(column)
+        leaderboard = leaderboards.get(task_type)
+        if leaderboard is not None and not leaderboard.empty:
+            match = leaderboard[
+                (leaderboard["model_name"].astype(str) == model_name)
+                & (leaderboard["feature_set"].astype(str) == feature_set)
+            ]
+            if not match.empty:
+                match_row = match.iloc[0]
+                for column in leaderboard_columns:
+                    if column in match_row.index:
+                        value = match_row[column]
+                        row[column] = None if pd.isna(value) else value
+        rows.append(row)
+    if rows:
+        pd.DataFrame(rows).to_csv(output_dir / "model_training_runtime_summary.csv", index=False)
 
 
 def _safe_artifact_component(value: object) -> str:
@@ -957,6 +1042,40 @@ def _train_task_holdout(
     return trained_records
 
 
+def _build_last_oos_fold(
+    metadata: pd.DataFrame,
+    *,
+    min_train_dates: int,
+    val_block_size: int,
+    oos_block_size: int,
+    purge_gap: int,
+) -> list[WalkForwardFold]:
+    dates = sorted(metadata["anchor_date"].dropna().astype(str).unique().tolist())
+    oos_block_size = max(int(oos_block_size), 1)
+    val_block_size = max(int(val_block_size), 1)
+    purge_gap = max(int(purge_gap), 0)
+    if len(dates) < min_train_dates + val_block_size + purge_gap + oos_block_size:
+        return []
+    oos_start_idx = len(dates) - oos_block_size
+    eligible_dates = dates[: max(0, oos_start_idx - purge_gap)]
+    if len(eligible_dates) < min_train_dates + val_block_size:
+        return []
+    train_dates = tuple(eligible_dates[:-val_block_size])
+    val_dates = tuple(eligible_dates[-val_block_size:])
+    oos_dates = tuple(dates[oos_start_idx:])
+    if len(train_dates) < min_train_dates or len(val_dates) != val_block_size or len(oos_dates) != oos_block_size:
+        return []
+    return [
+        WalkForwardFold(
+            fold_id=0,
+            train_dates=train_dates,
+            val_dates=val_dates,
+            oos_dates=oos_dates,
+            purge_gap=purge_gap,
+        )
+    ]
+
+
 def _train_task_walk_forward(
     *,
     args: argparse.Namespace,
@@ -973,13 +1092,22 @@ def _train_task_walk_forward(
     sequence_stores: dict[str, object] | None = None,
 ) -> tuple[list[dict[str, object]], pd.DataFrame]:
     purge_gap = args.walk_forward_purge_gap or max(horizons)
-    folds = build_walk_forward_folds(
-        dataset.metadata,
-        min_train_dates=args.walk_forward_min_train_dates,
-        val_block_size=args.walk_forward_val_block_size,
-        oos_block_size=args.walk_forward_oos_block_size,
-        purge_gap=purge_gap,
-    )
+    if args.walk_forward_anchor_last_oos:
+        folds = _build_last_oos_fold(
+            dataset.metadata,
+            min_train_dates=args.walk_forward_min_train_dates,
+            val_block_size=args.walk_forward_val_block_size,
+            oos_block_size=args.walk_forward_oos_block_size,
+            purge_gap=purge_gap,
+        )
+    else:
+        folds = build_walk_forward_folds(
+            dataset.metadata,
+            min_train_dates=args.walk_forward_min_train_dates,
+            val_block_size=args.walk_forward_val_block_size,
+            oos_block_size=args.walk_forward_oos_block_size,
+            purge_gap=purge_gap,
+        )
     if not folds:
         raise SystemExit("No walk-forward folds available. Reduce min-train/val/oos settings or add more history.")
     if args.walk_forward_max_folds and args.walk_forward_max_folds > 0:
@@ -1466,6 +1594,7 @@ def main() -> None:
             "val_block_size": args.walk_forward_val_block_size,
             "oos_block_size": args.walk_forward_oos_block_size,
             "max_folds": args.walk_forward_max_folds or None,
+            "anchor_last_oos": bool(args.walk_forward_anchor_last_oos),
             "purge_gap": args.walk_forward_purge_gap or max(horizons),
             "final_stop_block_size": args.final_stop_block_size,
         }
@@ -1489,6 +1618,7 @@ def main() -> None:
     save_dataset_manifest(output_dir / "dataset_manifest.json", dataset_manifest)
 
     combined_records: list[dict[str, object]] = []
+    leaderboards_by_task: dict[str, pd.DataFrame] = {}
     regression_leaderboard = None
     for task_type in task_types:
         model_names = task_models[task_type]
@@ -1524,6 +1654,7 @@ def main() -> None:
                 sequence_stores=cached_sequence_stores,
             )
         combined_records.extend(task_records)
+        leaderboards_by_task[task_type] = leaderboard
         suffix = "regression" if task_type == "regression" else "classification"
         _write_model_index(
             output_dir / f"final_{suffix}_models.json",
@@ -1541,6 +1672,7 @@ def main() -> None:
             regression_leaderboard = leaderboard
     _write_model_index(output_dir / "final_models.json", generated_utc=generated_utc, eval_mode=args.eval_mode, records=combined_records)
     _write_model_index(output_dir / "trained_models.json", generated_utc=generated_utc, eval_mode=args.eval_mode, records=combined_records)
+    _write_model_runtime_summary(output_dir, records=combined_records, leaderboards=leaderboards_by_task)
 
     legacy_run_dir = Path(args.compare_against_run) if args.compare_against_run else None
     if legacy_run_dir and legacy_run_dir.exists() and regression_leaderboard is not None:

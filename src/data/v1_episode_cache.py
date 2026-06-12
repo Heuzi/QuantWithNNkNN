@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 import heapq
 import json
 import os
@@ -505,8 +506,37 @@ def _maintain_episode_heap(
             heapq.heapreplace(heap, item)
 
 
+def _stable_episode_score(*, date: str, ticker: str, row_count: int) -> int:
+    payload = f"{date}|{ticker.upper()}|{int(row_count)}".encode("utf-8")
+    return int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), byteorder="big", signed=False)
+
+
+def _maintain_episode_date_heaps(
+    heaps_by_date: dict[str, list[tuple[int, str, int]]],
+    rows: pd.DataFrame,
+    *,
+    max_episodes_per_anchor_date: int,
+) -> None:
+    limit = max(int(max_episodes_per_anchor_date), 1)
+    for row in rows[["date", "ticker", "window_row_count"]].itertuples(index=False):
+        date_value = str(row.date)
+        ticker = str(row.ticker).upper()
+        row_count = int(row.window_row_count)
+        score = _stable_episode_score(date=date_value, ticker=ticker, row_count=row_count)
+        item = (-score, ticker, row_count)
+        heap = heaps_by_date.setdefault(date_value, [])
+        if len(heap) < limit:
+            heapq.heappush(heap, item)
+        elif item[0] > heap[0][0]:
+            heapq.heapreplace(heap, item)
+
+
 def _selected_keys_from_heap(heap: list[tuple[str, str, int]]) -> set[tuple[str, int]]:
     return {(ticker, int(row_count)) for _, ticker, row_count in heap}
+
+
+def _selected_keys_from_date_heaps(heaps_by_date: dict[str, list[tuple[int, str, int]]]) -> set[tuple[str, int]]:
+    return {(ticker, int(row_count)) for heap in heaps_by_date.values() for _, ticker, row_count in heap}
 
 
 def _ensure_columns(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
@@ -521,6 +551,14 @@ def _row_from_frame(frame: pd.DataFrame, key: str, columns: Sequence[str]) -> np
     if key not in frame.index:
         return np.full(len(columns), np.nan, dtype=np.float32)
     return frame.loc[key, columns].to_numpy(dtype=np.float32, copy=True)
+
+
+def _rows_from_frame(frame: pd.DataFrame, keys: Sequence[str], columns: Sequence[str]) -> np.ndarray:
+    if not keys:
+        return np.empty((0, len(columns)), dtype=np.float32)
+    if frame.empty:
+        return np.full((len(keys), len(columns)), np.nan, dtype=np.float32)
+    return frame.reindex(index=list(keys), columns=list(columns)).to_numpy(dtype=np.float32, copy=True)
 
 
 def _fill_finite(values: np.ndarray) -> np.ndarray:
@@ -546,11 +584,21 @@ def _build_sequence_rows(
     sector_ticker = str(frame["sector_etf"].iloc[0] or "")
     sector = daily_by_ticker.get(sector_ticker, pd.DataFrame())
     dates = frame["date"].astype(str).tolist()
+    needs_market_context = any(
+        column.startswith("market_context_") or column == "market_context_missing" for column in feature_columns
+    )
+    needs_sector_context = any(
+        column.startswith("sector_context_") or column == "sector_context_missing" for column in feature_columns
+    )
     for prefix, context_frame, missing_name in (
-        ("market_context_", market, "market_context_missing"),
-        ("sector_context_", sector, "sector_context_missing"),
+        ("market_context_", market if needs_market_context else pd.DataFrame(), "market_context_missing"),
+        ("sector_context_", sector if needs_sector_context else pd.DataFrame(), "sector_context_missing"),
     ):
-        rows = np.vstack([_row_from_frame(context_frame, date, context_columns) for date in dates]) if len(dates) else np.empty((0, len(context_columns)))
+        if (prefix == "market_context_" and not needs_market_context) or (
+            prefix == "sector_context_" and not needs_sector_context
+        ):
+            continue
+        rows = _rows_from_frame(context_frame, dates, context_columns)
         missing = np.isnan(rows).all(axis=1).astype(np.float32) if len(rows) else np.empty(0, dtype=np.float32)
         for idx, column in enumerate(context_columns):
             values[f"{prefix}{column}"] = rows[:, idx].astype(np.float32)
@@ -753,6 +801,7 @@ def build_episode_cache(
     window_length: int = DEFAULT_WINDOW_LENGTH,
     benchmark_ticker: str = DEFAULT_BENCHMARK_TICKER,
     max_episodes: int | None = None,
+    max_episodes_per_anchor_date: int | None = None,
     classification_horizon: int = DEFAULT_CLASSIFICATION_HORIZON,
     classification_threshold: float = DEFAULT_CLASSIFICATION_THRESHOLD,
     classification_event_type: str = DEFAULT_CLASSIFICATION_EVENT_TYPE,
@@ -843,6 +892,7 @@ def build_episode_cache(
 
     start_time = time.monotonic()
     heap: list[tuple[str, str, int]] = []
+    heaps_by_date: dict[str, list[tuple[int, str, int]]] = {}
     stock_row_count = 0
     eligible_count = 0
     ticker_count = 0
@@ -896,9 +946,20 @@ def build_episode_cache(
             eligibility_enabled=eligibility_config is not None,
             research_enabled=research_config is not None,
         )
-        if max_episodes and max_episodes > 0:
+        if max_episodes_per_anchor_date and max_episodes_per_anchor_date > 0:
+            _maintain_episode_date_heaps(
+                heaps_by_date,
+                eligible,
+                max_episodes_per_anchor_date=max_episodes_per_anchor_date,
+            )
+        elif max_episodes and max_episodes > 0:
             _maintain_episode_heap(heap, eligible, max_episodes=max_episodes)
         if progress_every and ticker_count % progress_every == 0:
+            selected_count = (
+                sum(len(value) for value in heaps_by_date.values())
+                if max_episodes_per_anchor_date and max_episodes_per_anchor_date > 0
+                else len(heap) if max_episodes else None
+            )
             print(
                 json.dumps(
                     {
@@ -909,13 +970,22 @@ def build_episode_cache(
                         "unlabeled_missing_forward_window_rows": labeling_summary[
                             "unlabeled_missing_forward_window_rows"
                         ],
-                        "selected_heap_size": len(heap) if max_episodes else None,
+                        "selected_heap_size": selected_count,
+                        "selected_anchor_dates": len(heaps_by_date)
+                        if max_episodes_per_anchor_date and max_episodes_per_anchor_date > 0
+                        else None,
                         "elapsed_seconds": round(time.monotonic() - start_time, 1),
                     }
                 ),
                 flush=True,
             )
-    selected_keys = _selected_keys_from_heap(heap) if max_episodes and max_episodes > 0 else None
+    selected_keys = (
+        _selected_keys_from_date_heaps(heaps_by_date)
+        if max_episodes_per_anchor_date and max_episodes_per_anchor_date > 0
+        else _selected_keys_from_heap(heap)
+        if max_episodes and max_episodes > 0
+        else None
+    )
     episode_count = len(selected_keys) if selected_keys is not None else eligible_count
 
     tabular_arrays = {}
@@ -960,6 +1030,23 @@ def build_episode_cache(
         *RESEARCH_UNIVERSE_DIAGNOSTIC_COLUMNS,
     ]
     target_csv_columns = ["ticker", "anchor_date", *target_columns, *classification_columns]
+    tabular_stock_kinds = {
+        feature_set: _stock_columns_from_header(
+            header,
+            include_relative=("relative" in feature_set) or is_normalized_lean_feature_set(feature_set),
+            include_sentiment="sentiment" in feature_set,
+            include_fundamentals="fundamentals" in feature_set,
+            normalized_lean=is_normalized_lean_feature_set(feature_set),
+        )
+        for feature_set in tabular_sets
+    }
+    tabular_context_kinds = {
+        feature_set: _summary_columns(
+            "context_",
+            _context_columns_for_feature_set(context_columns, feature_set),
+        )
+        for feature_set in tabular_sets
+    }
     episode_idx = 0
     sequence_idx = 0
     ticker_offsets: dict[str, int] = {}
@@ -1012,9 +1099,10 @@ def build_episode_cache(
                     benchmark_ticker=benchmark_ticker,
                 )
                 sequence_arrays[feature_set][sequence_idx : sequence_idx + len(rows), :] = rows
-                sequence_dates[feature_set][sequence_idx : sequence_idx + len(rows)] = [
-                    _date_to_int(value) for value in with_targets["date"].astype(str)
-                ]
+                sequence_dates[feature_set][sequence_idx : sequence_idx + len(rows)] = pd.to_numeric(
+                    with_targets["date"].astype(str).str.replace("-", "", regex=False).str.slice(0, 8),
+                    errors="coerce",
+                ).fillna(0).astype(np.int32).to_numpy()
             eligible = _eligible_episode_rows(
                 with_targets,
                 horizons=horizons,
@@ -1033,23 +1121,6 @@ def build_episode_cache(
                     ]
                 ].reset_index(drop=True)
             if len(eligible):
-                tabular_stock_kinds = {
-                    feature_set: _stock_columns_from_header(
-                        header,
-                        include_relative=("relative" in feature_set) or is_normalized_lean_feature_set(feature_set),
-                        include_sentiment="sentiment" in feature_set,
-                        include_fundamentals="fundamentals" in feature_set,
-                        normalized_lean=is_normalized_lean_feature_set(feature_set),
-                    )
-                    for feature_set in tabular_sets
-                }
-                tabular_context_kinds = {
-                    feature_set: _summary_columns(
-                        "context_",
-                        _context_columns_for_feature_set(context_columns, feature_set),
-                    )
-                    for feature_set in tabular_sets
-                }
                 stock_summary_by_kind: dict[tuple[str, ...], pd.DataFrame] = {}
                 for columns in {tuple(value) for value in tabular_stock_kinds.values()}:
                     stock_summary_by_kind[columns] = add_window_summaries(
@@ -1155,6 +1226,10 @@ def build_episode_cache(
         "window_length": window_length,
         "benchmark_ticker": benchmark_ticker.upper(),
         "max_episodes": max_episodes,
+        "max_episodes_per_anchor_date": max_episodes_per_anchor_date,
+        "selected_anchor_date_count": len(heaps_by_date)
+        if max_episodes_per_anchor_date and max_episodes_per_anchor_date > 0
+        else None,
         "eligible_episode_count_before_cap": eligible_count,
         "episode_count": episode_idx,
         "stock_row_count": stock_row_count,
